@@ -1,0 +1,11 @@
+[workspace]
+members = [
+    "crates/*"
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Roland Tepp"]
+description = "A Java Language Server Protocol implementation in Rust"

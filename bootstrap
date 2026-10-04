@@ -1,0 +1,125 @@
+#!/bin/bash
+
+# 1. Create directory structure
+mkdir -p crates/java-analyzer/src
+mkdir -p crates/syntax/src
+mkdir -p crates/hir/src
+mkdir -p crates/ide/src
+mkdir -p docs/specs
+
+# 2. Setup Workspace Cargo.toml
+cat << 'EOF' > Cargo.toml
+[workspace]
+members = [
+    "crates/*"
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Roland Tepp"]
+description = "A Java Language Server Protocol implementation in Rust"
+EOF
+
+# 3. Setup sub-crates
+for crate in java-analyzer syntax hir ide; do
+cat << EOF > crates/$crate/Cargo.toml
+[package]
+name = "$crate"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+
+[dependencies]
+EOF
+cat << EOF > crates/$crate/src/lib.rs
+// $crate library stub
+EOF
+done
+
+# Replace lib.rs with main.rs for the LSP server binary
+rm crates/java-analyzer/src/lib.rs
+cat << 'EOF' > crates/java-analyzer/src/main.rs
+fn main() {
+    println!("Starting java-analyzer LSP server...");
+}
+EOF
+
+# 4. Create README.md
+cat << 'EOF' > README.md
+# Java Analyzer
+
+A Java Language Server Protocol (LSP) implementation written in Rust, heavily inspired by the architecture of `rust-analyzer`.
+
+## Architecture
+
+This project is split into several pure, decoupled crates to ensure fast, incremental analysis:
+- **`syntax`**: A lossless, error-resilient Java parser producing a Concrete Syntax Tree (CST) (intended to use `rowan`).
+- **`hir`**: High-level Intermediate Representation and semantic analysis powered by an incremental computation engine (intended to use `salsa`).
+- **`ide`**: Editor-centric features (completion, goto definition, hover).
+- **`java-analyzer`**: The stateful LSP server boundary handling IO, VFS (Virtual File System), and the language server protocol.
+
+## Development
+
+We follow a **Specification-Driven Bootstrapping Process**. Check `docs/specs/` for architectural guidelines and feature requirements before implementing.
+EOF
+
+# 5. Create AGENTS.md for AI instructions
+cat << 'EOF' > AGENTS.md
+# java-analyzer AI Agent Instructions
+
+You are working on `java-analyzer`, a Java Language Server Protocol (LSP) implementation in Rust, heavily inspired by `rust-analyzer`.
+
+## Core Principles
+1. **rust-analyzer Architecture:** We use a similar crate structure (`syntax`, `hir`, `ide`, `lsp-server`). We rely on incremental computation (like `salsa`) and lossless syntax trees (like `rowan`).
+2. **Specification-Driven Bootstrapping:**
+   - **Do not write code blindly.** Check `docs/specs/` for relevant specifications.
+   - If a feature is unspecified or the spec is incomplete, propose a spec update first.
+   - **Test-Driven:** Write failing tests based on the spec before implementing the code.
+   - Implement the minimum code required to pass the tests.
+3. **Immutability and Pure Functions:** Keep core analysis pure. Side effects and IO only belong in the `java-analyzer` LSP server boundary crate.
+
+## Workflow
+When tasked with a feature:
+1. **Read** the relevant specification in `docs/specs/`.
+2. **Write** or update tests in the appropriate crate (`crates/syntax`, etc.).
+3. **Implement** the feature to satisfy the tests.
+4. **Verify** by running `cargo test` and `cargo fmt`.
+EOF
+
+# 6. Create the first specification
+cat << 'EOF' > docs/specs/0001-bootstrapping-process.md
+# Spec 0001: Specification-Driven Bootstrapping
+
+## Motivation
+To ensure `java-analyzer` remains maintainable, scalable, and true to the `rust-analyzer` philosophy, all development must be guided by clear specifications.
+
+## Process
+
+### Phase 1: Define the Domain
+Before implementing a feature (e.g., parsing Java classes), a spec must be written defining:
+- The exact syntax rules (for `syntax`).
+- The semantic implications and data structures (for `hir`).
+- The expected IDE behavior (for `ide`).
+
+### Phase 2: Scaffold Tests
+Create test cases that reflect the specification.
+- For parsing: Write inline tests that take a Java source string and assert the resulting CST.
+- For IDE features: Write fixture-based tests demonstrating expected completions or hovers.
+
+### Phase 3: Implementation
+Implement the logic to satisfy the tests. Use the following tech stack guidelines:
+- **Parser**: Hand-written recursive descent parser for error resilience.
+- **Tree**: `rowan` for the Red/Green tree architecture.
+- **State**: `salsa` for query-based, incremental semantic analysis.
+- **LSP**: `lsp-types` and `lsp-server`.
+
+### Next Steps for Bootstrapping
+1. Integrate `rowan` into `crates/syntax` and define the basic Java token types.
+2. Implement a lexer for a small subset of Java (e.g., `class`, `{`, `}`).
+3. Integrate `salsa` into `crates/hir` and define the basic database trait.
+EOF
+
+echo "✨ Project java-analyzer successfully scaffolded!"
