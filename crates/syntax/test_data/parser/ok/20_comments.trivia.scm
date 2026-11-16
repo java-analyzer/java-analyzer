@@ -1,0 +1,27 @@
+(SOURCE_FILE
+  (BLOCK_COMMENT "/** Docs */")
+  (WHITESPACE "\n")
+  (CLASS_DECL
+    (MODIFIER_LIST (PUBLIC_KW "public"))
+    (WHITESPACE " ")
+    (CLASS_KW "class")
+    (WHITESPACE " ")
+    (NAME (IDENT "A"))
+    (WHITESPACE " ")
+    (CLASS_BODY
+      (L_CURLY "{")
+      (WHITESPACE "\n    ")
+      (LINE_COMMENT "// leading")
+      (WHITESPACE "\n    ")
+      (MEMBER_PLACEHOLDER
+        (INT_KW "int")
+        (WHITESPACE " ")
+        (IDENT "x")
+        (SEMICOLON ";"))
+      (WHITESPACE " ")
+      (LINE_COMMENT "// trailing")
+      (WHITESPACE "\n    ")
+      (BLOCK_COMMENT "/* block */")
+      (WHITESPACE "\n")
+      (R_CURLY "}")))
+  (WHITESPACE "\n"))

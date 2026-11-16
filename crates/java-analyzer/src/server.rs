@@ -5,13 +5,15 @@ use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestI
 use lsp_types::{
     notification::{
         DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
+        PublishDiagnostics,
     },
     request::{HoverRequest, Request as _},
-    Hover, HoverContents, HoverParams, HoverProviderCapability, MarkupContent, MarkupKind,
-    ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+    DiagnosticSeverity, Hover, HoverContents, HoverParams, HoverProviderCapability, MarkupContent,
+    MarkupKind, PublishDiagnosticsParams, ServerCapabilities, TextDocumentSyncCapability,
+    TextDocumentSyncKind, Url,
 };
 
-use crate::convert::position_to_offset;
+use crate::convert::{position_to_offset, text_range_to_range};
 
 type BoxError = Box<dyn Error + Sync + Send>;
 
@@ -31,12 +33,16 @@ impl GlobalState {
         }
     }
 
-    fn set_text(&mut self, uri: Url, text: String) {
-        let file_id = *self.files.entry(uri).or_insert_with(|| {
-            let id = FileId(self.next_file_id);
-            self.next_file_id += 1;
-            id
-        });
+    fn set_text(&mut self, uri: &Url, text: String) {
+        let file_id = match self.files.get(uri) {
+            Some(&id) => id,
+            None => {
+                let id = FileId(self.next_file_id);
+                self.next_file_id += 1;
+                self.files.insert(uri.clone(), id);
+                id
+            }
+        };
         self.db.set_file_text(file_id, Arc::new(text));
     }
 
@@ -44,6 +50,36 @@ impl GlobalState {
         if let Some(file_id) = self.files.remove(uri) {
             // Free the text; the FileId is never reused.
             self.db.set_file_text(file_id, Arc::new(String::new()));
+        }
+    }
+
+    fn diagnostics(&self, uri: &Url, version: Option<i32>) -> PublishDiagnosticsParams {
+        let diagnostics = match self.files.get(uri) {
+            Some(&file_id) => {
+                let text = self.db.file_text(file_id);
+                ide::diagnostics(&self.db, file_id)
+                    .into_iter()
+                    .map(|d| lsp_types::Diagnostic {
+                        range: text_range_to_range(
+                            &text,
+                            d.range.start().into(),
+                            d.range.end().into(),
+                        ),
+                        severity: Some(match d.severity {
+                            ide::Severity::Error => DiagnosticSeverity::ERROR,
+                        }),
+                        source: Some("java-analyzer".to_string()),
+                        message: d.message,
+                        ..Default::default()
+                    })
+                    .collect()
+            }
+            None => Vec::new(),
+        };
+        PublishDiagnosticsParams {
+            uri: uri.clone(),
+            diagnostics,
+            version,
         }
     }
 
@@ -85,7 +121,11 @@ pub fn run(connection: Connection) -> Result<(), BoxError> {
                 let response = handle_request(&state, req);
                 connection.sender.send(Message::Response(response))?;
             }
-            Message::Notification(not) => handle_notification(&mut state, not)?,
+            Message::Notification(not) => {
+                for outgoing in handle_notification(&mut state, not)? {
+                    connection.sender.send(Message::Notification(outgoing))?;
+                }
+            }
             Message::Response(_) => {}
         }
     }
@@ -115,25 +155,44 @@ where
         .map_err(|e| Response::new_err(id, ErrorCode::InvalidParams as i32, e.to_string()))
 }
 
-fn handle_notification(state: &mut GlobalState, not: Notification) -> Result<(), BoxError> {
+fn publish(params: PublishDiagnosticsParams) -> Result<Notification, BoxError> {
+    Ok(Notification::new(
+        PublishDiagnostics::METHOD.to_string(),
+        serde_json::to_value(params)?,
+    ))
+}
+
+/// Applies a notification to `state` and returns the notifications to send in response.
+fn handle_notification(
+    state: &mut GlobalState,
+    not: Notification,
+) -> Result<Vec<Notification>, BoxError> {
+    let mut outgoing = Vec::new();
     match not.method.as_str() {
         DidOpenTextDocument::METHOD => {
             let params: lsp_types::DidOpenTextDocumentParams = serde_json::from_value(not.params)?;
-            state.set_text(params.text_document.uri, params.text_document.text);
+            let doc = params.text_document;
+            state.set_text(&doc.uri, doc.text);
+            outgoing.push(publish(state.diagnostics(&doc.uri, Some(doc.version)))?);
         }
         DidChangeTextDocument::METHOD => {
             let params: lsp_types::DidChangeTextDocumentParams =
                 serde_json::from_value(not.params)?;
+            let doc = params.text_document;
             // We advertise FULL sync, so the last change holds the whole document.
             if let Some(change) = params.content_changes.into_iter().last() {
-                state.set_text(params.text_document.uri, change.text);
+                state.set_text(&doc.uri, change.text);
+                outgoing.push(publish(state.diagnostics(&doc.uri, Some(doc.version)))?);
             }
         }
         DidCloseTextDocument::METHOD => {
             let params: lsp_types::DidCloseTextDocumentParams = serde_json::from_value(not.params)?;
-            state.close(&params.text_document.uri);
+            let uri = params.text_document.uri;
+            state.close(&uri);
+            // A closed file has no diagnostics from us: clear whatever the client shows.
+            outgoing.push(publish(state.diagnostics(&uri, None))?);
         }
         _ => {}
     }
-    Ok(())
+    Ok(outgoing)
 }

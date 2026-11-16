@@ -1,4 +1,4 @@
-use lsp_types::Position;
+use lsp_types::{Position, Range};
 
 /// Converts an LSP position (line + UTF-16 code unit column) into a byte offset in `text`.
 ///
@@ -28,6 +28,33 @@ pub fn position_to_offset(text: &str, position: Position) -> Option<u32> {
     u32::try_from(line_start + byte_col).ok()
 }
 
+/// Converts a byte offset in `text` into an LSP position (line + UTF-16 code unit column).
+///
+/// An offset past the end of `text` is clamped to the end; an offset inside a multi-byte
+/// character is rounded down to the start of that character.
+pub fn offset_to_position(text: &str, offset: u32) -> Position {
+    let mut offset = (offset as usize).min(text.len());
+    while !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    let before = &text[..offset];
+    let line = before.matches('\n').count();
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    let character = before[line_start..].encode_utf16().count();
+    Position {
+        line: line as u32,
+        character: character as u32,
+    }
+}
+
+/// Converts a byte range in `text` into an LSP range.
+pub fn text_range_to_range(text: &str, start: u32, end: u32) -> Range {
+    Range {
+        start: offset_to_position(text, start),
+        end: offset_to_position(text, end),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -54,6 +81,41 @@ mod tests {
     #[test]
     fn line_out_of_range() {
         assert_eq!(position_to_offset("ab", pos(3, 0)), None);
+    }
+
+    #[test]
+    fn offset_to_position_on_first_and_later_lines() {
+        assert_eq!(offset_to_position("class A {\n}\n", 6), pos(0, 6));
+        assert_eq!(offset_to_position("class A {\n}\n", 10), pos(1, 0));
+        assert_eq!(offset_to_position("class A {\n}\n", 11), pos(1, 1));
+    }
+
+    #[test]
+    fn offset_to_position_counts_utf16_units() {
+        let text = "é😀x";
+        assert_eq!(offset_to_position(text, 2), pos(0, 1));
+        assert_eq!(offset_to_position(text, 6), pos(0, 3));
+        assert_eq!(offset_to_position(text, 7), pos(0, 4));
+    }
+
+    #[test]
+    fn offset_to_position_clamps_and_rounds() {
+        assert_eq!(offset_to_position("ab", 99), pos(0, 2));
+        // Offset 1 is inside the 2-byte 'é'.
+        assert_eq!(offset_to_position("éx", 1), pos(0, 0));
+    }
+
+    #[test]
+    fn offset_and_position_round_trip() {
+        let text = "class Ä {\n  😀 y;\n}\n";
+        for (offset, _) in text.char_indices() {
+            let position = offset_to_position(text, offset as u32);
+            assert_eq!(
+                position_to_offset(text, position),
+                Some(offset as u32),
+                "{offset}"
+            );
+        }
     }
 
     #[test]

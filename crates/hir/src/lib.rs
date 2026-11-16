@@ -1,5 +1,6 @@
 use std::sync::Arc;
-use syntax::{SyntaxNode, parser::parse as parse_syntax};
+
+use syntax::{Parse, SyntaxError, SyntaxNode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FileId(pub u32);
@@ -9,13 +10,26 @@ pub trait SourceDatabase: salsa::Database {
     #[salsa::input]
     fn file_text(&self, file_id: FileId) -> Arc<String>;
 
-    fn parse(&self, file_id: FileId) -> SyntaxNode;
+    /// The parse result of a file. Cheap to clone; recomputed only when the file text changes.
+    fn parse(&self, file_id: FileId) -> Parse;
+
+    /// Root of the syntax tree of a file.
+    fn syntax_tree(&self, file_id: FileId) -> SyntaxNode;
+
+    /// Lexical and syntax errors of a file, ordered by position.
+    fn syntax_errors(&self, file_id: FileId) -> Arc<Vec<SyntaxError>>;
 }
 
-fn parse(db: &dyn SourceDatabase, file_id: FileId) -> SyntaxNode {
-    let text = db.file_text(file_id);
-    let green = parse_syntax(&text);
-    SyntaxNode::new_root(green)
+fn parse(db: &dyn SourceDatabase, file_id: FileId) -> Parse {
+    syntax::parse(&db.file_text(file_id))
+}
+
+fn syntax_tree(db: &dyn SourceDatabase, file_id: FileId) -> SyntaxNode {
+    db.parse(file_id).syntax_node()
+}
+
+fn syntax_errors(db: &dyn SourceDatabase, file_id: FileId) -> Arc<Vec<SyntaxError>> {
+    Arc::new(db.parse(file_id).errors().to_vec())
 }
 
 #[salsa::database(SourceDatabaseStorage)]
@@ -31,15 +45,35 @@ mod tests {
     use super::*;
     use syntax::syntax_kind::SyntaxKind;
 
-    #[test]
-    fn test_database_parse() {
+    fn db_with(text: &str) -> (RootDatabase, FileId) {
         let mut db = RootDatabase::default();
         let file_id = FileId(1);
-        let text = Arc::new("class Main {}".to_string());
+        db.set_file_text(file_id, Arc::new(text.to_string()));
+        (db, file_id)
+    }
 
-        db.set_file_text(file_id, text);
+    #[test]
+    fn syntax_tree_of_a_file() {
+        let (db, file_id) = db_with("class Main {}");
+        assert_eq!(db.syntax_tree(file_id).kind(), SyntaxKind::SOURCE_FILE);
+        assert!(db.syntax_errors(file_id).is_empty());
+    }
 
-        let syntax_node = db.parse(file_id);
-        assert_eq!(syntax_node.kind(), SyntaxKind::SOURCE_FILE);
+    #[test]
+    fn syntax_errors_of_a_broken_file() {
+        let (db, file_id) = db_with("class Main {");
+        let errors = db.syntax_errors(file_id);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].message, "expected '}'");
+    }
+
+    #[test]
+    fn results_follow_text_changes() {
+        let (mut db, file_id) = db_with("class Main {");
+        assert_eq!(db.syntax_errors(file_id).len(), 1);
+
+        db.set_file_text(file_id, Arc::new("class Main {}".to_string()));
+        assert!(db.syntax_errors(file_id).is_empty());
     }
 }
+

@@ -13,12 +13,18 @@
 //!
 //! Run with `UPDATE_EXPECT=1` to rewrite the expected sections from the actual output.
 
+#![allow(dead_code)] // shared by several test crates, each using a subset
+
+pub mod sexp;
+
 use std::{
+    collections::BTreeSet,
     fmt::Write as _,
     fs,
     path::{Path, PathBuf},
 };
 
+use sexp::Sexp;
 use similar::TextDiff;
 
 #[derive(Debug)]
@@ -84,9 +90,11 @@ pub fn parse_cases(text: &str) -> Result<Vec<Case>, String> {
         let mut source = String::new();
         let options = loop {
             match lines.get(i) {
-                None => return Err(format!(
+                None => {
+                    return Err(format!(
                     "case {title:?} (line {header_line}): missing '---' separator after the source"
-                )),
+                ))
+                }
                 Some(l) if is_separator(l) => {
                     i += 1;
                     break l
@@ -147,6 +155,21 @@ fn render_file(cases: &[Case], actual: &[Vec<String>]) -> String {
     out
 }
 
+/// Loads every case of every fixture file under `test_data/<phase>`, with the file name.
+pub fn load_cases(phase: &str) -> Vec<(String, Case)> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("test_data")
+        .join(phase);
+    let mut all = Vec::new();
+    for path in fixture_files(&dir) {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {name}: {e}"));
+        let cases = parse_cases(&text).unwrap_or_else(|e| panic!("{name}: malformed fixture: {e}"));
+        all.extend(cases.into_iter().map(|case| (name.clone(), case)));
+    }
+    all
+}
+
 fn fixture_files(dir: &Path) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("cannot read fixture directory {}: {e}", dir.display()))
@@ -191,6 +214,19 @@ pub fn run_fixtures(phase: &str, render: impl Fn(&Case) -> Vec<String>) {
         case_count += cases.len();
 
         if update {
+            // `!!` lines report violated invariants; they must never be baked into a fixture.
+            let violated: Vec<&str> = cases
+                .iter()
+                .zip(&actual)
+                .filter(|(_, lines)| lines.iter().any(|l| l.starts_with("!!")))
+                .map(|(case, _)| case.title.as_str())
+                .collect();
+            if !violated.is_empty() {
+                failures.push(format!(
+                    "{name}: refusing to update, invariants violated in case(s): {violated:?}"
+                ));
+                continue;
+            }
             let new_text = render_file(&cases, &actual);
             if new_text != text {
                 fs::write(path, new_text).unwrap_or_else(|e| panic!("cannot write {name}: {e}"));
@@ -218,6 +254,182 @@ pub fn run_fixtures(phase: &str, render: impl Fn(&Case) -> Vec<String>) {
     if !failures.is_empty() {
         panic!(
             "{} of {case_count} fixture case(s) failed \
+             (re-run with UPDATE_EXPECT=1 to regenerate after reviewing):\n\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+}
+
+// ---- Paired fixtures: `name.java` + `name.scm` ----
+
+/// One paired fixture: a Java source file and the expected tree next to it.
+#[derive(Debug)]
+pub struct PairCase {
+    /// File stem, e.g. `01_package`.
+    pub name: String,
+    pub source: String,
+    /// True when the expected file is `name.trivia.scm`: whitespace and comments are included
+    /// in the expected tree.
+    pub include_trivia: bool,
+}
+
+struct PairFiles {
+    stem: String,
+    java: PathBuf,
+    expected: Option<PathBuf>,
+    include_trivia: bool,
+}
+
+/// Matches `.java` files with their `.scm` / `.trivia.scm` partners. The second result lists
+/// structural problems (orphans, ambiguous partners).
+fn discover_pairs(dir: &Path) -> (Vec<PairFiles>, Vec<String>) {
+    let names: BTreeSet<String> = fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("cannot read fixture directory {}: {e}", dir.display()))
+        .map(|entry| {
+            entry
+                .expect("readable directory entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+
+    let mut pairs = Vec::new();
+    let mut problems = Vec::new();
+    for name in &names {
+        if let Some(stem) = name.strip_suffix(".java") {
+            let plain = format!("{stem}.scm");
+            let trivia = format!("{stem}.trivia.scm");
+            let (expected, include_trivia) = match (names.contains(&plain), names.contains(&trivia))
+            {
+                (true, true) => {
+                    problems.push(format!("{stem}: both {plain} and {trivia} exist"));
+                    continue;
+                }
+                (true, false) => (Some(dir.join(&plain)), false),
+                (false, true) => (Some(dir.join(&trivia)), true),
+                (false, false) => (None, false),
+            };
+            pairs.push(PairFiles {
+                stem: stem.to_string(),
+                java: dir.join(name),
+                expected,
+                include_trivia,
+            });
+        } else if let Some(stem) = name
+            .strip_suffix(".trivia.scm")
+            .or_else(|| name.strip_suffix(".scm"))
+        {
+            if !names.contains(&format!("{stem}.java")) {
+                problems.push(format!("{name}: there is no matching {stem}.java"));
+            }
+        } else {
+            problems.push(format!(
+                "{name}: unexpected file (fixtures are .java and .scm pairs)"
+            ));
+        }
+    }
+    (pairs, problems)
+}
+
+fn read_pair_source(pair: &PairFiles) -> PairCase {
+    let source = fs::read_to_string(&pair.java)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", pair.java.display()));
+    PairCase {
+        name: pair.stem.clone(),
+        source,
+        include_trivia: pair.include_trivia,
+    }
+}
+
+/// Loads the sources of every pair under `test_data/<phase>`.
+pub fn load_pairs(phase: &str) -> Vec<PairCase> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("test_data")
+        .join(phase);
+    let (pairs, problems) = discover_pairs(&dir);
+    assert!(
+        problems.is_empty(),
+        "malformed fixture directory: {problems:?}"
+    );
+    pairs.iter().map(read_pair_source).collect()
+}
+
+fn is_violation(form: &Sexp) -> bool {
+    matches!(form, Sexp::List(items) if matches!(items.first(), Some(Sexp::Atom(a)) if a == "!!"))
+}
+
+/// Runs every `name.java` / `name.scm` pair under `test_data/<phase>`.
+///
+/// `render` turns a case into the S-expression forms that are compared with the expected file.
+/// Both sides are compared in canonical printed form, so hand-written expectations may be laid
+/// out freely. A form of the shape `(!! "message")` reports a violated invariant: it never
+/// matches and is never written by `UPDATE_EXPECT=1`.
+pub fn run_pair_fixtures(phase: &str, render: impl Fn(&PairCase) -> Vec<Sexp>) {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("test_data")
+        .join(phase);
+    let update = std::env::var_os("UPDATE_EXPECT").is_some();
+    let (pairs, mut failures) = discover_pairs(&dir);
+    assert!(!pairs.is_empty(), "no fixtures found in {}", dir.display());
+    let count = pairs.len();
+
+    for pair in &pairs {
+        let case = read_pair_source(pair);
+        let forms = render(&case);
+        let actual = format!("{}\n", sexp::print_all(&forms));
+        let stem = &pair.stem;
+
+        if update {
+            if forms.iter().any(is_violation) {
+                failures.push(format!(
+                    "{stem}: refusing to update, an invariant is violated"
+                ));
+                continue;
+            }
+            let path = pair
+                .expected
+                .clone()
+                .unwrap_or_else(|| dir.join(format!("{stem}.scm")));
+            if fs::read_to_string(&path).ok().as_deref() != Some(actual.as_str()) {
+                fs::write(&path, &actual)
+                    .unwrap_or_else(|e| panic!("cannot write {}: {e}", path.display()));
+                eprintln!("updated {}", path.display());
+            }
+            continue;
+        }
+
+        let Some(path) = &pair.expected else {
+            failures.push(format!(
+                "{stem}.java has no expected tree: create {stem}.scm (or run with UPDATE_EXPECT=1 and review it)"
+            ));
+            continue;
+        };
+        let text = fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let expected = match sexp::parse_all(&text) {
+            Ok(forms) => format!("{}\n", sexp::print_all(&forms)),
+            Err(e) => {
+                failures.push(format!("{}: malformed S-expression: {e}", path.display()));
+                continue;
+            }
+        };
+        if expected != actual {
+            let diff = TextDiff::from_lines(&expected, &actual)
+                .unified_diff()
+                .header("expected", "actual")
+                .to_string();
+            failures.push(format!(
+                "{stem}.java does not match {}\n{diff}",
+                path.display()
+            ));
+        }
+    }
+
+    if !failures.is_empty() {
+        panic!(
+            "{} problem(s) in {count} fixture(s) of `{phase}` \
              (re-run with UPDATE_EXPECT=1 to regenerate after reviewing):\n\n{}",
             failures.len(),
             failures.join("\n")

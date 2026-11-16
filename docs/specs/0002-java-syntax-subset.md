@@ -182,9 +182,10 @@ General rules:
 
 1. **Never drop tokens**: unplaceable tokens are wrapped in an `ERROR` node (or attached
    as-is) so the tree stays lossless.
-2. `expect(kind)` that fails records an error at the *next* token's start (zero-width range
-   at the end of the previous non-trivia token when the next token is on a later line) and
-   does **not** consume anything.
+2. `expect(kind)` that fails records a *missing* error as a zero-width range at the end of the
+   previous non-trivia token (where the missing token would be typed), and does **not**
+   consume anything. *Unexpected* tokens are reported on the range of the token that is
+   about to be skipped.
 3. Each list/block parser has a **recovery set**: tokens at which it stops consuming
    unexpected input and returns to the caller. Initial sets:
    - Member level (inside class body): `}`, modifiers, `class`, `interface`, `enum`,
@@ -213,8 +214,16 @@ Lexer: everything in the "Lexer" section above.
 
 Parser nodes: `SOURCE_FILE`, `PACKAGE_DECL`, `IMPORT_DECL`, `NAME`, `NAME_REF`, `PATH`,
 `MODIFIER_LIST`, `ANNOTATION` (name + optional unparsed balanced `( ... )` as
-`ANNOTATION_ARGS`), `CLASS_DECL`, `INTERFACE_DECL`, `ENUM_DECL`, `RECORD_DECL`,
-`ANNOTATION_TYPE_DECL`, `CLASS_BODY` (with `{ }` and recovery), and `ERROR`.
+`ANNOTATION_ARGS`), `CLASS_DECL`, `INTERFACE_DECL`, `ENUM_DECL`, `RECORD_DECL` (components as
+an unparsed balanced `RECORD_COMPONENT_LIST`), `ANNOTATION_TYPE_DECL`, `CLASS_BODY` (with
+`{ }` and recovery), `EXTENDS_CLAUSE`, `IMPLEMENTS_CLAUSE`, `PERMITS_CLAUSE`,
+`MEMBER_PLACEHOLDER`, `ERROR`, and the minimal type syntax that declaration headers need,
+pulled forward from M2: `TYPE_PARAMS`, `TYPE_PARAM`, `TYPE_ARGS`, `PATH_TYPE`,
+`PRIMITIVE_TYPE`, `ARRAY_TYPE`, `WILDCARD_TYPE`.
+
+`EOF` is a parser-only pseudo token kind and never appears in a tree. Modifier lists live
+inside the declaration node they belong to, and `sealed` / `permits` / `record` stay `IDENT`
+tokens in the tree (only `non-sealed` becomes a composite `NON_SEALED_KW`).
 
 Grammar (informal; `?` optional, `*` repetition):
 
@@ -228,9 +237,12 @@ InterfaceDecl   = 'interface' Name TypeParams? ('extends' TypeList)? ('permits' 
 Modifiers       = (Annotation | modifier-keyword | 'sealed' | 'non-sealed')*
 ```
 
-Member bodies in M1 are parsed *shallowly*: each member is consumed as a balanced run of
-tokens until a `;` at depth 0 or a balanced `{ ... }` block, wrapped in a `MEMBER_PLACEHOLDER`
-node. This keeps top-level structure correct and recovery sound while M2 is built.
+Member bodies in M1 are parsed *shallowly*: each member is consumed as a run of tokens up to
+and including a `;` outside braces, or a braced block that is not an initializer (a `{ ... }`
+after `=` keeps going to the `;`), wrapped in a `MEMBER_PLACEHOLDER` node with its modifiers.
+Nested type declarations are real nodes. Enum constants are placeholders too, and the
+missing-`;` error is suppressed in enum bodies. This keeps the declaration structure correct
+and recovery sound while M2 is built.
 
 Acceptance:
 - All fixtures in `crates/syntax/test_data/ok/m1/*.java` parse with zero errors.
@@ -290,9 +302,34 @@ type annotations.
 
 ## Test strategy
 
-1. **Text fixtures (the main corpus)**, modelled on the sibling `bourbon-lang` scanner tests.
-   Fixtures live in `crates/syntax/test_data/<phase>/*.txt` (`lexer/`, later `parser/ok/` and
-   `parser/err/`). A fixture file holds one or more cases:
+1. **Text fixtures (the main corpus)**, inspired by the sibling `bourbon-lang` scanner tests.
+   Two layouts exist, one per phase. Both are regenerated with `UPDATE_EXPECT=1` and the diff
+   is reviewed like a snapshot, and both collect every mismatch and report each as a unified
+   diff, so one failing fixture does not hide the others.
+
+   **Parser fixtures** are *pairs of files* in `crates/syntax/test_data/parser/{ok,err}/`:
+
+   - `name.java` is the source, verbatim (any file name stem; numeric prefixes keep order).
+   - `name.scm` is the expected tree as an S-expression (Scheme syntax, hence the extension).
+     `name.trivia.scm` instead means whitespace and comments are part of the expected tree;
+     without it they are omitted from the expectation (the lossless invariant still covers
+     them).
+   - Nodes are `(KIND child...)` and tokens are `(KIND "text")`, with text in Rust `{:?}`
+     escaping. `;` starts a comment, which is allowed in hand-written files but discarded when
+     regenerating.
+   - A trailing `(errors (error "message" "line:col..line:col") ...)` form lists every lexical
+     and syntax error with its range (1-based; columns count `char`s). No such form means no
+     errors.
+   - `ok/` fixtures must parse without errors and `err/` fixtures must produce at least one.
+   - Expected files are compared in canonical printed form, so hand-written files may be laid
+     out freely. Lists with at most one nested list child stay on one line when regenerated.
+   - A form `(!! "message")` is how the harness reports a violated invariant. It never
+     matches and is never written by `UPDATE_EXPECT=1`.
+   - A `.java` file without an expected file, or an expected file without a `.java` file, is a
+     failure.
+
+   **Lexer fixtures** are text files in `crates/syntax/test_data/lexer/*.txt`, because lexer
+   cases are tiny and many fit one file. A file holds one or more cases:
 
    ```
    =====
@@ -313,15 +350,9 @@ type annotations.
    - **Lexer output** is one line per token, `KIND "lexeme" @ line:col` (1-based line,
      1-based column counted in `char`s, lexeme in Rust `{:?}` escaping), followed directly by
      `error: <message> @ line:col` for any lexical error starting at that token.
-   - **Parser output** (M1 onwards) is the indented CST with `@ range` omitted, followed by
-     one `error: <message> @ line:col` line per syntax error.
    - Unlike bourbon, expectations carry no line-synchronised `---` markers and are
-     **generated, not hand-aligned**: running the tests with `UPDATE_EXPECT=1` rewrites the
-     expected sections, and the diff is reviewed like a snapshot. Expected sections must not
-     contain comments (they are discarded on update).
-   - A single test per phase walks the directory, collects every mismatch and reports each
-     as a unified diff naming the file, case title and line, so one failing fixture does not
-     hide the others.
+     **generated, not hand-aligned**. Expected sections must not contain comments (they are
+     discarded on update).
 2. **Inline unit tests** for properties that are awkward in fixtures (e.g. `>` never combining
    with a following `>`/`=`, losslessness on arbitrary input), plus small `expect-test`
    snapshots (`check(src, expect![[...]])` style) where a fixture would be overkill.
@@ -331,8 +362,10 @@ type annotations.
    - Roundtrip: `SyntaxNode::new_root(green).text() == input`.
    - No panic and termination (with a step budget).
    - Every `ERROR` node is non-empty, or accompanied by a recorded error.
-5. **Fuzz-ish property test** (`proptest` or a seeded loop, no nightly): random truncations,
-   deletions and insertions of fixture text must satisfy the invariants.
+5. **Fuzz-ish property tests** (a seeded loop, no extra dependencies, no nightly): every prefix,
+   every suffix and every single-character deletion of every parser fixture source, plus
+   thousands of generated fragment soups, must satisfy the invariants and error-range sanity
+   (ordered, in bounds, on `char` boundaries).
 6. **Real-world smoke test** (opt-in, not in default CI): parse a local JDK `src.zip` or any
    configured Java source tree and report files with errors; used to track grammar coverage
    from M2 on. Valid JDK sources should parse with zero syntax errors by the end of M3.

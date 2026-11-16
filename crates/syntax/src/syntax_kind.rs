@@ -137,9 +137,46 @@ pub enum SyntaxKind {
     // ---- Token or node: input the parser could not place ----
     ERROR,
 
-    // ---- Nodes ----
+    /// Parser-only pseudo token meaning "past the end of input". Never appears in a tree.
+    EOF,
+
+    // ---- Nodes: compilation unit ----
     SOURCE_FILE,
+    PACKAGE_DECL,
+    IMPORT_DECL,
+
+    // ---- Nodes: names and paths ----
+    NAME,
+    NAME_REF,
+    PATH,
+
+    // ---- Nodes: modifiers and annotations ----
+    MODIFIER_LIST,
+    ANNOTATION,
+    ANNOTATION_ARGS,
+
+    // ---- Nodes: type declarations ----
     CLASS_DECL,
+    INTERFACE_DECL,
+    ENUM_DECL,
+    RECORD_DECL,
+    ANNOTATION_TYPE_DECL,
+    CLASS_BODY,
+    RECORD_COMPONENT_LIST,
+    EXTENDS_CLAUSE,
+    IMPLEMENTS_CLAUSE,
+    PERMITS_CLAUSE,
+    /// A class member that is not parsed in detail yet (replaced by real member nodes in M2).
+    MEMBER_PLACEHOLDER,
+
+    // ---- Nodes: types ----
+    TYPE_PARAMS,
+    TYPE_PARAM,
+    TYPE_ARGS,
+    PATH_TYPE,
+    PRIMITIVE_TYPE,
+    ARRAY_TYPE,
+    WILDCARD_TYPE,
 
     #[doc(hidden)]
     __LAST,
