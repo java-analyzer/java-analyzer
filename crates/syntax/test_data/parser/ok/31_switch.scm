@@ -18,20 +18,21 @@
           (SWITCH_STMT
             (SWITCH_KW "switch")
             (L_PAREN "(")
-            (EXPR_PLACEHOLDER (IDENT "x"))
+            (NAME_REF_EXPR (NAME_REF (IDENT "x")))
             (R_PAREN ")")
             (SWITCH_BODY
               (L_CURLY "{")
               (SWITCH_CASE
                 (SWITCH_LABEL
                   (CASE_KW "case")
-                  (EXPR_PLACEHOLDER (INT_NUMBER "1"))
+                  (LITERAL (INT_NUMBER "1"))
                   (COLON ":"))
                 (EXPR_STMT
-                  (EXPR_PLACEHOLDER
-                    (IDENT "a")
-                    (L_PAREN "(")
-                    (R_PAREN ")"))
+                  (CALL_EXPR
+                    (NAME_REF_EXPR (NAME_REF (IDENT "a")))
+                    (ARG_LIST
+                      (L_PAREN "(")
+                      (R_PAREN ")")))
                   (SEMICOLON ";"))
                 (BREAK_STMT
                   (BREAK_KW "break")
@@ -39,20 +40,21 @@
               (SWITCH_CASE
                 (SWITCH_LABEL
                   (CASE_KW "case")
-                  (EXPR_PLACEHOLDER (INT_NUMBER "2"))
+                  (LITERAL (INT_NUMBER "2"))
                   (COLON ":")))
               (SWITCH_CASE
                 (SWITCH_LABEL
                   (CASE_KW "case")
-                  (EXPR_PLACEHOLDER (INT_NUMBER "3"))
+                  (LITERAL (INT_NUMBER "3"))
                   (COLON ":"))
                 (BLOCK
                   (L_CURLY "{")
                   (EXPR_STMT
-                    (EXPR_PLACEHOLDER
-                      (IDENT "b")
-                      (L_PAREN "(")
-                      (R_PAREN ")"))
+                    (CALL_EXPR
+                      (NAME_REF_EXPR (NAME_REF (IDENT "b")))
+                      (ARG_LIST
+                        (L_PAREN "(")
+                        (R_PAREN ")")))
                     (SEMICOLON ";"))
                   (R_CURLY "}")))
               (SWITCH_CASE
@@ -60,82 +62,86 @@
                   (DEFAULT_KW "default")
                   (COLON ":"))
                 (EXPR_STMT
-                  (EXPR_PLACEHOLDER
-                    (IDENT "c")
-                    (L_PAREN "(")
-                    (R_PAREN ")"))
+                  (CALL_EXPR
+                    (NAME_REF_EXPR (NAME_REF (IDENT "c")))
+                    (ARG_LIST
+                      (L_PAREN "(")
+                      (R_PAREN ")")))
                   (SEMICOLON ";")))
               (R_CURLY "}")))
           (SWITCH_STMT
             (SWITCH_KW "switch")
             (L_PAREN "(")
-            (EXPR_PLACEHOLDER (IDENT "x"))
+            (NAME_REF_EXPR (NAME_REF (IDENT "x")))
             (R_PAREN ")")
             (SWITCH_BODY
               (L_CURLY "{")
               (SWITCH_CASE
                 (SWITCH_LABEL
                   (CASE_KW "case")
-                  (EXPR_PLACEHOLDER
-                    (INT_NUMBER "1")
-                    (COMMA ",")
-                    (INT_NUMBER "2"))
+                  (LITERAL (INT_NUMBER "1"))
+                  (COMMA ",")
+                  (LITERAL (INT_NUMBER "2"))
                   (ARROW "->"))
                 (EXPR_STMT
-                  (EXPR_PLACEHOLDER
-                    (IDENT "a")
-                    (L_PAREN "(")
-                    (R_PAREN ")"))
+                  (CALL_EXPR
+                    (NAME_REF_EXPR (NAME_REF (IDENT "a")))
+                    (ARG_LIST
+                      (L_PAREN "(")
+                      (R_PAREN ")")))
                   (SEMICOLON ";")))
               (SWITCH_CASE
                 (SWITCH_LABEL
                   (CASE_KW "case")
-                  (EXPR_PLACEHOLDER (INT_NUMBER "3"))
+                  (LITERAL (INT_NUMBER "3"))
                   (ARROW "->"))
                 (BLOCK
                   (L_CURLY "{")
                   (EXPR_STMT
-                    (EXPR_PLACEHOLDER
-                      (IDENT "b")
-                      (L_PAREN "(")
-                      (R_PAREN ")"))
+                    (CALL_EXPR
+                      (NAME_REF_EXPR (NAME_REF (IDENT "b")))
+                      (ARG_LIST
+                        (L_PAREN "(")
+                        (R_PAREN ")")))
                     (SEMICOLON ";"))
                   (R_CURLY "}")))
               (SWITCH_CASE
                 (SWITCH_LABEL
                   (CASE_KW "case")
-                  (EXPR_PLACEHOLDER (INT_NUMBER "4"))
+                  (LITERAL (INT_NUMBER "4"))
                   (ARROW "->"))
                 (THROW_STMT
                   (THROW_KW "throw")
-                  (EXPR_PLACEHOLDER
+                  (NEW_EXPR
                     (NEW_KW "new")
-                    (IDENT "X")
-                    (L_PAREN "(")
-                    (R_PAREN ")"))
+                    (PATH_TYPE (NAME_REF (IDENT "X")))
+                    (ARG_LIST
+                      (L_PAREN "(")
+                      (R_PAREN ")")))
                   (SEMICOLON ";")))
               (SWITCH_CASE
                 (SWITCH_LABEL
                   (DEFAULT_KW "default")
                   (ARROW "->"))
                 (EXPR_STMT
-                  (EXPR_PLACEHOLDER
-                    (IDENT "c")
-                    (L_PAREN "(")
-                    (R_PAREN ")"))
+                  (CALL_EXPR
+                    (NAME_REF_EXPR (NAME_REF (IDENT "c")))
+                    (ARG_LIST
+                      (L_PAREN "(")
+                      (R_PAREN ")")))
                   (SEMICOLON ";")))
               (R_CURLY "}")))
           (SWITCH_STMT
             (SWITCH_KW "switch")
             (L_PAREN "(")
-            (EXPR_PLACEHOLDER (IDENT "s"))
+            (NAME_REF_EXPR (NAME_REF (IDENT "s")))
             (R_PAREN ")")
             (SWITCH_BODY
               (L_CURLY "{")
               (SWITCH_CASE
                 (SWITCH_LABEL
                   (CASE_KW "case")
-                  (EXPR_PLACEHOLDER (STRING_LITERAL "\"a\""))
+                  (LITERAL (STRING_LITERAL "\"a\""))
                   (COLON ":"))
                 (RETURN_STMT
                   (RETURN_KW "return")
@@ -143,10 +149,9 @@
               (SWITCH_CASE
                 (SWITCH_LABEL
                   (CASE_KW "case")
-                  (EXPR_PLACEHOLDER
-                    (NULL_KW "null")
-                    (COMMA ",")
-                    (DEFAULT_KW "default"))
+                  (LITERAL (NULL_KW "null"))
+                  (COMMA ",")
+                  (DEFAULT_KW "default")
                   (COLON ":"))
                 (BREAK_STMT
                   (BREAK_KW "break")
@@ -155,51 +160,58 @@
           (SWITCH_STMT
             (SWITCH_KW "switch")
             (L_PAREN "(")
-            (EXPR_PLACEHOLDER (IDENT "o"))
+            (NAME_REF_EXPR (NAME_REF (IDENT "o")))
             (R_PAREN ")")
             (SWITCH_BODY
               (L_CURLY "{")
               (SWITCH_CASE
                 (SWITCH_LABEL
                   (CASE_KW "case")
-                  (EXPR_PLACEHOLDER
-                    (IDENT "Foo")
-                    (IDENT "f")
+                  (TYPE_PATTERN
+                    (PATH_TYPE (NAME_REF (IDENT "Foo")))
+                    (NAME (IDENT "f")))
+                  (GUARD
                     (IDENT "when")
-                    (IDENT "f")
-                    (DOT ".")
-                    (IDENT "x")
-                    (R_ANGLE ">")
-                    (INT_NUMBER "0"))
+                    (BINARY_EXPR
+                      (FIELD_ACCESS_EXPR
+                        (NAME_REF_EXPR (NAME_REF (IDENT "f")))
+                        (DOT ".")
+                        (NAME_REF (IDENT "x")))
+                      (R_ANGLE ">")
+                      (LITERAL (INT_NUMBER "0"))))
                   (ARROW "->"))
                 (EXPR_STMT
-                  (EXPR_PLACEHOLDER
-                    (IDENT "use")
-                    (L_PAREN "(")
-                    (IDENT "f")
-                    (R_PAREN ")"))
+                  (CALL_EXPR
+                    (NAME_REF_EXPR (NAME_REF (IDENT "use")))
+                    (ARG_LIST
+                      (L_PAREN "(")
+                      (NAME_REF_EXPR (NAME_REF (IDENT "f")))
+                      (R_PAREN ")")))
                   (SEMICOLON ";")))
               (SWITCH_CASE
                 (SWITCH_LABEL
                   (CASE_KW "case")
-                  (EXPR_PLACEHOLDER
-                    (IDENT "Bar")
+                  (RECORD_PATTERN
+                    (PATH_TYPE (NAME_REF (IDENT "Bar")))
                     (L_PAREN "(")
-                    (INT_KW "int")
-                    (IDENT "a")
+                    (TYPE_PATTERN
+                      (PRIMITIVE_TYPE (INT_KW "int"))
+                      (NAME (IDENT "a")))
                     (COMMA ",")
-                    (INT_KW "int")
-                    (IDENT "b")
+                    (TYPE_PATTERN
+                      (PRIMITIVE_TYPE (INT_KW "int"))
+                      (NAME (IDENT "b")))
                     (R_PAREN ")"))
                   (ARROW "->"))
                 (EXPR_STMT
-                  (EXPR_PLACEHOLDER
-                    (IDENT "use")
-                    (L_PAREN "(")
-                    (IDENT "a")
-                    (COMMA ",")
-                    (IDENT "b")
-                    (R_PAREN ")"))
+                  (CALL_EXPR
+                    (NAME_REF_EXPR (NAME_REF (IDENT "use")))
+                    (ARG_LIST
+                      (L_PAREN "(")
+                      (NAME_REF_EXPR (NAME_REF (IDENT "a")))
+                      (COMMA ",")
+                      (NAME_REF_EXPR (NAME_REF (IDENT "b")))
+                      (R_PAREN ")")))
                   (SEMICOLON ";")))
               (SWITCH_CASE
                 (SWITCH_LABEL
@@ -212,7 +224,7 @@
           (SWITCH_STMT
             (SWITCH_KW "switch")
             (L_PAREN "(")
-            (EXPR_PLACEHOLDER (IDENT "x"))
+            (NAME_REF_EXPR (NAME_REF (IDENT "x")))
             (R_PAREN ")")
             (SWITCH_BODY
               (L_CURLY "{")
@@ -220,24 +232,25 @@
           (SWITCH_STMT
             (SWITCH_KW "switch")
             (L_PAREN "(")
-            (EXPR_PLACEHOLDER (IDENT "c"))
+            (NAME_REF_EXPR (NAME_REF (IDENT "c")))
             (R_PAREN ")")
             (SWITCH_BODY
               (L_CURLY "{")
               (SWITCH_CASE
                 (SWITCH_LABEL
                   (CASE_KW "case")
-                  (EXPR_PLACEHOLDER (CHAR_LITERAL "'a'"))
+                  (LITERAL (CHAR_LITERAL "'a'"))
                   (COLON ":"))
                 (EXPR_STMT
-                  (EXPR_PLACEHOLDER
-                    (IDENT "x")
+                  (ASSIGN_EXPR
+                    (NAME_REF_EXPR (NAME_REF (IDENT "x")))
                     (EQ "=")
-                    (IDENT "flag")
-                    (QUESTION "?")
-                    (INT_NUMBER "1")
-                    (COLON ":")
-                    (INT_NUMBER "2"))
+                    (TERNARY_EXPR
+                      (NAME_REF_EXPR (NAME_REF (IDENT "flag")))
+                      (QUESTION "?")
+                      (LITERAL (INT_NUMBER "1"))
+                      (COLON ":")
+                      (LITERAL (INT_NUMBER "2"))))
                   (SEMICOLON ";"))
                 (BREAK_STMT
                   (BREAK_KW "break")

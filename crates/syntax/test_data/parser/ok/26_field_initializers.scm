@@ -9,18 +9,19 @@
         (VARIABLE_DECLARATOR
           (NAME (IDENT "a"))
           (EQ "=")
-          (EXPR_PLACEHOLDER (INT_NUMBER "1")))
+          (LITERAL (INT_NUMBER "1")))
         (COMMA ",")
         (VARIABLE_DECLARATOR
           (NAME (IDENT "b"))
           (EQ "=")
-          (EXPR_PLACEHOLDER
-            (IDENT "foo")
-            (L_PAREN "(")
-            (INT_NUMBER "1")
-            (COMMA ",")
-            (INT_NUMBER "2")
-            (R_PAREN ")")))
+          (CALL_EXPR
+            (NAME_REF_EXPR (NAME_REF (IDENT "foo")))
+            (ARG_LIST
+              (L_PAREN "(")
+              (LITERAL (INT_NUMBER "1"))
+              (COMMA ",")
+              (LITERAL (INT_NUMBER "2"))
+              (R_PAREN ")"))))
         (COMMA ",")
         (VARIABLE_DECLARATOR (NAME (IDENT "c")))
         (SEMICOLON ";"))
@@ -36,21 +37,24 @@
         (VARIABLE_DECLARATOR
           (NAME (IDENT "m"))
           (EQ "=")
-          (EXPR_PLACEHOLDER
+          (NEW_EXPR
             (NEW_KW "new")
-            (IDENT "HashMap")
-            (L_ANGLE "<")
-            (IDENT "String")
-            (COMMA ",")
-            (IDENT "Integer")
-            (R_ANGLE ">")
-            (L_PAREN "(")
-            (R_PAREN ")")))
+            (PATH_TYPE
+              (NAME_REF (IDENT "HashMap"))
+              (TYPE_ARGS
+                (L_ANGLE "<")
+                (PATH_TYPE (NAME_REF (IDENT "String")))
+                (COMMA ",")
+                (PATH_TYPE (NAME_REF (IDENT "Integer")))
+                (R_ANGLE ">")))
+            (ARG_LIST
+              (L_PAREN "(")
+              (R_PAREN ")"))))
         (COMMA ",")
         (VARIABLE_DECLARATOR
           (NAME (IDENT "n"))
           (EQ "=")
-          (EXPR_PLACEHOLDER (NULL_KW "null")))
+          (LITERAL (NULL_KW "null")))
         (SEMICOLON ";"))
       (FIELD_DECL
         (PATH_TYPE
@@ -66,18 +70,21 @@
         (VARIABLE_DECLARATOR
           (NAME (IDENT "t"))
           (EQ "=")
-          (EXPR_PLACEHOLDER
+          (NEW_EXPR
             (NEW_KW "new")
-            (IDENT "Triple")
-            (L_ANGLE "<")
-            (IDENT "A")
-            (COMMA ",")
-            (IDENT "B")
-            (COMMA ",")
-            (IDENT "C")
-            (R_ANGLE ">")
-            (L_PAREN "(")
-            (R_PAREN ")")))
+            (PATH_TYPE
+              (NAME_REF (IDENT "Triple"))
+              (TYPE_ARGS
+                (L_ANGLE "<")
+                (PATH_TYPE (NAME_REF (IDENT "A")))
+                (COMMA ",")
+                (PATH_TYPE (NAME_REF (IDENT "B")))
+                (COMMA ",")
+                (PATH_TYPE (NAME_REF (IDENT "C")))
+                (R_ANGLE ">")))
+            (ARG_LIST
+              (L_PAREN "(")
+              (R_PAREN ")"))))
         (COMMA ",")
         (VARIABLE_DECLARATOR (NAME (IDENT "u")))
         (SEMICOLON ";"))
@@ -89,17 +96,17 @@
         (VARIABLE_DECLARATOR
           (NAME (IDENT "arr"))
           (EQ "=")
-          (EXPR_PLACEHOLDER
+          (ARRAY_INIT
             (L_CURLY "{")
-            (INT_NUMBER "1")
+            (LITERAL (INT_NUMBER "1"))
             (COMMA ",")
-            (INT_NUMBER "2")
+            (LITERAL (INT_NUMBER "2"))
             (R_CURLY "}")))
         (COMMA ",")
         (VARIABLE_DECLARATOR
           (NAME (IDENT "empty"))
           (EQ "=")
-          (EXPR_PLACEHOLDER
+          (ARRAY_INIT
             (L_CURLY "{")
             (R_CURLY "}")))
         (SEMICOLON ";"))
@@ -108,81 +115,98 @@
         (VARIABLE_DECLARATOR
           (NAME (IDENT "r"))
           (EQ "=")
-          (EXPR_PLACEHOLDER
-            (L_PAREN "(")
-            (R_PAREN ")")
+          (LAMBDA_EXPR
+            (LAMBDA_PARAMS
+              (L_PAREN "(")
+              (R_PAREN ")"))
             (ARROW "->")
-            (L_CURLY "{")
-            (INT_KW "int")
-            (IDENT "x")
-            (EQ "=")
-            (INT_NUMBER "1")
-            (SEMICOLON ";")
-            (IDENT "run")
-            (L_PAREN "(")
-            (R_PAREN ")")
-            (SEMICOLON ";")
-            (R_CURLY "}")))
+            (BLOCK
+              (L_CURLY "{")
+              (LOCAL_VAR_DECL
+                (PRIMITIVE_TYPE (INT_KW "int"))
+                (VARIABLE_DECLARATOR
+                  (NAME (IDENT "x"))
+                  (EQ "=")
+                  (LITERAL (INT_NUMBER "1")))
+                (SEMICOLON ";"))
+              (EXPR_STMT
+                (CALL_EXPR
+                  (NAME_REF_EXPR (NAME_REF (IDENT "run")))
+                  (ARG_LIST
+                    (L_PAREN "(")
+                    (R_PAREN ")")))
+                (SEMICOLON ";"))
+              (R_CURLY "}"))))
         (COMMA ",")
         (VARIABLE_DECLARATOR
           (NAME (IDENT "s"))
           (EQ "=")
-          (EXPR_PLACEHOLDER
-            (L_PAREN "(")
-            (R_PAREN ")")
+          (LAMBDA_EXPR
+            (LAMBDA_PARAMS
+              (L_PAREN "(")
+              (R_PAREN ")"))
             (ARROW "->")
-            (L_CURLY "{")
-            (R_CURLY "}")))
+            (BLOCK
+              (L_CURLY "{")
+              (R_CURLY "}"))))
         (SEMICOLON ";"))
       (FIELD_DECL
         (PATH_TYPE (NAME_REF (IDENT "Object")))
         (VARIABLE_DECLARATOR
           (NAME (IDENT "o"))
           (EQ "=")
-          (EXPR_PLACEHOLDER
+          (NEW_EXPR
             (NEW_KW "new")
-            (IDENT "Object")
-            (L_PAREN "(")
-            (R_PAREN ")")
-            (L_CURLY "{")
-            (INT_KW "int")
-            (IDENT "f")
-            (SEMICOLON ";")
-            (VOID_KW "void")
-            (IDENT "g")
-            (L_PAREN "(")
-            (R_PAREN ")")
-            (L_CURLY "{")
-            (IDENT "f")
-            (PLUS2 "++")
-            (SEMICOLON ";")
-            (R_CURLY "}")
-            (R_CURLY "}")))
+            (PATH_TYPE (NAME_REF (IDENT "Object")))
+            (ARG_LIST
+              (L_PAREN "(")
+              (R_PAREN ")"))
+            (CLASS_BODY
+              (L_CURLY "{")
+              (FIELD_DECL
+                (PRIMITIVE_TYPE (INT_KW "int"))
+                (VARIABLE_DECLARATOR (NAME (IDENT "f")))
+                (SEMICOLON ";"))
+              (METHOD_DECL
+                (PRIMITIVE_TYPE (VOID_KW "void"))
+                (NAME (IDENT "g"))
+                (PARAM_LIST
+                  (L_PAREN "(")
+                  (R_PAREN ")"))
+                (BLOCK
+                  (L_CURLY "{")
+                  (EXPR_STMT
+                    (POSTFIX_EXPR
+                      (NAME_REF_EXPR (NAME_REF (IDENT "f")))
+                      (PLUS2 "++"))
+                    (SEMICOLON ";"))
+                  (R_CURLY "}")))
+              (R_CURLY "}"))))
         (SEMICOLON ";"))
       (FIELD_DECL
         (PRIMITIVE_TYPE (BOOLEAN_KW "boolean"))
         (VARIABLE_DECLARATOR
           (NAME (IDENT "cmp"))
           (EQ "=")
-          (EXPR_PLACEHOLDER
-            (INT_NUMBER "1")
+          (BINARY_EXPR
+            (LITERAL (INT_NUMBER "1"))
             (L_ANGLE "<")
-            (INT_NUMBER "2")))
+            (LITERAL (INT_NUMBER "2"))))
         (COMMA ",")
         (VARIABLE_DECLARATOR
           (NAME (IDENT "other"))
           (EQ "=")
-          (EXPR_PLACEHOLDER
-            (INT_NUMBER "3")
+          (BINARY_EXPR
+            (LITERAL (INT_NUMBER "3"))
             (R_ANGLE ">")
-            (INT_NUMBER "2")))
+            (LITERAL (INT_NUMBER "2"))))
         (SEMICOLON ";"))
       (FIELD_DECL
         (PATH_TYPE (NAME_REF (IDENT "String")))
         (VARIABLE_DECLARATOR
           (NAME (IDENT "text"))
           (EQ "=")
-          (EXPR_PLACEHOLDER (TEXT_BLOCK "\"\"\"\n        multi; line, with = stuff\n        \"\"\"")))
+          (LITERAL (TEXT_BLOCK "\"\"\"\n        multi; line, with = stuff\n        \"\"\"")))
         (SEMICOLON ";"))
       (FIELD_DECL
         (PRIMITIVE_TYPE (INT_KW "int"))

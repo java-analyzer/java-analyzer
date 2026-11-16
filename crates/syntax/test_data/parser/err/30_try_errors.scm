@@ -28,10 +28,11 @@
           (L_CURLY "{")
           (TRY_STMT (TRY_KW "try"))
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (IDENT "x")
-              (L_PAREN "(")
-              (R_PAREN ")"))
+            (CALL_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "x")))
+              (ARG_LIST
+                (L_PAREN "(")
+                (R_PAREN ")")))
             (SEMICOLON ";"))
           (R_CURLY "}")))
       (METHOD_DECL
@@ -87,11 +88,10 @@
             (TRY_KW "try")
             (RESOURCE_LIST
               (L_PAREN "(")
-              (RESOURCE
-                (EXPR_PLACEHOLDER
-                  (IDENT "r")
-                  (L_CURLY "{")
-                  (R_CURLY "}")))))
+              (RESOURCE (NAME_REF_EXPR (NAME_REF (IDENT "r")))))
+            (BLOCK
+              (L_CURLY "{")
+              (R_CURLY "}")))
           (R_CURLY "}")))
       (METHOD_DECL
         (PRIMITIVE_TYPE (VOID_KW "void"))
@@ -129,6 +129,5 @@
   (error "expected 'catch' or 'finally'" "3:19..3:19")
   (error "expected '('" "4:29..4:29")
   (error "expected a name" "5:32..5:32")
-  (error "expected ')'" "6:26..6:26")
-  (error "expected '{'" "6:26..6:26")
+  (error "expected ')'" "6:22..6:22")
   (error "expected '{'" "7:35..7:35"))

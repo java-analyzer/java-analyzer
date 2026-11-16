@@ -180,8 +180,36 @@ pub enum SyntaxKind {
     PARAM,
     THROWS_CLAUSE,
     DEFAULT_VALUE,
-    /// A token run standing in for an expression; replaced by real expressions in M3.
-    EXPR_PLACEHOLDER,
+
+    // ---- Nodes: expressions ----
+    LITERAL,
+    NAME_REF_EXPR,
+    FIELD_ACCESS_EXPR,
+    /// `receiver . TYPE_ARGS? NAME_REF ARG_LIST`
+    METHOD_CALL_EXPR,
+    /// `callee ARG_LIST`, for unqualified calls such as `foo(x)`, `this(x)` and `super(x)`.
+    CALL_EXPR,
+    NEW_EXPR,
+    ARRAY_INIT,
+    ARRAY_ACCESS_EXPR,
+    UNARY_EXPR,
+    POSTFIX_EXPR,
+    BINARY_EXPR,
+    ASSIGN_EXPR,
+    TERNARY_EXPR,
+    CAST_EXPR,
+    INSTANCEOF_EXPR,
+    LAMBDA_EXPR,
+    LAMBDA_PARAMS,
+    METHOD_REF_EXPR,
+    PAREN_EXPR,
+    THIS_EXPR,
+    SUPER_EXPR,
+    SWITCH_EXPR,
+    CLASS_LITERAL,
+    TYPE_PATTERN,
+    RECORD_PATTERN,
+    GUARD,
 
     // ---- Nodes: statements ----
     BLOCK,

@@ -1,14 +1,13 @@
 //! Statement grammar (milestone M2b, see `docs/specs/0002-java-syntax-subset.md`).
-//!
-//! Expressions do not exist yet (M3): wherever a statement contains one, it is an
-//! `EXPR_PLACEHOLDER` token run that ends at the right terminator for its position.
 
 use super::{
+    expressions::{expr, is_pattern_ahead, pattern},
     grammar::{
-        dims, expr_placeholder, is_modifier_kw, is_primitive_kw, modifiers, name, name_ref, type_,
-        type_decl_kind, type_decl_rest, variable_declarator, ExprEnd,
+        dims, is_modifier_kw, is_primitive_kw, modifiers, name, name_ref, type_, type_decl_kind,
+        type_decl_rest, variable_declarator,
     },
-    Parser,
+    lookahead::{skip_parens, skip_type, MAX_SCAN},
+    CompletedMarker, Parser,
 };
 use crate::syntax_kind::SyntaxKind::{self, *};
 
@@ -47,6 +46,19 @@ fn at_member_only_modifier(p: &Parser<'_, '_>) -> bool {
 }
 
 fn statement(p: &mut Parser<'_, '_>) {
+    let parsed = p.nested(false, |p| {
+        statement_inner(p);
+        true
+    });
+    if !parsed {
+        // Nested too deeply: consume one token so the caller makes progress.
+        let m = p.start();
+        p.bump_any();
+        m.complete(p, ERROR);
+    }
+}
+
+fn statement_inner(p: &mut Parser<'_, '_>) {
     match p.current() {
         L_CURLY => block(p),
         SEMICOLON => {
@@ -89,30 +101,23 @@ fn declaration_stmt(p: &mut Parser<'_, '_>) {
         type_decl_rest(p, kind);
         m.complete(p, kind);
     } else {
-        local_var_decl_rest(
-            p,
-            ExprEnd {
-                comma: true,
-                ..ExprEnd::default()
-            },
-            true,
-        );
+        local_var_decl_rest(p, true);
         m.complete(p, LOCAL_VAR_DECL);
     }
 }
 
 /// `Type Declarator (',' Declarator)* ';'?`, after the modifiers. `semicolon` says whether the
 /// declaration owns its `;` (it does not in a `for` header).
-fn local_var_decl_rest(p: &mut Parser<'_, '_>, end: ExprEnd, semicolon: bool) {
+fn local_var_decl_rest(p: &mut Parser<'_, '_>, semicolon: bool) {
     if !type_(p) {
         if semicolon {
             p.eat(SEMICOLON);
         }
         return;
     }
-    let mut named = variable_declarator(p, end);
+    let mut named = variable_declarator(p);
     while p.eat(COMMA) {
-        named &= variable_declarator(p, end);
+        named &= variable_declarator(p);
     }
     // A missing name was already reported; do not pile a second error on top of it.
     if semicolon && !p.eat(SEMICOLON) && named {
@@ -130,54 +135,6 @@ fn is_local_var_decl(p: &Parser<'_, '_>) -> bool {
 /// can only be a declaration whose name is missing (`int ;`).
 fn is_bare_primitive(p: &Parser<'_, '_>) -> bool {
     is_primitive_kw(p.current()) && !matches!(p.nth(1), DOT | L_BRACK | COLON2)
-}
-
-/// If a type starts at token `n`, returns the index just past it. Only looks at tokens that can
-/// occur in a type, so an expression such as `a < b` is not mistaken for one.
-fn skip_type(p: &Parser<'_, '_>, mut n: usize) -> Option<usize> {
-    if is_primitive_kw(p.nth(n)) {
-        n += 1;
-    } else if p.nth_at(n, IDENT) {
-        n += 1;
-        loop {
-            if p.nth_at(n, L_ANGLE) {
-                n = skip_type_args(p, n)?;
-            }
-            if p.nth_at(n, DOT) && p.nth_at(n + 1, IDENT) {
-                n += 2;
-            } else {
-                break;
-            }
-        }
-    } else {
-        return None;
-    }
-    while p.nth_at(n, L_BRACK) && p.nth_at(n + 1, R_BRACK) {
-        n += 2;
-    }
-    Some(n)
-}
-
-/// Skips balanced `<...>` starting at token `n`. Fails on any token a type argument list cannot
-/// contain.
-fn skip_type_args(p: &Parser<'_, '_>, mut n: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    loop {
-        match p.nth(n) {
-            L_ANGLE => depth += 1,
-            R_ANGLE => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(n + 1);
-                }
-            }
-            IDENT | DOT | COMMA | QUESTION | EXTENDS_KW | SUPER_KW | AMP | L_BRACK | R_BRACK
-            | AT => {}
-            kind if is_primitive_kw(kind) => {}
-            _ => return None,
-        }
-        n += 1;
-    }
 }
 
 /// `yield` is a contextual keyword: it starts a yield statement unless it is clearly used as a
@@ -210,7 +167,21 @@ fn is_yield_stmt(p: &Parser<'_, '_>) -> bool {
 
 fn expr_stmt(p: &mut Parser<'_, '_>) {
     let m = p.start();
-    expr_placeholder(p, ExprEnd::default());
+    let start = p.pos();
+    expr(p);
+    if p.pos() == start {
+        // Not an expression (already reported): skip to the end of the statement. A `{` is
+        // left for the next statement, so that its braces stay balanced.
+        while !p.at_eof()
+            && !matches!(p.current(), SEMICOLON | R_CURLY | L_CURLY)
+            && !at_member_only_modifier(p)
+        {
+            p.bump_any();
+        }
+        p.eat(SEMICOLON);
+        m.complete(p, ERROR);
+        return;
+    }
     p.expect(SEMICOLON, "expected ';'");
     m.complete(p, EXPR_STMT);
 }
@@ -219,7 +190,7 @@ fn expr_stmt(p: &mut Parser<'_, '_>) {
 fn keyword_expr_stmt(p: &mut Parser<'_, '_>, kind: SyntaxKind) {
     let m = p.start();
     p.bump_any();
-    expr_placeholder(p, ExprEnd::default());
+    expr(p);
     p.expect(SEMICOLON, "expected ';'");
     m.complete(p, kind);
 }
@@ -228,7 +199,7 @@ fn return_stmt(p: &mut Parser<'_, '_>) {
     let m = p.start();
     p.bump(RETURN_KW);
     if !p.at(SEMICOLON) && !p.at(R_CURLY) && !p.at_eof() {
-        expr_placeholder(p, ExprEnd::default());
+        expr(p);
     }
     p.expect(SEMICOLON, "expected ';'");
     m.complete(p, RETURN_STMT);
@@ -248,15 +219,9 @@ fn jump_stmt(p: &mut Parser<'_, '_>, kind: SyntaxKind) {
 fn assert_stmt(p: &mut Parser<'_, '_>) {
     let m = p.start();
     p.bump(ASSERT_KW);
-    expr_placeholder(
-        p,
-        ExprEnd {
-            colon: true,
-            ..ExprEnd::default()
-        },
-    );
+    expr(p);
     if p.eat(COLON) {
-        expr_placeholder(p, ExprEnd::default());
+        expr(p);
     }
     p.expect(SEMICOLON, "expected ';'");
     m.complete(p, ASSERT_STMT);
@@ -304,16 +269,10 @@ fn paren_cond(p: &mut Parser<'_, '_>) {
     if !p.expect(L_PAREN, "expected '('") {
         return;
     }
-    if !p.at(R_PAREN) {
-        expr_placeholder(
-            p,
-            ExprEnd {
-                rparen: true,
-                ..ExprEnd::default()
-            },
-        );
-    } else {
+    if p.at(R_PAREN) {
         p.error_missing("expected an expression");
+    } else {
+        expr(p);
     }
     p.expect(R_PAREN, "expected ')'");
 }
@@ -363,10 +322,6 @@ fn for_stmt(p: &mut Parser<'_, '_>) {
     p.bump(FOR_KW);
     let mut kind = FOR_STMT;
     if p.expect(L_PAREN, "expected '('") {
-        let in_header = ExprEnd {
-            rparen: true,
-            ..ExprEnd::default()
-        };
         if is_foreach_header(p) {
             kind = FOREACH_STMT;
             modifiers(p);
@@ -375,35 +330,28 @@ fn for_stmt(p: &mut Parser<'_, '_>) {
             // The lookahead saw `Type name :`, but a malformed type can leave the real parse
             // somewhere else, so the colon is not guaranteed.
             p.expect(COLON, "expected ':'");
-            expr_placeholder(p, in_header);
+            expr(p);
         } else {
             // Initializer: a declaration or expressions.
             if !p.at(SEMICOLON) {
                 if is_modifier_kw(p.current()) || p.at(AT) || is_local_var_decl(p) {
                     let d = p.start();
                     modifiers(p);
-                    local_var_decl_rest(
-                        p,
-                        ExprEnd {
-                            comma: true,
-                            ..in_header
-                        },
-                        false,
-                    );
+                    local_var_decl_rest(p, false);
                     d.complete(p, LOCAL_VAR_DECL);
                 } else {
-                    expr_placeholder(p, in_header);
+                    expr_list(p);
                 }
             }
             p.expect(SEMICOLON, "expected ';'");
             // Condition.
             if !p.at(SEMICOLON) && !p.at(R_PAREN) {
-                expr_placeholder(p, in_header);
+                expr(p);
             }
             p.expect(SEMICOLON, "expected ';'");
             // Update.
             if !p.at(R_PAREN) {
-                expr_placeholder(p, in_header);
+                expr_list(p);
             }
         }
         p.expect(R_PAREN, "expected ')'");
@@ -412,16 +360,30 @@ fn for_stmt(p: &mut Parser<'_, '_>) {
     m.complete(p, kind);
 }
 
+/// `expr (',' expr)*`
+fn expr_list(p: &mut Parser<'_, '_>) {
+    expr(p);
+    while p.eat(COMMA) {
+        expr(p);
+    }
+}
+
 /// `[final|@Anno]* Type name :` — the header of an enhanced `for`.
 fn is_foreach_header(p: &Parser<'_, '_>) -> bool {
     let mut n = 0;
     loop {
+        if n > MAX_SCAN {
+            return false;
+        }
         match p.nth(n) {
             FINAL_KW => n += 1,
             AT if p.nth_at(n + 1, IDENT) => {
                 n += 2;
                 while p.nth_at(n, DOT) && p.nth_at(n + 1, IDENT) {
                     n += 2;
+                    if n > MAX_SCAN {
+                        return false;
+                    }
                 }
                 if p.nth_at(n, L_PAREN) {
                     match skip_parens(p, n) {
@@ -436,25 +398,6 @@ fn is_foreach_header(p: &Parser<'_, '_>) -> bool {
     match skip_type(p, n) {
         Some(n) => p.nth_at(n, IDENT) && p.nth_at(n + 1, COLON),
         None => false,
-    }
-}
-
-/// Skips balanced `(...)` starting at token `n`; `None` if it never closes.
-fn skip_parens(p: &Parser<'_, '_>, mut n: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    loop {
-        match p.nth(n) {
-            L_PAREN => depth += 1,
-            R_PAREN => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(n + 1);
-                }
-            }
-            EOF => return None,
-            _ => {}
-        }
-        n += 1;
     }
 }
 
@@ -504,22 +447,18 @@ fn resource_list(p: &mut Parser<'_, '_>) {
 /// variable.
 fn resource(p: &mut Parser<'_, '_>) {
     let m = p.start();
-    let end = ExprEnd {
-        rparen: true,
-        ..ExprEnd::default()
-    };
     if is_modifier_kw(p.current()) || p.at(AT) || is_local_var_decl(p) {
         modifiers(p);
         if type_(p) {
             name(p);
             if p.eat(EQ) {
-                expr_placeholder(p, end);
+                expr(p);
             } else {
                 p.error_missing("expected '='");
             }
         }
     } else {
-        expr_placeholder(p, end);
+        expr(p);
     }
     m.complete(p, RESOURCE);
 }
@@ -545,6 +484,19 @@ fn catch_clause(p: &mut Parser<'_, '_>) {
 
 fn switch_stmt(p: &mut Parser<'_, '_>) {
     let m = p.start();
+    switch_rest(p);
+    m.complete(p, SWITCH_STMT);
+}
+
+/// A `switch` in expression position.
+pub(super) fn switch_expr(p: &mut Parser<'_, '_>) -> CompletedMarker {
+    let m = p.start();
+    switch_rest(p);
+    m.complete(p, SWITCH_EXPR)
+}
+
+/// `switch ( expr ) { cases }`, shared by the statement and the expression form.
+fn switch_rest(p: &mut Parser<'_, '_>) {
     p.bump(SWITCH_KW);
     paren_cond(p);
     if p.at(L_CURLY) {
@@ -552,7 +504,6 @@ fn switch_stmt(p: &mut Parser<'_, '_>) {
     } else {
         p.error_missing("expected '{'");
     }
-    m.complete(p, SWITCH_STMT);
 }
 
 fn at_switch_label(p: &Parser<'_, '_>) -> bool {
@@ -581,14 +532,7 @@ fn switch_case(p: &mut Parser<'_, '_>) {
     let m = p.start();
     let label = p.start();
     if p.eat(CASE_KW) {
-        expr_placeholder(
-            p,
-            ExprEnd {
-                colon: true,
-                arrow: true,
-                ..ExprEnd::default()
-            },
-        );
+        case_items(p);
     } else {
         p.bump(DEFAULT_KW);
     }
@@ -608,4 +552,30 @@ fn switch_case(p: &mut Parser<'_, '_>) {
         statements(p, at_switch_label);
     }
     m.complete(p, SWITCH_CASE);
+}
+
+/// `item (',' item)* guard?` after `case`, where an item is a pattern, an expression or
+/// `default`. Lambdas are disabled so that `case FOO ->` is a rule and not a lambda.
+fn case_items(p: &mut Parser<'_, '_>) {
+    let outer = p.no_lambda;
+    p.no_lambda = true;
+    loop {
+        if p.at(DEFAULT_KW) {
+            p.bump_any();
+        } else if is_pattern_ahead(p) {
+            pattern(p);
+        } else {
+            expr(p);
+        }
+        if !p.eat(COMMA) {
+            break;
+        }
+    }
+    if p.at_contextual_kw("when") {
+        let g = p.start();
+        p.bump(IDENT);
+        expr(p);
+        g.complete(p, GUARD);
+    }
+    p.no_lambda = outer;
 }

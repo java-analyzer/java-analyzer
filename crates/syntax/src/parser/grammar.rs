@@ -2,7 +2,11 @@
 //! compilation unit, type declarations, members, modifiers and annotations, and types. Statements
 //! live in `statements.rs`; expressions are token-run placeholders until M3.
 
-use super::{statements::block, Marker, Parser};
+use super::{
+    expressions::{arg_list, initializer},
+    statements::block,
+    CompletedMarker, Marker, Parser,
+};
 use crate::syntax_kind::SyntaxKind::{self, *};
 
 pub(super) fn source_file(p: &mut Parser<'_, '_>) {
@@ -350,16 +354,18 @@ fn type_list(p: &mut Parser<'_, '_>) {
 }
 
 /// `{ member* }`
-fn class_body(p: &mut Parser<'_, '_>) {
+pub(super) fn class_body(p: &mut Parser<'_, '_>) {
     if !p.at(L_CURLY) {
         p.error_missing("expected '{'");
         return;
     }
-    let m = p.start();
-    p.bump(L_CURLY);
-    members(p);
-    p.expect(R_CURLY, "expected '}'");
-    m.complete(p, CLASS_BODY);
+    p.nested((), |p| {
+        let m = p.start();
+        p.bump(L_CURLY);
+        members(p);
+        p.expect(R_CURLY, "expected '}'");
+        m.complete(p, CLASS_BODY);
+    })
 }
 
 fn members(p: &mut Parser<'_, '_>) {
@@ -411,7 +417,7 @@ fn enum_constant(p: &mut Parser<'_, '_>) {
     }
     name(p);
     if p.at(L_PAREN) {
-        balanced_parens(p, ARG_LIST);
+        arg_list(p);
     }
     if p.at(L_CURLY) {
         class_body(p);
@@ -512,19 +518,19 @@ fn method_or_field(p: &mut Parser<'_, '_>, m: Marker) {
         if p.at(DEFAULT_KW) {
             let d = p.start();
             p.bump(DEFAULT_KW);
-            expr_placeholder(p, ExprEnd::default());
+            if p.at(AT) {
+                annotation(p);
+            } else {
+                initializer(p);
+            }
             d.complete(p, DEFAULT_VALUE);
         }
         body_or_semicolon(p);
         m.complete(p, METHOD_DECL);
     } else {
-        let end = ExprEnd {
-            comma: true,
-            ..ExprEnd::default()
-        };
-        let mut named = variable_declarator(p, end);
+        let mut named = variable_declarator(p);
         while p.eat(COMMA) {
-            named &= variable_declarator(p, end);
+            named &= variable_declarator(p);
         }
         // A missing name was already reported; do not pile a second error on top of it.
         if !p.eat(SEMICOLON) && named {
@@ -535,13 +541,13 @@ fn method_or_field(p: &mut Parser<'_, '_>, m: Marker) {
 }
 
 /// `Name ('[' ']')* ('=' Initializer)?`. Returns whether the name was present.
-pub(super) fn variable_declarator(p: &mut Parser<'_, '_>, end: ExprEnd) -> bool {
+pub(super) fn variable_declarator(p: &mut Parser<'_, '_>) -> bool {
     let m = p.start();
     let named = p.at(IDENT);
     name(p);
     dims(p);
     if p.eat(EQ) {
-        expr_placeholder(p, end);
+        initializer(p);
     }
     m.complete(p, VARIABLE_DECLARATOR);
     named
@@ -606,12 +612,12 @@ fn param_list(p: &mut Parser<'_, '_>, list_kind: SyntaxKind, item_kind: SyntaxKi
     m.complete(p, list_kind);
 }
 
-fn at_param_start(p: &Parser<'_, '_>) -> bool {
+pub(super) fn at_param_start(p: &Parser<'_, '_>) -> bool {
     let kind = p.current();
     kind == IDENT || kind == AT || is_primitive_kw(kind) || is_modifier_kw(kind)
 }
 
-fn param(p: &mut Parser<'_, '_>, kind: SyntaxKind) {
+pub(super) fn param(p: &mut Parser<'_, '_>, kind: SyntaxKind) {
     let m = p.start();
     modifiers(p);
     if type_(p) {
@@ -622,77 +628,19 @@ fn param(p: &mut Parser<'_, '_>, kind: SyntaxKind) {
     m.complete(p, kind);
 }
 
-/// Where an [`expr_placeholder`] ends, besides the always-active terminators (`;` or `}` outside
-/// braces, EOF, and member-only modifiers and declaration keywords outside any brackets).
-#[derive(Clone, Copy, Default)]
-pub(super) struct ExprEnd {
-    /// A `,` outside brackets that is followed by what looks like another declarator
-    /// (`name =`, `name ,`, `name ;`, `name [`).
-    pub comma: bool,
-    /// An unmatched `)`: the placeholder sits inside parentheses the caller owns.
-    pub rparen: bool,
-    /// A `:` outside brackets that is not the else-branch of a `?:` seen earlier.
-    pub colon: bool,
-    /// A `->` outside brackets (switch rules).
-    pub arrow: bool,
-}
-
-/// A stand-in for an expression (M3): a token run that ends where `end` says. Generic arguments
-/// are tracked heuristically (`<` after an identifier opens, `>` closes) so that their commas do
-/// not look like declarator separators. An empty run is reported as `expected an expression`.
-pub(super) fn expr_placeholder(p: &mut Parser<'_, '_>, end: ExprEnd) {
-    let m = p.start();
-    let start = p.pos();
-    let (mut parens, mut curlies, mut angles, mut questions) = (0usize, 0usize, 0usize, 0usize);
-    let mut prev = EOF;
-    loop {
-        let kind = p.current();
-        let top_level = parens == 0 && curlies == 0;
-        match kind {
-            EOF => break,
-            SEMICOLON | R_CURLY if curlies == 0 => break,
-            R_PAREN if end.rparen && top_level => break,
-            COLON if end.colon && top_level && questions == 0 => break,
-            ARROW if end.arrow && top_level => break,
-            // `, name =` cannot occur inside generic arguments, so it always starts the next
-            // declarator. `, name ,` and friends could be `Foo<A, B, C>`, so they only count
-            // outside what looks like generic arguments.
-            COMMA
-                if end.comma
-                    && top_level
-                    && p.nth_at(1, IDENT)
-                    && (p.nth_at(2, EQ)
-                        || (angles == 0 && matches!(p.nth(2), COMMA | SEMICOLON | L_BRACK))) =>
-            {
-                break
-            }
-            PUBLIC_KW | PRIVATE_KW | PROTECTED_KW | ABSTRACT_KW | STATIC_KW if top_level => break,
-            CLASS_KW | INTERFACE_KW | ENUM_KW if top_level && prev != DOT => break,
-            QUESTION if top_level && angles == 0 => questions += 1,
-            COLON if top_level && questions > 0 => questions -= 1,
-            L_CURLY => curlies += 1,
-            R_CURLY => curlies -= 1,
-            L_PAREN | L_BRACK => parens += 1,
-            R_PAREN | R_BRACK => parens = parens.saturating_sub(1),
-            L_ANGLE if prev == IDENT => angles += 1,
-            R_ANGLE => angles = angles.saturating_sub(1),
-            _ => {}
-        }
-        p.bump_any();
-        prev = kind;
-    }
-    if p.pos() == start {
-        m.abandon(p);
-        p.error_missing("expected an expression");
-    } else {
-        m.complete(p, EXPR_PLACEHOLDER);
-    }
-}
+/// Longest chain of array dimensions (`int[][][]...`) in one type. Each dimension nests the tree
+/// one level deeper, and a tree that is too deep overflows the stack when it is dropped.
+const MAX_DIMS: usize = 1024;
 
 // ---- Types ----
 
 /// Parses a type. Returns false (after reporting an error) if there is none.
 pub(super) fn type_(p: &mut Parser<'_, '_>) -> bool {
+    type_marker(p).is_some()
+}
+
+/// Parses a type and returns its node, or `None` (after reporting an error) if there is none.
+pub(super) fn type_marker(p: &mut Parser<'_, '_>) -> Option<CompletedMarker> {
     let mut completed = match p.current() {
         BOOLEAN_KW | BYTE_KW | SHORT_KW | INT_KW | LONG_KW | CHAR_KW | FLOAT_KW | DOUBLE_KW => {
             let m = p.start();
@@ -702,16 +650,22 @@ pub(super) fn type_(p: &mut Parser<'_, '_>) -> bool {
         IDENT => path_type(p),
         _ => {
             p.error_missing("expected a type");
-            return false;
+            return None;
         }
     };
+    let mut n_dims = 0;
     while p.at(L_BRACK) && p.nth_at(1, R_BRACK) {
+        if n_dims >= MAX_DIMS {
+            p.error_unexpected("type is too long");
+            break;
+        }
+        n_dims += 1;
         let m = completed.precede(p);
         p.bump(L_BRACK);
         p.bump(R_BRACK);
         completed = m.complete(p, ARRAY_TYPE);
     }
-    true
+    Some(completed)
 }
 
 /// `a.b.C<D>.E<F>`
@@ -731,16 +685,18 @@ fn path_type(p: &mut Parser<'_, '_>) -> super::CompletedMarker {
     m.complete(p, PATH_TYPE)
 }
 
-fn type_args(p: &mut Parser<'_, '_>) {
-    let m = p.start();
-    p.bump(L_ANGLE);
-    while !p.at(R_ANGLE) {
-        if !type_arg(p) || !p.eat(COMMA) {
-            break;
+pub(super) fn type_args(p: &mut Parser<'_, '_>) {
+    p.nested((), |p| {
+        let m = p.start();
+        p.bump(L_ANGLE);
+        while !p.at(R_ANGLE) {
+            if !type_arg(p) || !p.eat(COMMA) {
+                break;
+            }
         }
-    }
-    p.expect(R_ANGLE, "expected '>'");
-    m.complete(p, TYPE_ARGS);
+        p.expect(R_ANGLE, "expected '>'");
+        m.complete(p, TYPE_ARGS);
+    })
 }
 
 fn type_arg(p: &mut Parser<'_, '_>) -> bool {

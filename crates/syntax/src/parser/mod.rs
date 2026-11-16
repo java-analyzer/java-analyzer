@@ -5,7 +5,9 @@
 //! token stream (re-inserting trivia) into a `rowan` green tree. See
 //! `docs/specs/0002-java-syntax-subset.md`.
 
+mod expressions;
 mod grammar;
+mod lookahead;
 mod statements;
 pub(crate) mod tree_builder;
 
@@ -19,6 +21,10 @@ use crate::{
 /// Maximum number of lookahead calls without consuming a token. Exceeding it means a grammar
 /// rule loops without making progress, which is always a bug.
 const PARSER_STEP_LIMIT: u32 = 100_000;
+
+/// Maximum nesting of expressions, statements, class bodies and type arguments. Deeper input is
+/// reported as an error instead of recursing further, so the parser cannot overflow the stack.
+const MAX_NESTING: u32 = 256;
 
 /// Marks a `Start` event that was never completed, or was abandoned.
 const TOMBSTONE: SyntaxKind = SyntaxKind::__LAST;
@@ -88,6 +94,11 @@ pub(crate) struct Parser<'a, 't> {
     pos: usize,
     events: Vec<Event>,
     steps: Cell<u32>,
+    /// Current nesting, see [`MAX_NESTING`].
+    depth: u32,
+    nesting_error_reported: bool,
+    /// Set while parsing `case` labels, where `name ->` is a switch rule and not a lambda.
+    no_lambda: bool,
 }
 
 /// Parses `input` into events.
@@ -97,6 +108,9 @@ pub(crate) fn parse(input: &Input<'_>) -> Vec<Event> {
         pos: 0,
         events: Vec::new(),
         steps: Cell::new(0),
+        depth: 0,
+        nesting_error_reported: false,
+        no_lambda: false,
     };
     grammar::source_file(&mut p);
     p.events
@@ -224,6 +238,23 @@ impl<'a, 't> Parser<'a, 't> {
             missing: false,
         });
     }
+
+    /// Runs `f` one nesting level deeper. Past [`MAX_NESTING`] it reports the problem (once per
+    /// file) and returns `on_overflow` without running `f` or consuming anything; callers must
+    /// cope with having made no progress.
+    fn nested<T>(&mut self, on_overflow: T, f: impl FnOnce(&mut Self) -> T) -> T {
+        if self.depth >= MAX_NESTING {
+            if !self.nesting_error_reported {
+                self.nesting_error_reported = true;
+                self.error_unexpected("nesting is too deep");
+            }
+            return on_overflow;
+        }
+        self.depth += 1;
+        let result = f(self);
+        self.depth -= 1;
+        result
+    }
 }
 
 /// A started, not yet completed node. Must be completed or abandoned.
@@ -241,7 +272,10 @@ impl Marker {
             _ => unreachable!("marker does not point at a Start event"),
         }
         p.events.push(Event::Finish);
-        CompletedMarker { pos: self.pos }
+        CompletedMarker {
+            pos: self.pos,
+            kind,
+        }
     }
 
     /// Discards the marker. Nothing may have been parsed since it was started that is
@@ -265,9 +299,13 @@ impl Drop for Marker {
 #[derive(Clone, Copy)]
 struct CompletedMarker {
     pos: usize,
+    kind: SyntaxKind,
 }
 
 impl CompletedMarker {
+    fn kind(self) -> SyntaxKind {
+        self.kind
+    }
     /// Starts a new node that becomes the parent of this already completed node.
     fn precede(self, p: &mut Parser<'_, '_>) -> Marker {
         let new = p.start();

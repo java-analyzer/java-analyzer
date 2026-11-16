@@ -15,27 +15,28 @@
           (WHILE_STMT
             (WHILE_KW "while")
             (L_PAREN "(")
-            (EXPR_PLACEHOLDER (IDENT "x"))
+            (NAME_REF_EXPR (NAME_REF (IDENT "x")))
             (R_PAREN ")")
             (BLOCK
               (L_CURLY "{")
               (SWITCH_STMT
                 (SWITCH_KW "switch")
                 (L_PAREN "(")
-                (EXPR_PLACEHOLDER (IDENT "y"))
+                (NAME_REF_EXPR (NAME_REF (IDENT "y")))
                 (R_PAREN ")")
                 (SWITCH_BODY
                   (L_CURLY "{")
                   (SWITCH_CASE
                     (SWITCH_LABEL
                       (CASE_KW "case")
-                      (EXPR_PLACEHOLDER (INT_NUMBER "1"))
+                      (LITERAL (INT_NUMBER "1"))
                       (COLON ":"))
                     (EXPR_STMT
-                      (EXPR_PLACEHOLDER
-                        (IDENT "foo")
-                        (L_PAREN "(")
-                        (R_PAREN ")"))
+                      (CALL_EXPR
+                        (NAME_REF_EXPR (NAME_REF (IDENT "foo")))
+                        (ARG_LIST
+                          (L_PAREN "(")
+                          (R_PAREN ")")))
                       (SEMICOLON ";")))))))))
       (FIELD_DECL
         (MODIFIER_LIST (PRIVATE_KW "private"))

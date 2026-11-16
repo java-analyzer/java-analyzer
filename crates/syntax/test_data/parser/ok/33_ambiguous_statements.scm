@@ -22,124 +22,137 @@
             (VARIABLE_DECLARATOR (NAME (IDENT "declaration")))
             (SEMICOLON ";"))
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (IDENT "a")
+            (BINARY_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "a")))
               (L_ANGLE "<")
-              (IDENT "b"))
+              (NAME_REF_EXPR (NAME_REF (IDENT "b"))))
             (SEMICOLON ";"))
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (IDENT "Collections")
+            (METHOD_CALL_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "Collections")))
               (DOT ".")
-              (L_ANGLE "<")
-              (IDENT "String")
-              (R_ANGLE ">")
-              (IDENT "emptyList")
-              (L_PAREN "(")
-              (R_PAREN ")"))
+              (TYPE_ARGS
+                (L_ANGLE "<")
+                (PATH_TYPE (NAME_REF (IDENT "String")))
+                (R_ANGLE ">"))
+              (NAME_REF (IDENT "emptyList"))
+              (ARG_LIST
+                (L_PAREN "(")
+                (R_PAREN ")")))
             (SEMICOLON ";"))
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (IDENT "arr")
-              (L_BRACK "[")
-              (IDENT "i")
-              (R_BRACK "]")
+            (ASSIGN_EXPR
+              (ARRAY_ACCESS_EXPR
+                (NAME_REF_EXPR (NAME_REF (IDENT "arr")))
+                (L_BRACK "[")
+                (NAME_REF_EXPR (NAME_REF (IDENT "i")))
+                (R_BRACK "]"))
               (EQ "=")
-              (INT_NUMBER "1"))
+              (LITERAL (INT_NUMBER "1")))
             (SEMICOLON ";"))
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (IDENT "arr")
-              (L_BRACK "[")
-              (IDENT "i")
-              (R_BRACK "]")
-              (L_BRACK "[")
-              (IDENT "j")
-              (R_BRACK "]")
+            (POSTFIX_EXPR
+              (ARRAY_ACCESS_EXPR
+                (ARRAY_ACCESS_EXPR
+                  (NAME_REF_EXPR (NAME_REF (IDENT "arr")))
+                  (L_BRACK "[")
+                  (NAME_REF_EXPR (NAME_REF (IDENT "i")))
+                  (R_BRACK "]"))
+                (L_BRACK "[")
+                (NAME_REF_EXPR (NAME_REF (IDENT "j")))
+                (R_BRACK "]"))
               (PLUS2 "++"))
             (SEMICOLON ";"))
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (IDENT "foo")
-              (DOT ".")
-              (IDENT "bar")
-              (DOT ".")
-              (IDENT "baz")
+            (ASSIGN_EXPR
+              (FIELD_ACCESS_EXPR
+                (FIELD_ACCESS_EXPR
+                  (NAME_REF_EXPR (NAME_REF (IDENT "foo")))
+                  (DOT ".")
+                  (NAME_REF (IDENT "bar")))
+                (DOT ".")
+                (NAME_REF (IDENT "baz")))
               (EQ "=")
-              (INT_NUMBER "1"))
+              (LITERAL (INT_NUMBER "1")))
             (SEMICOLON ";"))
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (IDENT "Foo")
+            (METHOD_CALL_EXPR
+              (FIELD_ACCESS_EXPR
+                (NAME_REF_EXPR (NAME_REF (IDENT "Foo")))
+                (DOT ".")
+                (NAME_REF (IDENT "Bar")))
               (DOT ".")
-              (IDENT "Bar")
-              (DOT ".")
-              (IDENT "baz")
-              (L_PAREN "(")
-              (R_PAREN ")"))
+              (NAME_REF (IDENT "baz"))
+              (ARG_LIST
+                (L_PAREN "(")
+                (R_PAREN ")")))
             (SEMICOLON ";"))
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (INT_KW "int")
+            (METHOD_CALL_EXPR
+              (CLASS_LITERAL
+                (PRIMITIVE_TYPE (INT_KW "int"))
+                (DOT ".")
+                (CLASS_KW "class"))
               (DOT ".")
-              (CLASS_KW "class")
-              (DOT ".")
-              (IDENT "getName")
-              (L_PAREN "(")
-              (R_PAREN ")"))
+              (NAME_REF (IDENT "getName"))
+              (ARG_LIST
+                (L_PAREN "(")
+                (R_PAREN ")")))
             (SEMICOLON ";"))
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (IDENT "x")
+            (ASSIGN_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "x")))
               (EQ "=")
-              (IDENT "flag")
-              (QUESTION "?")
-              (IDENT "a")
-              (COLON ":")
-              (IDENT "b"))
+              (TERNARY_EXPR
+                (NAME_REF_EXPR (NAME_REF (IDENT "flag")))
+                (QUESTION "?")
+                (NAME_REF_EXPR (NAME_REF (IDENT "a")))
+                (COLON ":")
+                (NAME_REF_EXPR (NAME_REF (IDENT "b")))))
             (SEMICOLON ";"))
           (LABELED_STMT
             (NAME (IDENT "label"))
             (COLON ":")
             (EXPR_STMT
-              (EXPR_PLACEHOLDER
-                (IDENT "x")
+              (ASSIGN_EXPR
+                (NAME_REF_EXPR (NAME_REF (IDENT "x")))
                 (EQ "=")
-                (IDENT "cond")
-                (QUESTION "?")
-                (INT_NUMBER "1")
-                (COLON ":")
-                (INT_NUMBER "2"))
+                (TERNARY_EXPR
+                  (NAME_REF_EXPR (NAME_REF (IDENT "cond")))
+                  (QUESTION "?")
+                  (LITERAL (INT_NUMBER "1"))
+                  (COLON ":")
+                  (LITERAL (INT_NUMBER "2"))))
               (SEMICOLON ";")))
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (IDENT "yield")
+            (ASSIGN_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "yield")))
               (EQ "=")
-              (INT_NUMBER "3"))
+              (LITERAL (INT_NUMBER "3")))
             (SEMICOLON ";"))
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (IDENT "yield")
+            (POSTFIX_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "yield")))
               (PLUS2 "++"))
             (SEMICOLON ";"))
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (IDENT "record")
+            (ASSIGN_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "record")))
               (EQ "=")
-              (INT_NUMBER "1"))
+              (LITERAL (INT_NUMBER "1")))
             (SEMICOLON ";"))
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (IDENT "var")
+            (ASSIGN_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "var")))
               (EQ "=")
-              (INT_NUMBER "2"))
+              (LITERAL (INT_NUMBER "2")))
             (SEMICOLON ";"))
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
+            (CAST_EXPR
               (L_PAREN "(")
-              (IDENT "cast")
+              (PATH_TYPE (NAME_REF (IDENT "cast")))
               (R_PAREN ")")
-              (IDENT "y"))
+              (NAME_REF_EXPR (NAME_REF (IDENT "y"))))
             (SEMICOLON ";"))
           (LOCAL_VAR_DECL
             (ARRAY_TYPE
@@ -149,13 +162,14 @@
             (VARIABLE_DECLARATOR
               (NAME (IDENT "parts"))
               (EQ "=")
-              (EXPR_PLACEHOLDER
-                (IDENT "line")
+              (METHOD_CALL_EXPR
+                (NAME_REF_EXPR (NAME_REF (IDENT "line")))
                 (DOT ".")
-                (IDENT "split")
-                (L_PAREN "(")
-                (STRING_LITERAL "\",\"")
-                (R_PAREN ")")))
+                (NAME_REF (IDENT "split"))
+                (ARG_LIST
+                  (L_PAREN "(")
+                  (LITERAL (STRING_LITERAL "\",\""))
+                  (R_PAREN ")"))))
             (SEMICOLON ";"))
           (LOCAL_VAR_DECL
             (ARRAY_TYPE
@@ -174,30 +188,35 @@
             (VARIABLE_DECLARATOR
               (NAME (IDENT "o"))
               (EQ "=")
-              (EXPR_PLACEHOLDER
-                (IDENT "cond")
+              (TERNARY_EXPR
+                (NAME_REF_EXPR (NAME_REF (IDENT "cond")))
                 (QUESTION "?")
-                (NEW_KW "new")
-                (INT_KW "int")
-                (L_BRACK "[")
-                (R_BRACK "]")
-                (L_CURLY "{")
-                (INT_NUMBER "1")
-                (R_CURLY "}")
+                (NEW_EXPR
+                  (NEW_KW "new")
+                  (ARRAY_TYPE
+                    (PRIMITIVE_TYPE (INT_KW "int"))
+                    (L_BRACK "[")
+                    (R_BRACK "]"))
+                  (ARRAY_INIT
+                    (L_CURLY "{")
+                    (LITERAL (INT_NUMBER "1"))
+                    (R_CURLY "}")))
                 (COLON ":")
-                (NULL_KW "null")))
+                (LITERAL (NULL_KW "null"))))
             (SEMICOLON ";"))
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (IDENT "i")
+            (ASSIGN_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "i")))
               (EQ "=")
-              (IDENT "a")
-              (L_ANGLE "<")
-              (IDENT "b")
-              (QUESTION "?")
-              (INT_NUMBER "1")
-              (COLON ":")
-              (INT_NUMBER "2"))
+              (TERNARY_EXPR
+                (BINARY_EXPR
+                  (NAME_REF_EXPR (NAME_REF (IDENT "a")))
+                  (L_ANGLE "<")
+                  (NAME_REF_EXPR (NAME_REF (IDENT "b"))))
+                (QUESTION "?")
+                (LITERAL (INT_NUMBER "1"))
+                (COLON ":")
+                (LITERAL (INT_NUMBER "2"))))
             (SEMICOLON ";"))
           (R_CURLY "}")))
       (METHOD_DECL
@@ -213,25 +232,33 @@
           (L_CURLY "{")
           (RETURN_STMT
             (RETURN_KW "return")
-            (EXPR_PLACEHOLDER
+            (SWITCH_EXPR
               (SWITCH_KW "switch")
               (L_PAREN "(")
-              (IDENT "x")
+              (NAME_REF_EXPR (NAME_REF (IDENT "x")))
               (R_PAREN ")")
-              (L_CURLY "{")
-              (CASE_KW "case")
-              (INT_NUMBER "1")
-              (ARROW "->")
-              (INT_NUMBER "10")
-              (SEMICOLON ";")
-              (DEFAULT_KW "default")
-              (ARROW "->")
-              (L_CURLY "{")
-              (IDENT "yield")
-              (INT_NUMBER "20")
-              (SEMICOLON ";")
-              (R_CURLY "}")
-              (R_CURLY "}"))
+              (SWITCH_BODY
+                (L_CURLY "{")
+                (SWITCH_CASE
+                  (SWITCH_LABEL
+                    (CASE_KW "case")
+                    (LITERAL (INT_NUMBER "1"))
+                    (ARROW "->"))
+                  (EXPR_STMT
+                    (LITERAL (INT_NUMBER "10"))
+                    (SEMICOLON ";")))
+                (SWITCH_CASE
+                  (SWITCH_LABEL
+                    (DEFAULT_KW "default")
+                    (ARROW "->"))
+                  (BLOCK
+                    (L_CURLY "{")
+                    (YIELD_STMT
+                      (IDENT "yield")
+                      (LITERAL (INT_NUMBER "20"))
+                      (SEMICOLON ";"))
+                    (R_CURLY "}")))
+                (R_CURLY "}")))
             (SEMICOLON ";"))
           (R_CURLY "}")))
       (R_CURLY "}"))))

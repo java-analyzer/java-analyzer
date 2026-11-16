@@ -9,7 +9,7 @@
         (VARIABLE_DECLARATOR
           (NAME (IDENT "x"))
           (EQ "=")
-          (EXPR_PLACEHOLDER (INT_NUMBER "5"))))
+          (LITERAL (INT_NUMBER "5"))))
       (R_CURLY "}")))
   (CLASS_DECL
     (CLASS_KW "class")

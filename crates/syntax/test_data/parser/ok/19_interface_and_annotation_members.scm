@@ -9,7 +9,7 @@
         (VARIABLE_DECLARATOR
           (NAME (IDENT "CONSTANT"))
           (EQ "=")
-          (EXPR_PLACEHOLDER (INT_NUMBER "1")))
+          (LITERAL (INT_NUMBER "1")))
         (SEMICOLON ";"))
       (METHOD_DECL
         (PRIMITIVE_TYPE (VOID_KW "void"))
@@ -53,6 +53,6 @@
           (R_PAREN ")"))
         (DEFAULT_VALUE
           (DEFAULT_KW "default")
-          (EXPR_PLACEHOLDER (INT_NUMBER "5")))
+          (LITERAL (INT_NUMBER "5")))
         (SEMICOLON ";"))
       (R_CURLY "}"))))

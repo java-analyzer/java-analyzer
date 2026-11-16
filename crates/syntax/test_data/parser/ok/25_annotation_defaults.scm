@@ -13,7 +13,7 @@
           (R_PAREN ")"))
         (DEFAULT_VALUE
           (DEFAULT_KW "default")
-          (EXPR_PLACEHOLDER (STRING_LITERAL "\"x\"")))
+          (LITERAL (STRING_LITERAL "\"x\"")))
         (SEMICOLON ";"))
       (METHOD_DECL
         (ARRAY_TYPE
@@ -26,13 +26,13 @@
           (R_PAREN ")"))
         (DEFAULT_VALUE
           (DEFAULT_KW "default")
-          (EXPR_PLACEHOLDER
+          (ARRAY_INIT
             (L_CURLY "{")
-            (INT_NUMBER "1")
+            (LITERAL (INT_NUMBER "1"))
             (COMMA ",")
-            (INT_NUMBER "2")
+            (LITERAL (INT_NUMBER "2"))
             (COMMA ",")
-            (INT_NUMBER "3")
+            (LITERAL (INT_NUMBER "3"))
             (R_CURLY "}")))
         (SEMICOLON ";"))
       (METHOD_DECL
@@ -48,8 +48,8 @@
           (R_PAREN ")"))
         (DEFAULT_VALUE
           (DEFAULT_KW "default")
-          (EXPR_PLACEHOLDER
-            (IDENT "Object")
+          (CLASS_LITERAL
+            (NAME_REF_EXPR (NAME_REF (IDENT "Object")))
             (DOT ".")
             (CLASS_KW "class")))
         (SEMICOLON ";"))
@@ -61,10 +61,10 @@
           (R_PAREN ")"))
         (DEFAULT_VALUE
           (DEFAULT_KW "default")
-          (EXPR_PLACEHOLDER
-            (IDENT "Level")
+          (FIELD_ACCESS_EXPR
+            (NAME_REF_EXPR (NAME_REF (IDENT "Level")))
             (DOT ".")
-            (IDENT "INFO")))
+            (NAME_REF (IDENT "INFO"))))
         (SEMICOLON ";"))
       (METHOD_DECL
         (ARRAY_TYPE

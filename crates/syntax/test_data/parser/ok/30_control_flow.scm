@@ -15,79 +15,87 @@
           (IF_STMT
             (IF_KW "if")
             (L_PAREN "(")
-            (EXPR_PLACEHOLDER (IDENT "a"))
+            (NAME_REF_EXPR (NAME_REF (IDENT "a")))
             (R_PAREN ")")
             (EXPR_STMT
-              (EXPR_PLACEHOLDER
-                (IDENT "b")
-                (L_PAREN "(")
-                (R_PAREN ")"))
+              (CALL_EXPR
+                (NAME_REF_EXPR (NAME_REF (IDENT "b")))
+                (ARG_LIST
+                  (L_PAREN "(")
+                  (R_PAREN ")")))
               (SEMICOLON ";")))
           (IF_STMT
             (IF_KW "if")
             (L_PAREN "(")
-            (EXPR_PLACEHOLDER (IDENT "a"))
+            (NAME_REF_EXPR (NAME_REF (IDENT "a")))
             (R_PAREN ")")
             (BLOCK
               (L_CURLY "{")
               (EXPR_STMT
-                (EXPR_PLACEHOLDER
-                  (IDENT "b")
-                  (L_PAREN "(")
-                  (R_PAREN ")"))
+                (CALL_EXPR
+                  (NAME_REF_EXPR (NAME_REF (IDENT "b")))
+                  (ARG_LIST
+                    (L_PAREN "(")
+                    (R_PAREN ")")))
                 (SEMICOLON ";"))
               (R_CURLY "}"))
             (ELSE_KW "else")
             (BLOCK
               (L_CURLY "{")
               (EXPR_STMT
-                (EXPR_PLACEHOLDER
-                  (IDENT "c")
-                  (L_PAREN "(")
-                  (R_PAREN ")"))
+                (CALL_EXPR
+                  (NAME_REF_EXPR (NAME_REF (IDENT "c")))
+                  (ARG_LIST
+                    (L_PAREN "(")
+                    (R_PAREN ")")))
                 (SEMICOLON ";"))
               (R_CURLY "}")))
           (IF_STMT
             (IF_KW "if")
             (L_PAREN "(")
-            (EXPR_PLACEHOLDER (IDENT "a"))
+            (NAME_REF_EXPR (NAME_REF (IDENT "a")))
             (R_PAREN ")")
             (EXPR_STMT
-              (EXPR_PLACEHOLDER
-                (IDENT "b")
-                (L_PAREN "(")
-                (R_PAREN ")"))
+              (CALL_EXPR
+                (NAME_REF_EXPR (NAME_REF (IDENT "b")))
+                (ARG_LIST
+                  (L_PAREN "(")
+                  (R_PAREN ")")))
               (SEMICOLON ";"))
             (ELSE_KW "else")
             (IF_STMT
               (IF_KW "if")
               (L_PAREN "(")
-              (EXPR_PLACEHOLDER (IDENT "c"))
+              (NAME_REF_EXPR (NAME_REF (IDENT "c")))
               (R_PAREN ")")
               (EXPR_STMT
-                (EXPR_PLACEHOLDER
-                  (IDENT "d")
-                  (L_PAREN "(")
-                  (R_PAREN ")"))
+                (CALL_EXPR
+                  (NAME_REF_EXPR (NAME_REF (IDENT "d")))
+                  (ARG_LIST
+                    (L_PAREN "(")
+                    (R_PAREN ")")))
                 (SEMICOLON ";"))
               (ELSE_KW "else")
               (EXPR_STMT
-                (EXPR_PLACEHOLDER
-                  (IDENT "e")
-                  (L_PAREN "(")
-                  (R_PAREN ")"))
+                (CALL_EXPR
+                  (NAME_REF_EXPR (NAME_REF (IDENT "e")))
+                  (ARG_LIST
+                    (L_PAREN "(")
+                    (R_PAREN ")")))
                 (SEMICOLON ";"))))
           (IF_STMT
             (IF_KW "if")
             (L_PAREN "(")
-            (EXPR_PLACEHOLDER
-              (IDENT "x")
-              (L_ANGLE "<")
-              (IDENT "y")
+            (BINARY_EXPR
+              (BINARY_EXPR
+                (NAME_REF_EXPR (NAME_REF (IDENT "x")))
+                (L_ANGLE "<")
+                (NAME_REF_EXPR (NAME_REF (IDENT "y"))))
               (AMP2 "&&")
-              (IDENT "y")
-              (R_ANGLE ">")
-              (IDENT "z"))
+              (BINARY_EXPR
+                (NAME_REF_EXPR (NAME_REF (IDENT "y")))
+                (R_ANGLE ">")
+                (NAME_REF_EXPR (NAME_REF (IDENT "z")))))
             (R_PAREN ")")
             (BLOCK
               (L_CURLY "{")
@@ -95,27 +103,28 @@
           (WHILE_STMT
             (WHILE_KW "while")
             (L_PAREN "(")
-            (EXPR_PLACEHOLDER (IDENT "running"))
+            (NAME_REF_EXPR (NAME_REF (IDENT "running")))
             (R_PAREN ")")
             (EXPR_STMT
-              (EXPR_PLACEHOLDER
-                (IDENT "step")
-                (L_PAREN "(")
-                (R_PAREN ")"))
+              (CALL_EXPR
+                (NAME_REF_EXPR (NAME_REF (IDENT "step")))
+                (ARG_LIST
+                  (L_PAREN "(")
+                  (R_PAREN ")")))
               (SEMICOLON ";")))
           (WHILE_STMT
             (WHILE_KW "while")
             (L_PAREN "(")
-            (EXPR_PLACEHOLDER
-              (IDENT "i")
+            (BINARY_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "i")))
               (L_ANGLE "<")
-              (IDENT "n"))
+              (NAME_REF_EXPR (NAME_REF (IDENT "n"))))
             (R_PAREN ")")
             (BLOCK
               (L_CURLY "{")
               (EXPR_STMT
-                (EXPR_PLACEHOLDER
-                  (IDENT "i")
+                (POSTFIX_EXPR
+                  (NAME_REF_EXPR (NAME_REF (IDENT "i")))
                   (PLUS2 "++"))
                 (SEMICOLON ";"))
               (R_CURLY "}")))
@@ -124,32 +133,32 @@
             (BLOCK
               (L_CURLY "{")
               (EXPR_STMT
-                (EXPR_PLACEHOLDER
-                  (IDENT "i")
+                (POSTFIX_EXPR
+                  (NAME_REF_EXPR (NAME_REF (IDENT "i")))
                   (PLUS2 "++"))
                 (SEMICOLON ";"))
               (R_CURLY "}"))
             (WHILE_KW "while")
             (L_PAREN "(")
-            (EXPR_PLACEHOLDER
-              (IDENT "i")
+            (BINARY_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "i")))
               (L_ANGLE "<")
-              (IDENT "n"))
+              (NAME_REF_EXPR (NAME_REF (IDENT "n"))))
             (R_PAREN ")")
             (SEMICOLON ";"))
           (DO_STMT
             (DO_KW "do")
             (EXPR_STMT
-              (EXPR_PLACEHOLDER
-                (IDENT "i")
+              (POSTFIX_EXPR
+                (NAME_REF_EXPR (NAME_REF (IDENT "i")))
                 (PLUS2 "++"))
               (SEMICOLON ";"))
             (WHILE_KW "while")
             (L_PAREN "(")
-            (EXPR_PLACEHOLDER
-              (IDENT "i")
+            (BINARY_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "i")))
               (L_ANGLE "<")
-              (IDENT "n"))
+              (NAME_REF_EXPR (NAME_REF (IDENT "n"))))
             (R_PAREN ")")
             (SEMICOLON ";"))
           (FOR_STMT
@@ -160,22 +169,22 @@
               (VARIABLE_DECLARATOR
                 (NAME (IDENT "i"))
                 (EQ "=")
-                (EXPR_PLACEHOLDER (INT_NUMBER "0"))))
+                (LITERAL (INT_NUMBER "0"))))
             (SEMICOLON ";")
-            (EXPR_PLACEHOLDER
-              (IDENT "i")
+            (BINARY_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "i")))
               (L_ANGLE "<")
-              (IDENT "n"))
+              (NAME_REF_EXPR (NAME_REF (IDENT "n"))))
             (SEMICOLON ";")
-            (EXPR_PLACEHOLDER
-              (IDENT "i")
+            (POSTFIX_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "i")))
               (PLUS2 "++"))
             (R_PAREN ")")
             (EXPR_STMT
-              (EXPR_PLACEHOLDER
-                (IDENT "sum")
+              (ASSIGN_EXPR
+                (NAME_REF_EXPR (NAME_REF (IDENT "sum")))
                 (PLUSEQ "+=")
-                (IDENT "i"))
+                (NAME_REF_EXPR (NAME_REF (IDENT "i"))))
               (SEMICOLON ";")))
           (FOR_STMT
             (FOR_KW "for")
@@ -185,23 +194,24 @@
               (VARIABLE_DECLARATOR
                 (NAME (IDENT "i"))
                 (EQ "=")
-                (EXPR_PLACEHOLDER (INT_NUMBER "0")))
+                (LITERAL (INT_NUMBER "0")))
               (COMMA ",")
               (VARIABLE_DECLARATOR
                 (NAME (IDENT "j"))
                 (EQ "=")
-                (EXPR_PLACEHOLDER (IDENT "n"))))
+                (NAME_REF_EXPR (NAME_REF (IDENT "n")))))
             (SEMICOLON ";")
-            (EXPR_PLACEHOLDER
-              (IDENT "i")
+            (BINARY_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "i")))
               (L_ANGLE "<")
-              (IDENT "j"))
+              (NAME_REF_EXPR (NAME_REF (IDENT "j"))))
             (SEMICOLON ";")
-            (EXPR_PLACEHOLDER
-              (IDENT "i")
-              (PLUS2 "++")
-              (COMMA ",")
-              (IDENT "j")
+            (POSTFIX_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "i")))
+              (PLUS2 "++"))
+            (COMMA ",")
+            (POSTFIX_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "j")))
               (MINUS2 "--"))
             (R_PAREN ")")
             (BLOCK
@@ -210,18 +220,18 @@
           (FOR_STMT
             (FOR_KW "for")
             (L_PAREN "(")
-            (EXPR_PLACEHOLDER
-              (IDENT "i")
+            (ASSIGN_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "i")))
               (EQ "=")
-              (INT_NUMBER "0"))
+              (LITERAL (INT_NUMBER "0")))
             (SEMICOLON ";")
-            (EXPR_PLACEHOLDER
-              (IDENT "i")
+            (BINARY_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "i")))
               (L_ANGLE "<")
-              (IDENT "n"))
+              (NAME_REF_EXPR (NAME_REF (IDENT "n"))))
             (SEMICOLON ";")
-            (EXPR_PLACEHOLDER
-              (IDENT "i")
+            (POSTFIX_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "i")))
               (PLUS2 "++"))
             (R_PAREN ")")
             (BLOCK
@@ -246,16 +256,17 @@
             (PATH_TYPE (NAME_REF (IDENT "String")))
             (NAME (IDENT "s"))
             (COLON ":")
-            (EXPR_PLACEHOLDER (IDENT "names"))
+            (NAME_REF_EXPR (NAME_REF (IDENT "names")))
             (R_PAREN ")")
             (BLOCK
               (L_CURLY "{")
               (EXPR_STMT
-                (EXPR_PLACEHOLDER
-                  (IDENT "use")
-                  (L_PAREN "(")
-                  (IDENT "s")
-                  (R_PAREN ")"))
+                (CALL_EXPR
+                  (NAME_REF_EXPR (NAME_REF (IDENT "use")))
+                  (ARG_LIST
+                    (L_PAREN "(")
+                    (NAME_REF_EXPR (NAME_REF (IDENT "s")))
+                    (R_PAREN ")")))
                 (SEMICOLON ";"))
               (R_CURLY "}")))
           (FOREACH_STMT
@@ -278,12 +289,13 @@
                 (R_ANGLE ">")))
             (NAME (IDENT "e"))
             (COLON ":")
-            (EXPR_PLACEHOLDER
-              (IDENT "map")
+            (METHOD_CALL_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "map")))
               (DOT ".")
-              (IDENT "entrySet")
-              (L_PAREN "(")
-              (R_PAREN ")"))
+              (NAME_REF (IDENT "entrySet"))
+              (ARG_LIST
+                (L_PAREN "(")
+                (R_PAREN ")")))
             (R_PAREN ")")
             (BLOCK
               (L_CURLY "{")
@@ -294,14 +306,15 @@
             (PATH_TYPE (NAME_REF (IDENT "var")))
             (NAME (IDENT "x"))
             (COLON ":")
-            (EXPR_PLACEHOLDER (IDENT "xs"))
+            (NAME_REF_EXPR (NAME_REF (IDENT "xs")))
             (R_PAREN ")")
             (EXPR_STMT
-              (EXPR_PLACEHOLDER
-                (IDENT "use")
-                (L_PAREN "(")
-                (IDENT "x")
-                (R_PAREN ")"))
+              (CALL_EXPR
+                (NAME_REF_EXPR (NAME_REF (IDENT "use")))
+                (ARG_LIST
+                  (L_PAREN "(")
+                  (NAME_REF_EXPR (NAME_REF (IDENT "x")))
+                  (R_PAREN ")")))
               (SEMICOLON ";")))
           (FOREACH_STMT
             (FOR_KW "for")
@@ -313,7 +326,7 @@
             (PRIMITIVE_TYPE (INT_KW "int"))
             (NAME (IDENT "i"))
             (COLON ":")
-            (EXPR_PLACEHOLDER (IDENT "ints"))
+            (NAME_REF_EXPR (NAME_REF (IDENT "ints")))
             (R_PAREN ")")
             (BLOCK
               (L_CURLY "{")
@@ -327,7 +340,7 @@
               (R_BRACK "]"))
             (NAME (IDENT "row"))
             (COLON ":")
-            (EXPR_PLACEHOLDER (IDENT "matrix"))
+            (NAME_REF_EXPR (NAME_REF (IDENT "matrix")))
             (R_PAREN ")")
             (BLOCK
               (L_CURLY "{")
@@ -342,7 +355,7 @@
           (IF_STMT
             (IF_KW "if")
             (L_PAREN "(")
-            (EXPR_PLACEHOLDER (IDENT "a"))
+            (NAME_REF_EXPR (NAME_REF (IDENT "a")))
             (R_PAREN ")")
             (EMPTY_STMT (SEMICOLON ";"))
             (ELSE_KW "else")
@@ -358,15 +371,15 @@
                 (VARIABLE_DECLARATOR
                   (NAME (IDENT "i"))
                   (EQ "=")
-                  (EXPR_PLACEHOLDER (INT_NUMBER "0"))))
+                  (LITERAL (INT_NUMBER "0"))))
               (SEMICOLON ";")
-              (EXPR_PLACEHOLDER
-                (IDENT "i")
+              (BINARY_EXPR
+                (NAME_REF_EXPR (NAME_REF (IDENT "i")))
                 (L_ANGLE "<")
-                (INT_NUMBER "3"))
+                (LITERAL (INT_NUMBER "3")))
               (SEMICOLON ";")
-              (EXPR_PLACEHOLDER
-                (IDENT "i")
+              (POSTFIX_EXPR
+                (NAME_REF_EXPR (NAME_REF (IDENT "i")))
                 (PLUS2 "++"))
               (R_PAREN ")")
               (BLOCK

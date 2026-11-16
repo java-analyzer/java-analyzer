@@ -16,7 +16,7 @@
         (VARIABLE_DECLARATOR
           (NAME (IDENT "name"))
           (EQ "=")
-          (EXPR_PLACEHOLDER (STRING_LITERAL "\"a\"")))
+          (LITERAL (STRING_LITERAL "\"a\"")))
         (SEMICOLON ";"))
       (FIELD_DECL
         (MODIFIER_LIST (STATIC_KW "static"))
@@ -27,13 +27,13 @@
         (VARIABLE_DECLARATOR
           (NAME (IDENT "values"))
           (EQ "=")
-          (EXPR_PLACEHOLDER
+          (ARRAY_INIT
             (L_CURLY "{")
-            (INT_NUMBER "1")
+            (LITERAL (INT_NUMBER "1"))
             (COMMA ",")
-            (INT_NUMBER "2")
+            (LITERAL (INT_NUMBER "2"))
             (COMMA ",")
-            (INT_NUMBER "3")
+            (LITERAL (INT_NUMBER "3"))
             (R_CURLY "}")))
         (SEMICOLON ";"))
       (FIELD_DECL
@@ -46,12 +46,15 @@
         (VARIABLE_DECLARATOR
           (NAME (IDENT "list"))
           (EQ "=")
-          (EXPR_PLACEHOLDER
+          (NEW_EXPR
             (NEW_KW "new")
-            (IDENT "ArrayList")
-            (L_ANGLE "<")
-            (R_ANGLE ">")
-            (L_PAREN "(")
-            (R_PAREN ")")))
+            (PATH_TYPE
+              (NAME_REF (IDENT "ArrayList"))
+              (TYPE_ARGS
+                (L_ANGLE "<")
+                (R_ANGLE ">")))
+            (ARG_LIST
+              (L_PAREN "(")
+              (R_PAREN ")"))))
         (SEMICOLON ";"))
       (R_CURLY "}"))))

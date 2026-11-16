@@ -9,36 +9,46 @@
         (VARIABLE_DECLARATOR
           (NAME (IDENT "r"))
           (EQ "=")
-          (EXPR_PLACEHOLDER
+          (NEW_EXPR
             (NEW_KW "new")
-            (IDENT "Runnable")
-            (L_PAREN "(")
-            (R_PAREN ")")
-            (L_CURLY "{")
-            (PUBLIC_KW "public")
-            (VOID_KW "void")
-            (IDENT "run")
-            (L_PAREN "(")
-            (R_PAREN ")")
-            (L_CURLY "{")
-            (R_CURLY "}")
-            (R_CURLY "}")))
+            (PATH_TYPE (NAME_REF (IDENT "Runnable")))
+            (ARG_LIST
+              (L_PAREN "(")
+              (R_PAREN ")"))
+            (CLASS_BODY
+              (L_CURLY "{")
+              (METHOD_DECL
+                (MODIFIER_LIST (PUBLIC_KW "public"))
+                (PRIMITIVE_TYPE (VOID_KW "void"))
+                (NAME (IDENT "run"))
+                (PARAM_LIST
+                  (L_PAREN "(")
+                  (R_PAREN ")"))
+                (BLOCK
+                  (L_CURLY "{")
+                  (R_CURLY "}")))
+              (R_CURLY "}"))))
         (SEMICOLON ";"))
       (FIELD_DECL
         (PATH_TYPE (NAME_REF (IDENT "Runnable")))
         (VARIABLE_DECLARATOR
           (NAME (IDENT "s"))
           (EQ "=")
-          (EXPR_PLACEHOLDER
-            (L_PAREN "(")
-            (R_PAREN ")")
+          (LAMBDA_EXPR
+            (LAMBDA_PARAMS
+              (L_PAREN "(")
+              (R_PAREN ")"))
             (ARROW "->")
-            (L_CURLY "{")
-            (IDENT "work")
-            (L_PAREN "(")
-            (R_PAREN ")")
-            (SEMICOLON ";")
-            (R_CURLY "}")))
+            (BLOCK
+              (L_CURLY "{")
+              (EXPR_STMT
+                (CALL_EXPR
+                  (NAME_REF_EXPR (NAME_REF (IDENT "work")))
+                  (ARG_LIST
+                    (L_PAREN "(")
+                    (R_PAREN ")")))
+                (SEMICOLON ";"))
+              (R_CURLY "}"))))
         (SEMICOLON ";"))
       (FIELD_DECL
         (PRIMITIVE_TYPE (INT_KW "int"))

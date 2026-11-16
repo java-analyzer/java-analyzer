@@ -36,7 +36,7 @@
         (NAME (IDENT "M"))
         (ARG_LIST
           (L_PAREN "(")
-          (INT_NUMBER "1")))
+          (LITERAL (INT_NUMBER "1"))))
       (ENUM_DECL
         (ENUM_KW "enum")
         (NAME (IDENT "D"))

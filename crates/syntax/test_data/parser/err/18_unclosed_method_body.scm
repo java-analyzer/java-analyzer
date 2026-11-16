@@ -13,19 +13,26 @@
         (BLOCK
           (L_CURLY "{")
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (IDENT "foo")
-              (L_PAREN "(")
-              (PUBLIC_KW "public")
-              (VOID_KW "void")
-              (IDENT "b")
-              (L_PAREN "(")
-              (R_PAREN ")")
-              (L_CURLY "{")
-              (R_CURLY "}")
-              (PRIVATE_KW "private")
-              (INT_KW "int")
-              (IDENT "c"))
-            (SEMICOLON ";"))
-          (R_CURLY "}"))))))
-(errors (error "expected '}'" "6:2..6:2"))
+            (CALL_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "foo")))
+              (ARG_LIST (L_PAREN "("))))))
+      (METHOD_DECL
+        (MODIFIER_LIST (PUBLIC_KW "public"))
+        (PRIMITIVE_TYPE (VOID_KW "void"))
+        (NAME (IDENT "b"))
+        (PARAM_LIST
+          (L_PAREN "(")
+          (R_PAREN ")"))
+        (BLOCK
+          (L_CURLY "{")
+          (R_CURLY "}")))
+      (FIELD_DECL
+        (MODIFIER_LIST (PRIVATE_KW "private"))
+        (PRIMITIVE_TYPE (INT_KW "int"))
+        (VARIABLE_DECLARATOR (NAME (IDENT "c")))
+        (SEMICOLON ";"))
+      (R_CURLY "}"))))
+(errors
+  (error "expected ')'" "3:13..3:13")
+  (error "expected ';'" "3:13..3:13")
+  (error "expected '}'" "3:13..3:13"))

@@ -15,13 +15,14 @@
           (IF_STMT
             (IF_KW "if")
             (EXPR_STMT
-              (EXPR_PLACEHOLDER
-                (IDENT "x")
+              (BINARY_EXPR
+                (NAME_REF_EXPR (NAME_REF (IDENT "x")))
                 (R_ANGLE ">")
-                (INT_NUMBER "1")
-                (R_PAREN ")")
-                (L_CURLY "{")
-                (R_CURLY "}"))))
+                (LITERAL (INT_NUMBER "1")))))
+          (ERROR (R_PAREN ")"))
+          (BLOCK
+            (L_CURLY "{")
+            (R_CURLY "}"))
           (R_CURLY "}")))
       (METHOD_DECL
         (PRIMITIVE_TYPE (VOID_KW "void"))
@@ -34,10 +35,11 @@
           (IF_STMT
             (IF_KW "if")
             (L_PAREN "(")
-            (EXPR_PLACEHOLDER
-              (IDENT "x")
+            (BINARY_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "x")))
               (R_ANGLE ">")
-              (INT_NUMBER "1")
+              (LITERAL (INT_NUMBER "1")))
+            (BLOCK
               (L_CURLY "{")
               (R_CURLY "}")))
           (R_CURLY "}")))
@@ -52,7 +54,7 @@
           (IF_STMT
             (IF_KW "if")
             (L_PAREN "(")
-            (EXPR_PLACEHOLDER (IDENT "x"))
+            (NAME_REF_EXPR (NAME_REF (IDENT "x")))
             (R_PAREN ")"))
           (R_CURLY "}")))
       (METHOD_DECL
@@ -86,7 +88,7 @@
               (R_CURLY "}"))
             (WHILE_KW "while")
             (L_PAREN "(")
-            (EXPR_PLACEHOLDER (IDENT "x"))
+            (NAME_REF_EXPR (NAME_REF (IDENT "x")))
             (R_PAREN ")"))
           (R_CURLY "}")))
       (METHOD_DECL
@@ -103,9 +105,9 @@
               (L_CURLY "{")
               (R_CURLY "}")))
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
+            (PAREN_EXPR
               (L_PAREN "(")
-              (IDENT "x")
+              (NAME_REF_EXPR (NAME_REF (IDENT "x")))
               (R_PAREN ")"))
             (SEMICOLON ";"))
           (R_CURLY "}")))
@@ -125,13 +127,14 @@
               (VARIABLE_DECLARATOR
                 (NAME (IDENT "i"))
                 (EQ "=")
-                (EXPR_PLACEHOLDER (INT_NUMBER "0"))))
+                (LITERAL (INT_NUMBER "0"))))
             (SEMICOLON ";")
-            (EXPR_PLACEHOLDER
-              (IDENT "i")
+            (BINARY_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "i")))
               (L_ANGLE "<")
-              (INT_NUMBER "3")
-              (IDENT "i")
+              (LITERAL (INT_NUMBER "3")))
+            (POSTFIX_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "i")))
               (PLUS2 "++"))
             (R_PAREN ")")
             (BLOCK
@@ -169,13 +172,13 @@
       (R_CURLY "}"))))
 (errors
   (error "expected '('" "2:18..2:18")
-  (error "expected ';'" "2:29..2:29")
-  (error "expected ')'" "3:29..3:29")
-  (error "expected a statement" "3:29..3:29")
+  (error "expected ';'" "2:24..2:24")
+  (error "expected an expression" "2:24..2:24")
+  (error "expected ')'" "3:25..3:25")
   (error "expected a statement" "4:22..4:22")
   (error "expected an expression" "5:23..5:23")
   (error "expected ';'" "6:32..6:32")
   (error "expected 'while'" "7:22..7:22")
   (error "expected ';'" "7:22..7:22")
-  (error "expected ';'" "8:41..8:41")
+  (error "expected ';'" "8:37..8:37")
   (error "expected an expression" "9:28..9:28"))

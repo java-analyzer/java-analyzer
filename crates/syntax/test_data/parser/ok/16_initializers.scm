@@ -9,20 +9,22 @@
         (BLOCK
           (L_CURLY "{")
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (IDENT "init")
-              (L_PAREN "(")
-              (R_PAREN ")"))
+            (CALL_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "init")))
+              (ARG_LIST
+                (L_PAREN "(")
+                (R_PAREN ")")))
             (SEMICOLON ";"))
           (R_CURLY "}")))
       (INITIALIZER
         (BLOCK
           (L_CURLY "{")
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (IDENT "instance")
-              (L_PAREN "(")
-              (R_PAREN ")"))
+            (CALL_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "instance")))
+              (ARG_LIST
+                (L_PAREN "(")
+                (R_PAREN ")")))
             (SEMICOLON ";"))
           (R_CURLY "}")))
       (R_CURLY "}"))))

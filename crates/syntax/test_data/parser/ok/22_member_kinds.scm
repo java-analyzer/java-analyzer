@@ -11,7 +11,7 @@
         (VARIABLE_DECLARATOR
           (NAME (IDENT "b"))
           (EQ "=")
-          (EXPR_PLACEHOLDER (INT_NUMBER "2")))
+          (LITERAL (INT_NUMBER "2")))
         (COMMA ",")
         (VARIABLE_DECLARATOR
           (NAME (IDENT "c"))
@@ -23,9 +23,9 @@
           (L_BRACK "[")
           (R_BRACK "]")
           (EQ "=")
-          (EXPR_PLACEHOLDER
+          (ARRAY_INIT
             (L_CURLY "{")
-            (INT_NUMBER "1")
+            (LITERAL (INT_NUMBER "1"))
             (R_CURLY "}")))
         (SEMICOLON ";"))
       (FIELD_DECL
@@ -49,13 +49,16 @@
         (VARIABLE_DECLARATOR
           (NAME (IDENT "index"))
           (EQ "=")
-          (EXPR_PLACEHOLDER
+          (NEW_EXPR
             (NEW_KW "new")
-            (IDENT "HashMap")
-            (L_ANGLE "<")
-            (R_ANGLE ">")
-            (L_PAREN "(")
-            (R_PAREN ")")))
+            (PATH_TYPE
+              (NAME_REF (IDENT "HashMap"))
+              (TYPE_ARGS
+                (L_ANGLE "<")
+                (R_ANGLE ">")))
+            (ARG_LIST
+              (L_PAREN "(")
+              (R_PAREN ")"))))
         (SEMICOLON ";"))
       (METHOD_DECL
         (PRIMITIVE_TYPE (VOID_KW "void"))
@@ -108,7 +111,7 @@
           (L_CURLY "{")
           (RETURN_STMT
             (RETURN_KW "return")
-            (EXPR_PLACEHOLDER (IDENT "x"))
+            (NAME_REF_EXPR (NAME_REF (IDENT "x")))
             (SEMICOLON ";"))
           (R_CURLY "}")))
       (METHOD_DECL
@@ -123,7 +126,7 @@
           (L_CURLY "{")
           (RETURN_STMT
             (RETURN_KW "return")
-            (EXPR_PLACEHOLDER (NULL_KW "null"))
+            (LITERAL (NULL_KW "null"))
             (SEMICOLON ";"))
           (R_CURLY "}")))
       (METHOD_DECL
@@ -144,7 +147,7 @@
           (L_CURLY "{")
           (RETURN_STMT
             (RETURN_KW "return")
-            (EXPR_PLACEHOLDER (STRING_LITERAL "\"\""))
+            (LITERAL (STRING_LITERAL "\"\""))
             (SEMICOLON ";"))
           (R_CURLY "}")))
       (METHOD_DECL
@@ -211,10 +214,11 @@
         (BLOCK
           (L_CURLY "{")
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (THIS_KW "this")
-              (L_PAREN "(")
-              (R_PAREN ")"))
+            (CALL_EXPR
+              (THIS_EXPR (THIS_KW "this"))
+              (ARG_LIST
+                (L_PAREN "(")
+                (R_PAREN ")")))
             (SEMICOLON ";"))
           (R_CURLY "}")))
       (METHOD_DECL

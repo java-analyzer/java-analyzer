@@ -17,7 +17,7 @@
             (VARIABLE_DECLARATOR
               (NAME (IDENT "x"))
               (EQ "=")
-              (EXPR_PLACEHOLDER (INT_NUMBER "1"))))
+              (LITERAL (INT_NUMBER "1"))))
           (R_CURLY "}")))
       (METHOD_DECL
         (PRIMITIVE_TYPE (VOID_KW "void"))
@@ -28,10 +28,11 @@
         (BLOCK
           (L_CURLY "{")
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (IDENT "foo")
-              (L_PAREN "(")
-              (R_PAREN ")")))
+            (CALL_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "foo")))
+              (ARG_LIST
+                (L_PAREN "(")
+                (R_PAREN ")"))))
           (R_CURLY "}")))
       (METHOD_DECL
         (PRIMITIVE_TYPE (VOID_KW "void"))
@@ -99,7 +100,7 @@
           (R_PAREN ")"))
         (BLOCK
           (L_CURLY "{")
-          (EXPR_STMT (EXPR_PLACEHOLDER (IDENT "yield")))
+          (EXPR_STMT (NAME_REF_EXPR (NAME_REF (IDENT "yield"))))
           (R_CURLY "}")))
       (METHOD_DECL
         (PRIMITIVE_TYPE (VOID_KW "void"))

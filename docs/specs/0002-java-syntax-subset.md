@@ -279,21 +279,12 @@ EnumBody        = '{' (EnumConstant (',' EnumConstant)* ','?)? (';' Member*)? '}
 EnumConstant    = Annotation* Name ArgList? ClassBody?
 ```
 
-Still shallow in M2a, to be replaced later:
-
-- `BLOCK` (method, constructor and initializer bodies) is a brace-balanced token run, replaced
-  by real statements in M2b. A body still open when `public`, `private` or `protected` shows up
-  at its top level is treated as unclosed (these can never start a statement), so one missing
-  `}` does not swallow the rest of the class.
-- `EXPR_PLACEHOLDER` (field initializers, annotation method defaults) is a token run that ends
-  at a `;` or unmatched `}` outside braces; at `public`, `private`, `protected`, `abstract`,
-  `static`, `class`, `interface` or `enum` outside any brackets (a half-typed initializer must
-  not swallow the next member; `Foo.class` is not affected); and, in variable declarators only,
-  at a `,` outside brackets and generic arguments that is followed by something that looks like
-  another declarator (`name =`, `name ,`, `name ;`, `name [`). Generic arguments are tracked
-  heuristically (`<` after an identifier opens, `>` closes). An empty initializer is reported as
-  `expected an expression`. `ARG_LIST` (enum constant arguments) is a balanced parenthesised
-  run. All of these are replaced by real expressions in M3.
+M2a was delivered with two stand-ins, both since replaced: method, constructor and initializer
+bodies were brace-balanced token runs (now real statements, M2b), and field initializers,
+annotation defaults and enum constant arguments were `EXPR_PLACEHOLDER` token runs (now real
+expressions, M3). A body still open when `public`, `private` or `protected` shows up where a
+statement should start is treated as unclosed (these can never start a statement), so one
+missing `}` does not swallow the rest of the class; that rule remains.
 
 Member-level recovery: a member that cannot start with a type, a name, a modifier or a block is
 wrapped in an `ERROR` node up to the next `;` (consumed), `}`, modifier, annotation or type
@@ -320,8 +311,8 @@ Nodes: `BLOCK`, `LOCAL_VAR_DECL`, `EXPR_STMT`, `EMPTY_STMT`, `IF_STMT`, `WHILE_S
 `YIELD_STMT`, `ASSERT_STMT`, `SYNCHRONIZED_STMT`, `LABELED_STMT`, `TRY_STMT`, `RESOURCE_LIST`,
 `RESOURCE`, `CATCH_CLAUSE`, `FINALLY_CLAUSE`, `SWITCH_STMT`, `SWITCH_BODY`, `SWITCH_CASE`,
 `SWITCH_LABEL`. Local class, interface, enum and record declarations reuse the member-level
-declaration nodes. Statements embed `EXPR_PLACEHOLDER` until M3; the placeholder ends where its
-position requires (`;`, an unmatched `)`, `:` outside a `?:`, `->`).
+declaration nodes. M2b embedded `EXPR_PLACEHOLDER` token runs wherever a statement contains an
+expression; M3 replaced them with real expressions.
 
 Grammar notes:
 
@@ -351,25 +342,67 @@ Statement-level recovery:
 
 ### M3: Expressions
 
-*Unlocks*: go-to-definition for locals and members, completion after `.`.
+*Unlocks*: go-to-definition for locals and members, completion after `.`. Replaces every
+`EXPR_PLACEHOLDER` (the node kind is removed).
 
-Nodes: `LITERAL`, `NAME_REF_EXPR`, `FIELD_ACCESS_EXPR`, `METHOD_CALL_EXPR`, `ARG_LIST`,
-`NEW_EXPR`, `ARRAY_INIT`, `ARRAY_ACCESS_EXPR`, `UNARY_EXPR`, `BINARY_EXPR`,
-`ASSIGN_EXPR`, `TERNARY_EXPR`, `CAST_EXPR`, `INSTANCEOF_EXPR`, `LAMBDA_EXPR`,
-`METHOD_REF_EXPR`, `PAREN_EXPR`, `THIS_EXPR`, `SUPER_EXPR`, `SWITCH_EXPR`, `CLASS_LITERAL`.
+Nodes: `LITERAL`, `NAME_REF_EXPR` (wrapping a `NAME_REF`), `FIELD_ACCESS_EXPR`,
+`METHOD_CALL_EXPR` (`receiver . TYPE_ARGS? NAME_REF ARG_LIST`), `CALL_EXPR` (`callee ARG_LIST`
+for unqualified `foo(..)`, `this(..)` and `super(..)`), `ARG_LIST`, `NEW_EXPR`, `ARRAY_INIT`,
+`ARRAY_ACCESS_EXPR`, `UNARY_EXPR` (prefix), `POSTFIX_EXPR` (`++`, `--`), `BINARY_EXPR`,
+`ASSIGN_EXPR`, `TERNARY_EXPR`, `CAST_EXPR`, `INSTANCEOF_EXPR`, `LAMBDA_EXPR`, `LAMBDA_PARAMS`,
+`METHOD_REF_EXPR`, `PAREN_EXPR`, `THIS_EXPR`, `SUPER_EXPR` (either may be qualified:
+`Outer.this`), `SWITCH_EXPR`, `CLASS_LITERAL`, and the pattern nodes `TYPE_PATTERN`,
+`RECORD_PATTERN` and `GUARD`. Patterns moved here from M4 because `instanceof` and `case`
+labels need them.
 
-Precedence (low to high): assignment (right-assoc), ternary, `||`, `&&`, `|`, `^`, `&`,
-equality, relational/`instanceof`, shift, additive, multiplicative, unary/cast, postfix.
+Precedence (low to high): assignment (right-assoc), ternary (right-assoc), `||`, `&&`, `|`,
+`^`, `&`, equality, relational/`instanceof`, shift, additive, multiplicative, unary/cast,
+postfix. Binary operators are left-associative. Lambdas are operands that extend as far as
+possible.
 
-The ambiguities that need documented handling (each gets dedicated tests): generic call vs.
-less-than (`a < b > c`), cast vs. parenthesised expr, lambda vs. parenthesised expr,
-`>`-merging for shifts, `var` as type vs. identifier.
+Ambiguities and how they are resolved (each has dedicated fixtures):
+
+- **Shifts and `>=`.** The lexer never combines `>`. In expression position the parser merges
+  adjacent tokens with no trivia between them into `GTEQ`, `SHR`, `USHR`, `SHREQ` and `USHREQ`
+  composite tokens; `a > > b` stays two operators.
+- **Generic arguments vs. less-than.** In expression position `<` is always less-than. Types
+  appear only after `new`, `instanceof`, in casts, after `.` (explicit method type arguments:
+  `Foo.<T>bar()`), and as `Type::name` / `Type.class` when the type has type arguments or
+  array dimensions (`List<String>::new`, `int[]::new`, `Foo[].class`), which a bounded token
+  lookahead recognises.
+- **Cast vs. parenthesised expression.** `(Type) operand` is a cast when the parenthesised
+  text is a type (or an intersection `A & B`) and either it is a single primitive keyword, or
+  the next token can start an operand that is not `+`, `-`, `++` or `--` (`(a) + b` is a sum, as
+  in Java).
+- **Lambda vs. parenthesised expression.** `( ... ) ->` and `ident ->` are lambdas; the
+  parentheses are matched with a bounded lookahead. Inside `case` labels lambdas are not
+  recognised, so `case FOO ->` is a rule and not a lambda.
+- **Switch labels.** An item of `case a, b ->` is a pattern if it starts with a modifier or
+  annotation, or is a type followed by an identifier or `(`; otherwise it is an expression.
+  `default` may appear as an item (`case null, default`). A `when` guard follows the items.
+- **Contextual `var`/`yield`/`record`** stay identifiers except where M2b/M1 say otherwise.
+
+Recovery: a missing operand is reported as `expected an expression` without consuming input.
+`foo.` followed by anything that is not a name still yields a `FIELD_ACCESS_EXPR` (with the
+error `expected a name`), so completion has a node to work from. Argument lists, array
+initializers and parameter lists stop at `;`, `}` and the member-only modifiers, so a
+half-typed call does not swallow the next declaration.
+
+Robustness limits (the parser must neither overflow the stack nor build trees that overflow it
+when dropped): nesting of expressions, statements, class bodies and type arguments is limited to
+256 levels (`nesting is too deep` is reported once and the offending tokens become `ERROR`
+nodes or errors), and a single left-associative chain (`a + b + ...`, `a.b.c...`, `f()()...`)
+is limited to 1024 links (`expression is too long`). Token lookahead scans stop after 512
+tokens.
+
+Still unparsed: annotation arguments (`ANNOTATION_ARGS` is a balanced token run), and type
+annotations.
 
 ### M4: Modern Java
 
-Records details, sealed hierarchies, `switch` patterns and `when` guards, record patterns,
-text blocks escapes validation, `var` in lambdas, module declarations (`module-info.java`),
-type annotations.
+Annotation arguments and element values, text block escape validation, module declarations
+(`module-info.java`), type annotations, generic constructor type arguments (`new <T>Foo()`),
+and any construct the JDK sources still show to be unsupported.
 
 ## Syntax errors surfaced to the IDE
 

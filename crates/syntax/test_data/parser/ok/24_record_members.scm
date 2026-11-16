@@ -21,20 +21,21 @@
           (IF_STMT
             (IF_KW "if")
             (L_PAREN "(")
-            (EXPR_PLACEHOLDER
-              (IDENT "x")
+            (BINARY_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "x")))
               (L_ANGLE "<")
-              (INT_NUMBER "0"))
+              (LITERAL (INT_NUMBER "0")))
             (R_PAREN ")")
             (BLOCK
               (L_CURLY "{")
               (THROW_STMT
                 (THROW_KW "throw")
-                (EXPR_PLACEHOLDER
+                (NEW_EXPR
                   (NEW_KW "new")
-                  (IDENT "IllegalArgumentException")
-                  (L_PAREN "(")
-                  (R_PAREN ")"))
+                  (PATH_TYPE (NAME_REF (IDENT "IllegalArgumentException")))
+                  (ARG_LIST
+                    (L_PAREN "(")
+                    (R_PAREN ")")))
                 (SEMICOLON ";"))
               (R_CURLY "}")))
           (R_CURLY "}")))
@@ -49,13 +50,14 @@
         (BLOCK
           (L_CURLY "{")
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (THIS_KW "this")
-              (L_PAREN "(")
-              (IDENT "x")
-              (COMMA ",")
-              (INT_NUMBER "0")
-              (R_PAREN ")"))
+            (CALL_EXPR
+              (THIS_EXPR (THIS_KW "this"))
+              (ARG_LIST
+                (L_PAREN "(")
+                (NAME_REF_EXPR (NAME_REF (IDENT "x")))
+                (COMMA ",")
+                (LITERAL (INT_NUMBER "0"))
+                (R_PAREN ")")))
             (SEMICOLON ";"))
           (R_CURLY "}")))
       (METHOD_DECL
@@ -69,14 +71,15 @@
           (L_CURLY "{")
           (RETURN_STMT
             (RETURN_KW "return")
-            (EXPR_PLACEHOLDER
+            (NEW_EXPR
               (NEW_KW "new")
-              (IDENT "Point")
-              (L_PAREN "(")
-              (INT_NUMBER "0")
-              (COMMA ",")
-              (INT_NUMBER "0")
-              (R_PAREN ")"))
+              (PATH_TYPE (NAME_REF (IDENT "Point")))
+              (ARG_LIST
+                (L_PAREN "(")
+                (LITERAL (INT_NUMBER "0"))
+                (COMMA ",")
+                (LITERAL (INT_NUMBER "0"))
+                (R_PAREN ")")))
             (SEMICOLON ";"))
           (R_CURLY "}")))
       (METHOD_DECL
@@ -89,19 +92,23 @@
           (L_CURLY "{")
           (RETURN_STMT
             (RETURN_KW "return")
-            (EXPR_PLACEHOLDER
-              (IDENT "Math")
+            (METHOD_CALL_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "Math")))
               (DOT ".")
-              (IDENT "sqrt")
-              (L_PAREN "(")
-              (IDENT "x")
-              (STAR "*")
-              (IDENT "x")
-              (PLUS "+")
-              (IDENT "y")
-              (STAR "*")
-              (IDENT "y")
-              (R_PAREN ")"))
+              (NAME_REF (IDENT "sqrt"))
+              (ARG_LIST
+                (L_PAREN "(")
+                (BINARY_EXPR
+                  (BINARY_EXPR
+                    (NAME_REF_EXPR (NAME_REF (IDENT "x")))
+                    (STAR "*")
+                    (NAME_REF_EXPR (NAME_REF (IDENT "x"))))
+                  (PLUS "+")
+                  (BINARY_EXPR
+                    (NAME_REF_EXPR (NAME_REF (IDENT "y")))
+                    (STAR "*")
+                    (NAME_REF_EXPR (NAME_REF (IDENT "y")))))
+                (R_PAREN ")")))
             (SEMICOLON ";"))
           (R_CURLY "}")))
       (R_CURLY "}")))

@@ -19,14 +19,14 @@
         (NAME (IDENT "MERCURY"))
         (ARG_LIST
           (L_PAREN "(")
-          (DOUBLE_NUMBER "1.0")
+          (LITERAL (DOUBLE_NUMBER "1.0"))
           (R_PAREN ")")))
       (COMMA ",")
       (ENUM_CONSTANT
         (NAME (IDENT "VENUS"))
         (ARG_LIST
           (L_PAREN "(")
-          (DOUBLE_NUMBER "2.0")
+          (LITERAL (DOUBLE_NUMBER "2.0"))
           (R_PAREN ")"))
         (CLASS_BODY
           (L_CURLY "{")
@@ -59,12 +59,13 @@
         (BLOCK
           (L_CURLY "{")
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (THIS_KW "this")
-              (DOT ".")
-              (IDENT "mass")
+            (ASSIGN_EXPR
+              (FIELD_ACCESS_EXPR
+                (THIS_EXPR (THIS_KW "this"))
+                (DOT ".")
+                (NAME_REF (IDENT "mass")))
               (EQ "=")
-              (IDENT "mass"))
+              (NAME_REF_EXPR (NAME_REF (IDENT "mass"))))
             (SEMICOLON ";"))
           (R_CURLY "}")))
       (R_CURLY "}"))))

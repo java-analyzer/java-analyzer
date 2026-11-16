@@ -15,15 +15,16 @@
           (IF_STMT
             (IF_KW "if")
             (L_PAREN "(")
-            (EXPR_PLACEHOLDER (IDENT "x"))
+            (NAME_REF_EXPR (NAME_REF (IDENT "x")))
             (R_PAREN ")")
             (BLOCK
               (L_CURLY "{")
               (EXPR_STMT
-                (EXPR_PLACEHOLDER
-                  (IDENT "foo")
-                  (L_PAREN "(")
-                  (R_PAREN ")"))
+                (CALL_EXPR
+                  (NAME_REF_EXPR (NAME_REF (IDENT "foo")))
+                  (ARG_LIST
+                    (L_PAREN "(")
+                    (R_PAREN ")")))
                 (SEMICOLON ";"))))))
       (METHOD_DECL
         (MODIFIER_LIST (PUBLIC_KW "public"))

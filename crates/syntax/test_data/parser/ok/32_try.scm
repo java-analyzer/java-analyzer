@@ -20,10 +20,11 @@
             (BLOCK
               (L_CURLY "{")
               (EXPR_STMT
-                (EXPR_PLACEHOLDER
-                  (IDENT "a")
-                  (L_PAREN "(")
-                  (R_PAREN ")"))
+                (CALL_EXPR
+                  (NAME_REF_EXPR (NAME_REF (IDENT "a")))
+                  (ARG_LIST
+                    (L_PAREN "(")
+                    (R_PAREN ")")))
                 (SEMICOLON ";"))
               (R_CURLY "}"))
             (CATCH_CLAUSE
@@ -35,10 +36,11 @@
               (BLOCK
                 (L_CURLY "{")
                 (EXPR_STMT
-                  (EXPR_PLACEHOLDER
-                    (IDENT "b")
-                    (L_PAREN "(")
-                    (R_PAREN ")"))
+                  (CALL_EXPR
+                    (NAME_REF_EXPR (NAME_REF (IDENT "b")))
+                    (ARG_LIST
+                      (L_PAREN "(")
+                      (R_PAREN ")")))
                   (SEMICOLON ";"))
                 (R_CURLY "}"))))
           (TRY_STMT
@@ -46,10 +48,11 @@
             (BLOCK
               (L_CURLY "{")
               (EXPR_STMT
-                (EXPR_PLACEHOLDER
-                  (IDENT "a")
-                  (L_PAREN "(")
-                  (R_PAREN ")"))
+                (CALL_EXPR
+                  (NAME_REF_EXPR (NAME_REF (IDENT "a")))
+                  (ARG_LIST
+                    (L_PAREN "(")
+                    (R_PAREN ")")))
                 (SEMICOLON ";"))
               (R_CURLY "}"))
             (FINALLY_CLAUSE
@@ -57,10 +60,11 @@
               (BLOCK
                 (L_CURLY "{")
                 (EXPR_STMT
-                  (EXPR_PLACEHOLDER
-                    (IDENT "c")
-                    (L_PAREN "(")
-                    (R_PAREN ")"))
+                  (CALL_EXPR
+                    (NAME_REF_EXPR (NAME_REF (IDENT "c")))
+                    (ARG_LIST
+                      (L_PAREN "(")
+                      (R_PAREN ")")))
                   (SEMICOLON ";"))
                 (R_CURLY "}"))))
           (TRY_STMT
@@ -68,10 +72,11 @@
             (BLOCK
               (L_CURLY "{")
               (EXPR_STMT
-                (EXPR_PLACEHOLDER
-                  (IDENT "a")
-                  (L_PAREN "(")
-                  (R_PAREN ")"))
+                (CALL_EXPR
+                  (NAME_REF_EXPR (NAME_REF (IDENT "a")))
+                  (ARG_LIST
+                    (L_PAREN "(")
+                    (R_PAREN ")")))
                 (SEMICOLON ";"))
               (R_CURLY "}"))
             (CATCH_CLAUSE
@@ -108,20 +113,22 @@
                 (PATH_TYPE (NAME_REF (IDENT "Reader")))
                 (NAME (IDENT "r"))
                 (EQ "=")
-                (EXPR_PLACEHOLDER
-                  (IDENT "open")
-                  (L_PAREN "(")
-                  (R_PAREN ")")))
+                (CALL_EXPR
+                  (NAME_REF_EXPR (NAME_REF (IDENT "open")))
+                  (ARG_LIST
+                    (L_PAREN "(")
+                    (R_PAREN ")"))))
               (R_PAREN ")"))
             (BLOCK
               (L_CURLY "{")
               (EXPR_STMT
-                (EXPR_PLACEHOLDER
-                  (IDENT "r")
+                (METHOD_CALL_EXPR
+                  (NAME_REF_EXPR (NAME_REF (IDENT "r")))
                   (DOT ".")
-                  (IDENT "read")
-                  (L_PAREN "(")
-                  (R_PAREN ")"))
+                  (NAME_REF (IDENT "read"))
+                  (ARG_LIST
+                    (L_PAREN "(")
+                    (R_PAREN ")")))
                 (SEMICOLON ";"))
               (R_CURLY "}")))
           (TRY_STMT
@@ -133,19 +140,21 @@
                 (PATH_TYPE (NAME_REF (IDENT "Reader")))
                 (NAME (IDENT "r"))
                 (EQ "=")
-                (EXPR_PLACEHOLDER
-                  (IDENT "open")
-                  (L_PAREN "(")
-                  (R_PAREN ")")))
+                (CALL_EXPR
+                  (NAME_REF_EXPR (NAME_REF (IDENT "open")))
+                  (ARG_LIST
+                    (L_PAREN "(")
+                    (R_PAREN ")"))))
               (SEMICOLON ";")
               (RESOURCE
                 (PATH_TYPE (NAME_REF (IDENT "var")))
                 (NAME (IDENT "w"))
                 (EQ "=")
-                (EXPR_PLACEHOLDER
-                  (IDENT "openWriter")
-                  (L_PAREN "(")
-                  (R_PAREN ")")))
+                (CALL_EXPR
+                  (NAME_REF_EXPR (NAME_REF (IDENT "openWriter")))
+                  (ARG_LIST
+                    (L_PAREN "(")
+                    (R_PAREN ")"))))
               (SEMICOLON ";")
               (R_PAREN ")"))
             (BLOCK
@@ -155,7 +164,7 @@
             (TRY_KW "try")
             (RESOURCE_LIST
               (L_PAREN "(")
-              (RESOURCE (EXPR_PLACEHOLDER (IDENT "r")))
+              (RESOURCE (NAME_REF_EXPR (NAME_REF (IDENT "r"))))
               (R_PAREN ")"))
             (BLOCK
               (L_CURLY "{")
@@ -164,9 +173,9 @@
             (TRY_KW "try")
             (RESOURCE_LIST
               (L_PAREN "(")
-              (RESOURCE (EXPR_PLACEHOLDER (IDENT "r")))
+              (RESOURCE (NAME_REF_EXPR (NAME_REF (IDENT "r"))))
               (SEMICOLON ";")
-              (RESOURCE (EXPR_PLACEHOLDER (IDENT "w")))
+              (RESOURCE (NAME_REF_EXPR (NAME_REF (IDENT "w"))))
               (R_PAREN ")"))
             (BLOCK
               (L_CURLY "{")
@@ -188,14 +197,16 @@
                 (PATH_TYPE (NAME_REF (IDENT "var")))
                 (NAME (IDENT "in"))
                 (EQ "=")
-                (EXPR_PLACEHOLDER
+                (NEW_EXPR
                   (NEW_KW "new")
-                  (IDENT "Scanner")
-                  (L_PAREN "(")
-                  (IDENT "System")
-                  (DOT ".")
-                  (IDENT "in")
-                  (R_PAREN ")")))
+                  (PATH_TYPE (NAME_REF (IDENT "Scanner")))
+                  (ARG_LIST
+                    (L_PAREN "(")
+                    (FIELD_ACCESS_EXPR
+                      (NAME_REF_EXPR (NAME_REF (IDENT "System")))
+                      (DOT ".")
+                      (NAME_REF (IDENT "in")))
+                    (R_PAREN ")"))))
               (R_PAREN ")"))
             (BLOCK
               (L_CURLY "{")

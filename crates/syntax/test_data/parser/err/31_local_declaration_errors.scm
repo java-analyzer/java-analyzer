@@ -56,7 +56,7 @@
             (PATH_TYPE (NAME_REF (IDENT "Foo")))
             (VARIABLE_DECLARATOR (NAME (IDENT "x"))))
           (EXPR_STMT
-            (EXPR_PLACEHOLDER (IDENT "y"))
+            (NAME_REF_EXPR (NAME_REF (IDENT "y")))
             (SEMICOLON ";"))
           (R_CURLY "}")))
       (METHOD_DECL

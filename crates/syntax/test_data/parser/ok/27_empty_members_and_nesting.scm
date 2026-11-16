@@ -40,22 +40,23 @@
           (WHILE_STMT
             (WHILE_KW "while")
             (L_PAREN "(")
-            (EXPR_PLACEHOLDER (TRUE_KW "true"))
+            (LITERAL (TRUE_KW "true"))
             (R_PAREN ")")
             (BLOCK
               (L_CURLY "{")
               (IF_STMT
                 (IF_KW "if")
                 (L_PAREN "(")
-                (EXPR_PLACEHOLDER (IDENT "x"))
+                (NAME_REF_EXPR (NAME_REF (IDENT "x")))
                 (R_PAREN ")")
                 (BLOCK
                   (L_CURLY "{")
                   (EXPR_STMT
-                    (EXPR_PLACEHOLDER
-                      (IDENT "y")
-                      (L_PAREN "(")
-                      (R_PAREN ")"))
+                    (CALL_EXPR
+                      (NAME_REF_EXPR (NAME_REF (IDENT "y")))
+                      (ARG_LIST
+                        (L_PAREN "(")
+                        (R_PAREN ")")))
                     (SEMICOLON ";"))
                   (R_CURLY "}")))
               (R_CURLY "}")))

@@ -59,7 +59,7 @@
         (NAME (IDENT "ONE"))
         (ARG_LIST
           (L_PAREN "(")
-          (INT_NUMBER "1")
+          (LITERAL (INT_NUMBER "1"))
           (R_PAREN ")"))
         (CLASS_BODY
           (L_CURLY "{")
@@ -73,7 +73,7 @@
               (L_CURLY "{")
               (RETURN_STMT
                 (RETURN_KW "return")
-                (EXPR_PLACEHOLDER (INT_NUMBER "1"))
+                (LITERAL (INT_NUMBER "1"))
                 (SEMICOLON ";"))
               (R_CURLY "}")))
           (R_CURLY "}")))
@@ -82,9 +82,9 @@
         (NAME (IDENT "TWO"))
         (ARG_LIST
           (L_PAREN "(")
-          (INT_NUMBER "2")
+          (LITERAL (INT_NUMBER "2"))
           (COMMA ",")
-          (STRING_LITERAL "\"two\"")
+          (LITERAL (STRING_LITERAL "\"two\""))
           (R_PAREN ")"))
         (CLASS_BODY
           (L_CURLY "{")
@@ -107,11 +107,12 @@
         (BLOCK
           (L_CURLY "{")
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (THIS_KW "this")
-              (L_PAREN "(")
-              (INT_NUMBER "0")
-              (R_PAREN ")"))
+            (CALL_EXPR
+              (THIS_EXPR (THIS_KW "this"))
+              (ARG_LIST
+                (L_PAREN "(")
+                (LITERAL (INT_NUMBER "0"))
+                (R_PAREN ")")))
             (SEMICOLON ";"))
           (R_CURLY "}")))
       (CONSTRUCTOR_DECL
@@ -125,12 +126,13 @@
         (BLOCK
           (L_CURLY "{")
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (THIS_KW "this")
-              (DOT ".")
-              (IDENT "x")
+            (ASSIGN_EXPR
+              (FIELD_ACCESS_EXPR
+                (THIS_EXPR (THIS_KW "this"))
+                (DOT ".")
+                (NAME_REF (IDENT "x")))
               (EQ "=")
-              (IDENT "x"))
+              (NAME_REF_EXPR (NAME_REF (IDENT "x"))))
             (SEMICOLON ";"))
           (R_CURLY "}")))
       (CONSTRUCTOR_DECL
@@ -148,11 +150,12 @@
         (BLOCK
           (L_CURLY "{")
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (THIS_KW "this")
-              (L_PAREN "(")
-              (IDENT "x")
-              (R_PAREN ")"))
+            (CALL_EXPR
+              (THIS_EXPR (THIS_KW "this"))
+              (ARG_LIST
+                (L_PAREN "(")
+                (NAME_REF_EXPR (NAME_REF (IDENT "x")))
+                (R_PAREN ")")))
             (SEMICOLON ";"))
           (R_CURLY "}")))
       (METHOD_DECL
@@ -165,7 +168,7 @@
           (L_CURLY "{")
           (RETURN_STMT
             (RETURN_KW "return")
-            (EXPR_PLACEHOLDER (IDENT "x"))
+            (NAME_REF_EXPR (NAME_REF (IDENT "x")))
             (SEMICOLON ";"))
           (R_CURLY "}")))
       (R_CURLY "}"))))

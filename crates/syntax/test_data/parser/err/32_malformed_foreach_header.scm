@@ -23,7 +23,7 @@
                 (L_ANGLE "<")
                 (PATH_TYPE (NAME_REF (IDENT "String")))))
             (NAME (IDENT "List"))
-            (EXPR_PLACEHOLDER
+            (ERROR
               (L_ANGLE "<")
               (IDENT "Integer")
               (R_ANGLE ">")
@@ -34,25 +34,25 @@
               (DOT ".")
               (IDENT "entrySet")
               (L_PAREN "(")
-              (R_PAREN ")"))
-            (R_PAREN ")")
-            (BLOCK
-              (L_CURLY "{")
-              (R_CURLY "}")))
+              (R_PAREN ")")
+              (R_PAREN ")")))
+          (BLOCK
+            (L_CURLY "{")
+            (R_CURLY "}"))
           (FOR_STMT
             (FOR_KW "for")
             (L_PAREN "(")
             (LOCAL_VAR_DECL
               (PRIMITIVE_TYPE (INT_KW "int"))
               (VARIABLE_DECLARATOR (NAME (IDENT "x"))))
-            (EXPR_PLACEHOLDER
-              (IDENT "y")
+            (NAME_REF_EXPR (NAME_REF (IDENT "y")))
+            (ERROR
               (COLON ":")
-              (IDENT "xs"))
-            (R_PAREN ")")
-            (BLOCK
-              (L_CURLY "{")
-              (R_CURLY "}")))
+              (IDENT "xs")
+              (R_PAREN ")")))
+          (BLOCK
+            (L_CURLY "{")
+            (R_CURLY "}"))
           (R_CURLY "}")))
       (METHOD_DECL
         (PRIMITIVE_TYPE (VOID_KW "void"))
@@ -67,5 +67,11 @@
 (errors
   (error "expected '>'" "3:30..3:30")
   (error "expected ':'" "3:35..3:35")
+  (error "expected an expression" "3:35..3:35")
+  (error "expected ')'" "3:35..3:35")
+  (error "expected an expression" "3:35..3:35")
   (error "expected ';'" "4:19..4:19")
-  (error "expected ';'" "4:26..4:26"))
+  (error "expected ';'" "4:21..4:21")
+  (error "expected an expression" "4:21..4:21")
+  (error "expected ')'" "4:21..4:21")
+  (error "expected an expression" "4:21..4:21"))

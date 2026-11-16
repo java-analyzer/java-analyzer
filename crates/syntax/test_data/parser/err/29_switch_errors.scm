@@ -15,26 +15,28 @@
           (SWITCH_STMT
             (SWITCH_KW "switch")
             (L_PAREN "(")
-            (EXPR_PLACEHOLDER (IDENT "x"))
+            (NAME_REF_EXPR (NAME_REF (IDENT "x")))
             (R_PAREN ")")
             (SWITCH_BODY
               (L_CURLY "{")
               (EXPR_STMT
-                (EXPR_PLACEHOLDER
-                  (IDENT "foo")
-                  (L_PAREN "(")
-                  (R_PAREN ")"))
+                (CALL_EXPR
+                  (NAME_REF_EXPR (NAME_REF (IDENT "foo")))
+                  (ARG_LIST
+                    (L_PAREN "(")
+                    (R_PAREN ")")))
                 (SEMICOLON ";"))
               (SWITCH_CASE
                 (SWITCH_LABEL
                   (CASE_KW "case")
-                  (EXPR_PLACEHOLDER (INT_NUMBER "1"))
+                  (LITERAL (INT_NUMBER "1"))
                   (COLON ":"))
                 (EXPR_STMT
-                  (EXPR_PLACEHOLDER
-                    (IDENT "bar")
-                    (L_PAREN "(")
-                    (R_PAREN ")"))
+                  (CALL_EXPR
+                    (NAME_REF_EXPR (NAME_REF (IDENT "bar")))
+                    (ARG_LIST
+                      (L_PAREN "(")
+                      (R_PAREN ")")))
                   (SEMICOLON ";")))
               (R_CURLY "}")))
           (R_CURLY "}")))
@@ -49,19 +51,21 @@
           (SWITCH_STMT
             (SWITCH_KW "switch")
             (L_PAREN "(")
-            (EXPR_PLACEHOLDER (IDENT "x"))
+            (NAME_REF_EXPR (NAME_REF (IDENT "x")))
             (R_PAREN ")")
             (SWITCH_BODY
               (L_CURLY "{")
               (SWITCH_CASE
                 (SWITCH_LABEL
                   (CASE_KW "case")
-                  (EXPR_PLACEHOLDER
-                    (INT_NUMBER "1")
-                    (IDENT "bar")
-                    (L_PAREN "(")
-                    (R_PAREN ")")))
-                (EMPTY_STMT (SEMICOLON ";")))
+                  (LITERAL (INT_NUMBER "1")))
+                (EXPR_STMT
+                  (CALL_EXPR
+                    (NAME_REF_EXPR (NAME_REF (IDENT "bar")))
+                    (ARG_LIST
+                      (L_PAREN "(")
+                      (R_PAREN ")")))
+                  (SEMICOLON ";")))
               (R_CURLY "}")))
           (R_CURLY "}")))
       (METHOD_DECL
@@ -75,14 +79,14 @@
           (SWITCH_STMT
             (SWITCH_KW "switch")
             (L_PAREN "(")
-            (EXPR_PLACEHOLDER (IDENT "x"))
+            (NAME_REF_EXPR (NAME_REF (IDENT "x")))
             (R_PAREN ")")
             (SWITCH_BODY
               (L_CURLY "{")
               (SWITCH_CASE
                 (SWITCH_LABEL
                   (CASE_KW "case")
-                  (EXPR_PLACEHOLDER (INT_NUMBER "1"))
+                  (LITERAL (INT_NUMBER "1"))
                   (ARROW "->")))
               (R_CURLY "}")))
           (R_CURLY "}")))
@@ -97,7 +101,7 @@
           (SWITCH_STMT
             (SWITCH_KW "switch")
             (L_PAREN "(")
-            (EXPR_PLACEHOLDER (IDENT "x"))
+            (NAME_REF_EXPR (NAME_REF (IDENT "x")))
             (R_PAREN ")")
             (SWITCH_BODY
               (L_CURLY "{")
@@ -116,11 +120,10 @@
         (BLOCK
           (L_CURLY "{")
           (SWITCH_STMT (SWITCH_KW "switch"))
-          (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (IDENT "x")
-              (L_CURLY "{")
-              (R_CURLY "}")))
+          (EXPR_STMT (NAME_REF_EXPR (NAME_REF (IDENT "x"))))
+          (BLOCK
+            (L_CURLY "{")
+            (R_CURLY "}"))
           (R_CURLY "}")))
       (METHOD_DECL
         (PRIMITIVE_TYPE (VOID_KW "void"))
@@ -134,9 +137,9 @@
       (R_CURLY "}"))))
 (errors
   (error "expected 'case' or 'default'" "2:29..2:32")
-  (error "expected ':' or '->'" "3:41..3:41")
+  (error "expected ':' or '->'" "3:35..3:35")
   (error "expected a statement" "4:38..4:38")
   (error "expected an expression" "5:33..5:33")
   (error "expected '('" "6:22..6:22")
   (error "expected '{'" "6:22..6:22")
-  (error "expected ';'" "6:28..6:28"))
+  (error "expected ';'" "6:24..6:24"))

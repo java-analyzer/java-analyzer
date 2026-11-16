@@ -15,7 +15,7 @@
         (VARIABLE_DECLARATOR
           (NAME (IDENT "y"))
           (EQ "=")
-          (EXPR_PLACEHOLDER (INT_NUMBER "1")))
+          (LITERAL (INT_NUMBER "1")))
         (COMMA ",")
         (VARIABLE_DECLARATOR
           (NAME (IDENT "z"))

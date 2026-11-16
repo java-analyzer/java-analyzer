@@ -14,57 +14,66 @@
           (L_CURLY "{")
           (EMPTY_STMT (SEMICOLON ";"))
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (IDENT "x")
+            (ASSIGN_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "x")))
               (EQ "=")
-              (INT_NUMBER "1"))
+              (LITERAL (INT_NUMBER "1")))
             (SEMICOLON ";"))
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (IDENT "foo")
-              (L_PAREN "(")
-              (R_PAREN ")"))
+            (CALL_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "foo")))
+              (ARG_LIST
+                (L_PAREN "(")
+                (R_PAREN ")")))
             (SEMICOLON ";"))
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (IDENT "a")
+            (METHOD_CALL_EXPR
+              (METHOD_CALL_EXPR
+                (FIELD_ACCESS_EXPR
+                  (NAME_REF_EXPR (NAME_REF (IDENT "a")))
+                  (DOT ".")
+                  (NAME_REF (IDENT "b")))
+                (DOT ".")
+                (NAME_REF (IDENT "c"))
+                (ARG_LIST
+                  (L_PAREN "(")
+                  (LITERAL (INT_NUMBER "1"))
+                  (COMMA ",")
+                  (LITERAL (INT_NUMBER "2"))
+                  (R_PAREN ")")))
               (DOT ".")
-              (IDENT "b")
-              (DOT ".")
-              (IDENT "c")
-              (L_PAREN "(")
-              (INT_NUMBER "1")
-              (COMMA ",")
-              (INT_NUMBER "2")
-              (R_PAREN ")")
-              (DOT ".")
-              (IDENT "d")
-              (L_PAREN "(")
-              (R_PAREN ")"))
+              (NAME_REF (IDENT "d"))
+              (ARG_LIST
+                (L_PAREN "(")
+                (R_PAREN ")")))
             (SEMICOLON ";"))
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (THIS_KW "this")
-              (DOT ".")
-              (IDENT "x")
+            (ASSIGN_EXPR
+              (FIELD_ACCESS_EXPR
+                (THIS_EXPR (THIS_KW "this"))
+                (DOT ".")
+                (NAME_REF (IDENT "x")))
               (EQ "=")
-              (IDENT "y"))
+              (NAME_REF_EXPR (NAME_REF (IDENT "y"))))
             (SEMICOLON ";"))
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (IDENT "i")
+            (POSTFIX_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "i")))
               (PLUS2 "++"))
             (SEMICOLON ";"))
           (EXPR_STMT
-            (EXPR_PLACEHOLDER
-              (NEW_KW "new")
-              (IDENT "Thing")
-              (L_PAREN "(")
-              (R_PAREN ")")
+            (METHOD_CALL_EXPR
+              (NEW_EXPR
+                (NEW_KW "new")
+                (PATH_TYPE (NAME_REF (IDENT "Thing")))
+                (ARG_LIST
+                  (L_PAREN "(")
+                  (R_PAREN ")")))
               (DOT ".")
-              (IDENT "run")
-              (L_PAREN "(")
-              (R_PAREN ")"))
+              (NAME_REF (IDENT "run"))
+              (ARG_LIST
+                (L_PAREN "(")
+                (R_PAREN ")")))
             (SEMICOLON ";"))
           (RETURN_STMT
             (RETURN_KW "return")
@@ -80,12 +89,13 @@
           (L_CURLY "{")
           (RETURN_STMT
             (RETURN_KW "return")
-            (EXPR_PLACEHOLDER
-              (IDENT "a")
+            (BINARY_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "a")))
               (PLUS "+")
-              (IDENT "b")
-              (STAR "*")
-              (INT_NUMBER "2"))
+              (BINARY_EXPR
+                (NAME_REF_EXPR (NAME_REF (IDENT "b")))
+                (STAR "*")
+                (LITERAL (INT_NUMBER "2"))))
             (SEMICOLON ";"))
           (R_CURLY "}")))
       (METHOD_DECL
@@ -98,12 +108,13 @@
           (L_CURLY "{")
           (THROW_STMT
             (THROW_KW "throw")
-            (EXPR_PLACEHOLDER
+            (NEW_EXPR
               (NEW_KW "new")
-              (IDENT "IllegalStateException")
-              (L_PAREN "(")
-              (STRING_LITERAL "\"no\"")
-              (R_PAREN ")"))
+              (PATH_TYPE (NAME_REF (IDENT "IllegalStateException")))
+              (ARG_LIST
+                (L_PAREN "(")
+                (LITERAL (STRING_LITERAL "\"no\""))
+                (R_PAREN ")")))
             (SEMICOLON ";"))
           (R_CURLY "}")))
       (METHOD_DECL
@@ -136,22 +147,22 @@
             (SEMICOLON ";"))
           (ASSERT_STMT
             (ASSERT_KW "assert")
-            (EXPR_PLACEHOLDER
-              (IDENT "x")
+            (BINARY_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "x")))
               (R_ANGLE ">")
-              (INT_NUMBER "0"))
+              (LITERAL (INT_NUMBER "0")))
             (SEMICOLON ";"))
           (ASSERT_STMT
             (ASSERT_KW "assert")
-            (EXPR_PLACEHOLDER
-              (IDENT "x")
+            (BINARY_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "x")))
               (R_ANGLE ">")
-              (INT_NUMBER "0"))
+              (LITERAL (INT_NUMBER "0")))
             (COLON ":")
-            (EXPR_PLACEHOLDER
-              (STRING_LITERAL "\"message \"")
+            (BINARY_EXPR
+              (LITERAL (STRING_LITERAL "\"message \""))
               (PLUS "+")
-              (IDENT "x"))
+              (NAME_REF_EXPR (NAME_REF (IDENT "x"))))
             (SEMICOLON ";"))
           (BLOCK
             (L_CURLY "{")
@@ -162,13 +173,13 @@
           (SYNCHRONIZED_STMT
             (SYNCHRONIZED_KW "synchronized")
             (L_PAREN "(")
-            (EXPR_PLACEHOLDER (THIS_KW "this"))
+            (THIS_EXPR (THIS_KW "this"))
             (R_PAREN ")")
             (BLOCK
               (L_CURLY "{")
               (EXPR_STMT
-                (EXPR_PLACEHOLDER
-                  (IDENT "count")
+                (POSTFIX_EXPR
+                  (NAME_REF_EXPR (NAME_REF (IDENT "count")))
                   (PLUS2 "++"))
                 (SEMICOLON ";"))
               (R_CURLY "}")))
