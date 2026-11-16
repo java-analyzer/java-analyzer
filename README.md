@@ -10,6 +10,33 @@ This project is split into several pure, decoupled crates to ensure fast, increm
 - **`ide`**: Editor-centric features (completion, goto definition, hover).
 - **`java-analyzer`**: The stateful LSP server boundary handling IO, VFS (Virtual File System), and the language server protocol.
 
+## Installation
+
+### 1. Install the language server
+
+```sh
+cargo install --path crates/java-analyzer
+```
+
+This puts the `java-analyzer` binary in `~/.cargo/bin`; make sure that directory is on your `PATH`. The server speaks LSP over stdio.
+
+### 2. Install an editor client
+
+Clients live in [`editors/`](editors/README.md); see that file for full details and settings.
+
+- **Zed**: run `zed: install dev extension` and select `editors/zed`. Requires Zed's Java extension for the Java language.
+- **VSCode**: build and install the extension.
+
+  ```sh
+  cd editors/vscode
+  npm install && npm run package
+  code --install-extension java-analyzer-0.1.0.vsix
+  ```
+
+- **Neovim**: add `editors/nvim` to your runtimepath, then call `require("java-analyzer").setup()` (or `vim.lsp.enable("java_analyzer")` on Neovim 0.11+).
+
+Node.js for the VSCode client is managed with [mise](https://mise.jdx.dev): run `mise install` in the repo root.
+
 ## Development
 
 We follow a **Specification-Driven Bootstrapping Process**. Check `docs/specs/` for architectural guidelines and feature requirements before implementing.

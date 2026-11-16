@@ -1,0 +1,18 @@
+[package]
+name = "zed-java-analyzer"
+version = "0.1.0"
+edition = "2021"
+authors = ["Roland Tepp"]
+license = "MIT OR Apache-2.0"
+description = "Zed extension for the java-analyzer language server"
+publish = false
+
+# Standalone: this crate targets wasm32-wasip1 and must not join the
+# root workspace.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.7.0"

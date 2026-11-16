@@ -1,0 +1,72 @@
+{
+  "name": "java-analyzer",
+  "displayName": "Java Analyzer",
+  "description": "Java language support powered by the java-analyzer language server.",
+  "version": "0.1.0",
+  "publisher": "luolong",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/luolong/java-analyzer"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:java"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "javaAnalyzer.restartServer",
+        "title": "Java Analyzer: Restart Server"
+      }
+    ],
+    "configuration": {
+      "title": "Java Analyzer",
+      "properties": {
+        "javaAnalyzer.server.path": {
+          "type": "string",
+          "default": "java-analyzer",
+          "markdownDescription": "Path to the `java-analyzer` executable. Resolved via `PATH` when not absolute."
+        },
+        "javaAnalyzer.server.args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra command line arguments passed to the server."
+        },
+        "javaAnalyzer.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Traces LSP communication between VS Code and the server."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.0.0",
+    "typescript": "^5.4.0"
+  }
+}
