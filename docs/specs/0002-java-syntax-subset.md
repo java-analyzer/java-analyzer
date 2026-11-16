@@ -1,0 +1,335 @@
+# Spec 0002: Java Syntax Subset, Lexer and Parser
+
+Status: Accepted
+
+## Motivation
+
+The current `syntax` crate lexes only `class`, `{`, `}`, identifiers and whitespace, and its
+parser is a brace-matching placeholder. The LSP server (see `crates/java-analyzer`) cannot
+offer useful features (syntax diagnostics, outline, navigation) until the parser handles real
+Java source and recovers from the errors that are always present while a user is typing.
+
+This spec defines the token set, the CST shape, the grammar subset delivered per milestone,
+the error-recovery rules, and the test strategy. It covers **syntax only**: no name
+resolution, no type checking.
+
+## Goals
+
+1. **Lossless**: concatenating all token texts of the CST reproduces the input byte for byte,
+   for any input (including invalid UTF-8-free garbage, unterminated strings, etc.).
+2. **Error resilient**: parsing never panics and always terminates; malformed code yields a
+   tree plus a list of syntax errors, with as much valid structure preserved as possible.
+3. **Incremental-friendly**: the parse is a pure function `&str -> Parse`, suitable as a salsa
+   query. Reparsing a whole file must be fast enough (target: < 10 ms for a 5k-line file in
+   release mode); incremental reparse is out of scope.
+4. **Delivered in vertical slices** (milestones below), each enabling a concrete IDE feature.
+
+## Non-goals (for this spec)
+
+- Semantic analysis, type inference, overload resolution.
+- Preview or experimental language features.
+- Incremental reparsing of subtrees.
+- Annotation processing or build-system integration.
+
+## Language baseline
+
+Target **Java 21** syntax (JLS 21) as the reference grammar, delivered progressively.
+The parser is **version-agnostic**: it accepts any syntactically valid Java, including
+constructs from future language versions, and never reports an error merely because a
+construct is newer than some language level. Grammar is added by milestone; syntax not yet
+supported by the current milestone must still lex and must produce an error node rather than
+corrupt surrounding structure.
+
+## Lexer
+
+### Contract
+
+```rust
+pub struct Token { pub kind: SyntaxKind, pub len: usize }
+pub fn lex(input: &str) -> Vec<Token>;
+```
+
+- Every byte of the input belongs to exactly one token; `sum(len) == input.len()`.
+- Token lengths are in bytes and always fall on `char` boundaries.
+- Lexing never fails. Invalid input produces `ERROR` tokens (see below) and, where useful, a
+  lexical error message recorded alongside (see "Syntax errors").
+- Lexing is context-free. Contextual keywords are lexed as `IDENT` and recognised by the
+  parser.
+
+### Trivia
+
+`WHITESPACE`, `LINE_COMMENT` (`// ...` up to but excluding the line terminator) and
+`BLOCK_COMMENT` (`/* ... */`, including `/** ... */` doc comments) are trivia. The parser
+attaches trivia as tokens inside the node that is open when they are encountered, with
+leading trivia of a node pushed outside it where possible (see "Trivia attachment").
+
+An unterminated block comment consumes to end of input, is still a `BLOCK_COMMENT`, and
+records a lexical error.
+
+### Tokens
+
+Reserved keywords (each has its own `SyntaxKind` named `<UPPER>_KW`):
+
+```
+abstract assert boolean break byte case catch char class const continue default do double
+else enum extends final finally float for goto if implements import instanceof int interface
+long native new package private protected public return short static strictfp super switch
+synchronized this throw throws transient try void volatile while _
+```
+
+Literal keywords: `true`, `false`, `null` (`TRUE_KW`, `FALSE_KW`, `NULL_KW`).
+
+Contextual keywords (lexed as `IDENT`, interpreted by the parser only in the relevant
+position): `var`, `yield`, `record`, `sealed`, `non-sealed`, `permits`, `when`, `module`,
+`open`, `requires`, `exports`, `opens`, `uses`, `provides`, `to`, `with`, `transitive`.
+
+`non-sealed` is the one hyphenated contextual keyword. The parser recognises it as the token
+sequence `IDENT(non) MINUS IDENT(sealed)` with no trivia between them and wraps it in a
+single `NON_SEALED_KW` composite token (see "Composite tokens").
+
+Identifiers: `IDENT`. Start: Unicode `XID_Start`, `_` or `$`; continue: `XID_Continue` or `$`.
+(`_` alone is `UNDERSCORE_KW`.)
+
+Literals:
+
+| Kind | Examples |
+|---|---|
+| `INT_NUMBER` | `0`, `42`, `1_000`, `0x1F`, `0b101`, `017` |
+| `LONG_NUMBER` | `42L`, `0xFFL` |
+| `FLOAT_NUMBER` | `1.5f`, `1e3F`, `.5f` |
+| `DOUBLE_NUMBER` | `1.5`, `1e10`, `2d`, `0x1.8p1` |
+| `CHAR_LITERAL` | `'a'`, `'\n'`, `'\u0041'` |
+| `STRING_LITERAL` | `"hi"`, `"a\"b"` |
+| `TEXT_BLOCK` | `"""\n  text\n  """` |
+
+Unterminated char/string literals extend to (but exclude) the line terminator, remain
+`CHAR_LITERAL` / `STRING_LITERAL`, and record a lexical error. An unterminated text block
+extends to end of input and records a lexical error.
+
+Unicode escapes (`\uXXXX`) outside literals are **not** pre-translated; they lex as
+`ERROR` (see "Decisions").
+
+Separators: `( ) { } [ ] ; , . ... @ ::`
+(`L_PAREN R_PAREN L_CURLY R_CURLY L_BRACK R_BRACK SEMICOLON COMMA DOT DOT3 AT COLON2`)
+
+Operators: `= > < ! ~ ? : -> == >= <= != && || ++ -- + - * / & | ^ % << += -= *= /= &= |= ^=
+%= <<= >>= >>>=`
+
+`>>` and `>>>` are **not** lexed as single tokens: they are lexed as consecutive `R_ANGLE`
+(`>`) tokens so that nested generics (`List<List<String>>`) parse without splitting. The
+parser joins adjacent `>` tokens (no trivia between them) into shift operators in expression
+context via composite tokens (`SHR`, `USHR`, `SHR_EQ`, `USHR_EQ`, `GTEQ` in the same manner).
+
+`ERROR`: any character that starts no valid token. One `ERROR` token per maximal run of
+such characters is acceptable; one per char is also acceptable (tests must not depend on
+which).
+
+### Composite tokens
+
+Some tokens are produced by the parser by merging adjacent lexer tokens (`>>`, `>>>`, `>=`
+after `>`, `non-sealed`). The parser emits a single green token with the merged text and
+kind. This keeps the lexer context free and the tree lossless.
+
+## Syntax kinds
+
+Naming follows `rust-analyzer`: `UPPER_SNAKE_CASE`, tokens first, nodes after.
+
+- Token kinds: as listed above, plus `WHITESPACE`, `LINE_COMMENT`, `BLOCK_COMMENT`, `ERROR`.
+- Node kinds: `SOURCE_FILE`, then per-milestone nodes listed below. `ERROR` is also used as
+  a **node** kind wrapping tokens the parser could not place.
+- Add an `#[doc(hidden)] __LAST` sentinel and replace the `transmute` in `kind_from_raw` with
+  a checked conversion (assert `raw < __LAST`).
+
+## Parser architecture
+
+- Hand-written recursive descent with Pratt-style expression parsing (per spec 0001).
+- **Event-based**: the parser produces a flat `Vec<Event>` (`StartNode{kind, forward_parent}`,
+  `FinishNode`, `Token{kind, n_raw_tokens}`, `Error{msg}`), and a separate pass drives a
+  `rowan::GreenNodeBuilder` from the events and the raw token stream. This allows
+  `precede`-style markers (needed for binary expressions and postfix/call chains) and keeps
+  trivia handling in one place.
+- API:
+
+```rust
+pub struct Parse { pub green: GreenNode, pub errors: Vec<SyntaxError> }
+pub struct SyntaxError { pub message: String, pub range: TextRange }
+pub fn parse(text: &str) -> Parse;   // replaces today's fn returning GreenNode
+```
+
+- The parser works over a *filtered* token stream that skips trivia; the tree builder
+  re-inserts trivia.
+- Primitives: `current()`, `nth(n)`, `at(kind)`, `at_contextual_kw(&str)`, `bump()`,
+  `eat(kind)`, `expect(kind)` (emits an error but does not consume on failure),
+  `error(msg)`, `err_and_bump(msg)`, `err_recover(msg, recovery_set)`.
+- **Progress guarantee**: every loop iteration must consume at least one token or exit. A
+  debug assertion (step counter) fails the test run on any parser that spins.
+- **No panics**: `parse` must not panic for any input. Enforced by fuzz/property tests.
+
+### Trivia attachment
+
+- Trivia between tokens belongs to the innermost node that is open *at the time the next
+  non-trivia token is consumed*, except:
+  - leading trivia before the first token of a node is attached to the **parent** (i.e. the
+    node starts at its first non-trivia token);
+  - trailing trivia at the end of a node is attached to the **parent** (i.e. the node ends at
+    its last non-trivia token).
+- Comments directly preceding a declaration (doc comments) are therefore siblings of the
+  declaration node. A later AST layer finds them by walking previous siblings.
+
+## Error recovery
+
+General rules:
+
+1. **Never drop tokens**: unplaceable tokens are wrapped in an `ERROR` node (or attached
+   as-is) so the tree stays lossless.
+2. `expect(kind)` that fails records an error at the *next* token's start (zero-width range
+   at the end of the previous non-trivia token when the next token is on a later line) and
+   does **not** consume anything.
+3. Each list/block parser has a **recovery set**: tokens at which it stops consuming
+   unexpected input and returns to the caller. Initial sets:
+   - Member level (inside class body): `}`, modifiers, `class`, `interface`, `enum`,
+     `record`, `@`, type-starting tokens, `void`, `{`, `;`.
+   - Statement level (inside a block): `}`, `;`, statement-starting keywords, `{`.
+   - Top level: `package`, `import`, modifiers, type-declaration keywords, `;`.
+4. A stray `}` at top level or member level is consumed into an `ERROR` node. A missing `}`
+   is reported at end of file at the block's opening brace location plus the EOF point; the
+   enclosing structure still closes.
+5. Unclosed `(`/`[`/`<` stop at the recovery set of the enclosing construct (so a half-typed
+   method call does not swallow the rest of the class).
+6. Half-typed constructs must still produce the named node (e.g. `foo.` followed by `}`
+   yields a `FIELD_ACCESS_EXPR` with a missing name plus an error). This is what makes
+   completion work later.
+
+## Milestones
+
+Each milestone ships with: node kinds, grammar, tests (inline CST snapshots), and the IDE
+feature it unlocks.
+
+### M1: Lexer completion + compilation unit skeleton
+
+*Unlocks*: syntax diagnostics on broken files without cascading errors.
+
+Lexer: everything in the "Lexer" section above.
+
+Parser nodes: `SOURCE_FILE`, `PACKAGE_DECL`, `IMPORT_DECL`, `NAME`, `NAME_REF`, `PATH`,
+`MODIFIER_LIST`, `ANNOTATION` (name + optional unparsed balanced `( ... )` as
+`ANNOTATION_ARGS`), `CLASS_DECL`, `INTERFACE_DECL`, `ENUM_DECL`, `RECORD_DECL`,
+`ANNOTATION_TYPE_DECL`, `CLASS_BODY` (with `{ }` and recovery), and `ERROR`.
+
+Grammar (informal; `?` optional, `*` repetition):
+
+```
+SourceFile      = PackageDecl? ImportDecl* TypeDecl*
+PackageDecl     = Annotation* 'package' Path ';'
+ImportDecl      = 'import' 'static'? Path ('.' '*')? ';'
+TypeDecl        = Modifiers? (ClassDecl | InterfaceDecl | EnumDecl | RecordDecl | AnnotationTypeDecl) | ';'
+ClassDecl       = 'class' Name TypeParams? ('extends' Type)? ('implements' TypeList)? ('permits' TypeList)? ClassBody
+InterfaceDecl   = 'interface' Name TypeParams? ('extends' TypeList)? ('permits' TypeList)? ClassBody
+Modifiers       = (Annotation | modifier-keyword | 'sealed' | 'non-sealed')*
+```
+
+Member bodies in M1 are parsed *shallowly*: each member is consumed as a balanced run of
+tokens until a `;` at depth 0 or a balanced `{ ... }` block, wrapped in a `MEMBER_PLACEHOLDER`
+node. This keeps top-level structure correct and recovery sound while M2 is built.
+
+Acceptance:
+- All fixtures in `crates/syntax/test_data/ok/m1/*.java` parse with zero errors.
+- All fixtures in `.../err/m1/*.java` parse with the errors listed in the adjacent
+  `.expected` snapshot and never panic.
+- Roundtrip property holds for every fixture and for 10k random byte/char mutations of them.
+
+### M2: Members, types and basic statements
+
+*Unlocks*: document symbols (outline), hover on declarations.
+
+Nodes: `FIELD_DECL`, `METHOD_DECL`, `CONSTRUCTOR_DECL`, `INITIALIZER`, `PARAM_LIST`, `PARAM`,
+`TYPE_PARAMS`, `TYPE_PARAM`, `TYPE_ARGS`, `TYPE_ARG`, `TYPE_BOUND`, `ARRAY_TYPE`,
+`PRIMITIVE_TYPE`, `PATH_TYPE`, `WILDCARD_TYPE`, `THROWS_CLAUSE`, `ENUM_BODY`,
+`ENUM_CONSTANT`, `RECORD_COMPONENT_LIST`, `BLOCK`, `LOCAL_VAR_DECL`, `EXPR_STMT`,
+`RETURN_STMT`, `IF_STMT`, `WHILE_STMT`, `FOR_STMT`, `FOREACH_STMT`, `DO_STMT`,
+`BREAK_STMT`, `CONTINUE_STMT`, `THROW_STMT`, `TRY_STMT`, `CATCH_CLAUSE`, `FINALLY_CLAUSE`,
+`SWITCH_STMT`, `EMPTY_STMT`, `LABELED_STMT`, `SYNCHRONIZED_STMT`, `ASSERT_STMT`.
+
+Replaces `MEMBER_PLACEHOLDER` from M1.
+
+Acceptance: the outline feature can list every class, interface, enum, record, field, method
+and constructor in the fixture set with correct name ranges; error fixtures keep unaffected
+members intact.
+
+### M3: Expressions
+
+*Unlocks*: go-to-definition for locals and members, completion after `.`.
+
+Nodes: `LITERAL`, `NAME_REF_EXPR`, `FIELD_ACCESS_EXPR`, `METHOD_CALL_EXPR`, `ARG_LIST`,
+`NEW_EXPR`, `ARRAY_INIT`, `ARRAY_ACCESS_EXPR`, `UNARY_EXPR`, `BINARY_EXPR`,
+`ASSIGN_EXPR`, `TERNARY_EXPR`, `CAST_EXPR`, `INSTANCEOF_EXPR`, `LAMBDA_EXPR`,
+`METHOD_REF_EXPR`, `PAREN_EXPR`, `THIS_EXPR`, `SUPER_EXPR`, `SWITCH_EXPR`, `CLASS_LITERAL`.
+
+Precedence (low to high): assignment (right-assoc), ternary, `||`, `&&`, `|`, `^`, `&`,
+equality, relational/`instanceof`, shift, additive, multiplicative, unary/cast, postfix.
+
+The ambiguities that need documented handling (each gets dedicated tests): generic call vs.
+less-than (`a < b > c`), cast vs. parenthesised expr, lambda vs. parenthesised expr,
+`>`-merging for shifts, `var` as type vs. identifier.
+
+### M4: Modern Java
+
+Records details, sealed hierarchies, `switch` patterns and `when` guards, record patterns,
+text blocks escapes validation, `var` in lambdas, module declarations (`module-info.java`),
+type annotations.
+
+## Syntax errors surfaced to the IDE
+
+- `Parse.errors` is the single source of syntax diagnostics (lexical errors are merged in,
+  ordered by start offset).
+- Messages are short, lowercase, and actionable: `expected ';'`, `expected a type`,
+  `unclosed block`, `unterminated string literal`.
+- `hir` exposes a salsa query `syntax_errors(file_id) -> Arc<Vec<SyntaxError>>`; `ide`
+  converts these to `Diagnostic`; the LSP crate converts to `publishDiagnostics` with UTF-16
+  ranges (reuse `convert.rs`).
+
+## Test strategy
+
+1. **Lexer unit tests**: one test per token class including edge cases (`1_000`, `0x1.8p1`,
+   `'\''`, unterminated forms, `>>` lexed as two `>`, `non-sealed`).
+2. **Inline CST snapshot tests**: source string in, `{:#?}` of the `SyntaxNode` out,
+   compared against an expect-style snapshot stored next to the test. A small helper
+   (`check(src, expect![[...]])` style) is part of M1; adopt the `expect-test` crate.
+3. **Fixture directories** under `crates/syntax/test_data/{ok,err}/<milestone>/`. `ok`
+   fixtures assert zero errors; `err` fixtures assert the snapshot including errors. A single
+   test walks the directory; `UPDATE_EXPECT=1` regenerates snapshots.
+4. **Invariants checked on every fixture and in property tests**:
+   - Roundtrip: `SyntaxNode::new_root(green).text() == input`.
+   - No panic and termination (with a step budget).
+   - Every `ERROR` node is non-empty, or accompanied by a recorded error.
+5. **Fuzz-ish property test** (`proptest` or a seeded loop, no nightly): random truncations,
+   deletions and insertions of fixture text must satisfy the invariants.
+6. **Real-world smoke test** (opt-in, not in default CI): parse a local JDK `src.zip` or any
+   configured Java source tree and report files with errors; used to track grammar coverage
+   from M2 on. Valid JDK sources should parse with zero syntax errors by the end of M3.
+
+## Impacted code
+
+- `crates/syntax`: `syntax_kind.rs` (many new kinds, `__LAST`), `lexer.rs`, new
+  `parser/` module (`grammar/`, `event.rs`, `tree_builder.rs`, `token_set.rs`), `lib.rs`
+  (`Parse`, `SyntaxError`).
+- `crates/hir`: `parse` query returns `Parse`/green node, new `syntax_errors` query.
+- `crates/ide`: `diagnostics(db, file_id)`.
+- `crates/java-analyzer`: publish diagnostics on open/change/close.
+
+## Decisions
+
+1. **Unicode escapes** outside literals (`\u0041` in identifiers etc.): deferred. They lex as
+   `ERROR` for now; revisit if real-world sources need them.
+2. **Language level**: no gating. Accept any valid Java syntax, including future syntax.
+3. **Doc comments**: siblings of the declaration node, matching `rust-analyzer`.
+4. **Lexer**: hand-written, consistent with spec 0001.
+5. **Snapshot tooling**: the `expect-test` crate.
+
+## Immediate next steps
+
+1. Write M1 lexer tests (failing), implement lexer changes.
+2. Introduce `Parse`/`SyntaxError`, the event-based parser skeleton and tree builder, with
+   the `kind_from_raw` safety fix.
+3. Write M1 snapshot and fixture tests, implement M1 grammar.
+4. Wire `syntax_errors` through `hir`/`ide` to `publishDiagnostics` in the LSP crate.
