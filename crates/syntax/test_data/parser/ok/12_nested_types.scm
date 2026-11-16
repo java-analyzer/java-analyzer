@@ -20,23 +20,24 @@
       (ENUM_DECL
         (ENUM_KW "enum")
         (NAME (IDENT "Kind"))
-        (CLASS_BODY
+        (ENUM_BODY
           (L_CURLY "{")
-          (MEMBER_PLACEHOLDER
-            (IDENT "A")
-            (COMMA ",")
-            (IDENT "B"))
+          (ENUM_CONSTANT (NAME (IDENT "A")))
+          (COMMA ",")
+          (ENUM_CONSTANT (NAME (IDENT "B")))
           (R_CURLY "}")))
       (RECORD_DECL
         (IDENT "record")
         (NAME (IDENT "Pair"))
         (RECORD_COMPONENT_LIST
           (L_PAREN "(")
-          (INT_KW "int")
-          (IDENT "a")
+          (RECORD_COMPONENT
+            (PRIMITIVE_TYPE (INT_KW "int"))
+            (NAME (IDENT "a")))
           (COMMA ",")
-          (INT_KW "int")
-          (IDENT "b")
+          (RECORD_COMPONENT
+            (PRIMITIVE_TYPE (INT_KW "int"))
+            (NAME (IDENT "b")))
           (R_PAREN ")"))
         (CLASS_BODY
           (L_CURLY "{")

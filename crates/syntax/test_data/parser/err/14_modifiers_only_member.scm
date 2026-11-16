@@ -4,6 +4,6 @@
     (NAME (IDENT "A"))
     (CLASS_BODY
       (L_CURLY "{")
-      (MEMBER_PLACEHOLDER (MODIFIER_LIST (PUBLIC_KW "public")))
+      (ERROR (MODIFIER_LIST (PUBLIC_KW "public")))
       (R_CURLY "}"))))
 (errors (error "expected a member declaration" "2:11..2:11"))

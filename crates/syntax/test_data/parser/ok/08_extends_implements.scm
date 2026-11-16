@@ -42,7 +42,7 @@
     (IMPLEMENTS_CLAUSE
       (IMPLEMENTS_KW "implements")
       (PATH_TYPE (NAME_REF (IDENT "I"))))
-    (CLASS_BODY
+    (ENUM_BODY
       (L_CURLY "{")
       (R_CURLY "}")))
   (RECORD_DECL
@@ -54,8 +54,9 @@
       (R_ANGLE ">"))
     (RECORD_COMPONENT_LIST
       (L_PAREN "(")
-      (IDENT "T")
-      (IDENT "value")
+      (RECORD_COMPONENT
+        (PATH_TYPE (NAME_REF (IDENT "T")))
+        (NAME (IDENT "value")))
       (R_PAREN ")"))
     (IMPLEMENTS_CLAUSE
       (IMPLEMENTS_KW "implements")

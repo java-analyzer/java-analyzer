@@ -163,11 +163,29 @@ pub enum SyntaxKind {
     ANNOTATION_TYPE_DECL,
     CLASS_BODY,
     RECORD_COMPONENT_LIST,
+    RECORD_COMPONENT,
     EXTENDS_CLAUSE,
     IMPLEMENTS_CLAUSE,
     PERMITS_CLAUSE,
-    /// A class member that is not parsed in detail yet (replaced by real member nodes in M2).
-    MEMBER_PLACEHOLDER,
+    ENUM_BODY,
+    ENUM_CONSTANT,
+
+    // ---- Nodes: members ----
+    FIELD_DECL,
+    VARIABLE_DECLARATOR,
+    METHOD_DECL,
+    CONSTRUCTOR_DECL,
+    INITIALIZER,
+    PARAM_LIST,
+    PARAM,
+    THROWS_CLAUSE,
+    DEFAULT_VALUE,
+    /// A brace-balanced token run; replaced by real statements in M2b.
+    BLOCK,
+    /// A token run standing in for an expression; replaced by real expressions in M3.
+    EXPR_PLACEHOLDER,
+    /// Enum constant arguments for now; becomes the real argument list in M3.
+    ARG_LIST,
 
     // ---- Nodes: types ----
     TYPE_PARAMS,

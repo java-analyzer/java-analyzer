@@ -4,34 +4,40 @@
     (NAME (IDENT "I"))
     (CLASS_BODY
       (L_CURLY "{")
-      (MEMBER_PLACEHOLDER
-        (INT_KW "int")
-        (IDENT "CONSTANT")
-        (EQ "=")
-        (INT_NUMBER "1")
+      (FIELD_DECL
+        (PRIMITIVE_TYPE (INT_KW "int"))
+        (VARIABLE_DECLARATOR
+          (NAME (IDENT "CONSTANT"))
+          (EQ "=")
+          (EXPR_PLACEHOLDER (INT_NUMBER "1")))
         (SEMICOLON ";"))
-      (MEMBER_PLACEHOLDER
-        (VOID_KW "void")
-        (IDENT "m")
-        (L_PAREN "(")
-        (R_PAREN ")")
+      (METHOD_DECL
+        (PRIMITIVE_TYPE (VOID_KW "void"))
+        (NAME (IDENT "m"))
+        (PARAM_LIST
+          (L_PAREN "(")
+          (R_PAREN ")"))
         (SEMICOLON ";"))
-      (MEMBER_PLACEHOLDER
+      (METHOD_DECL
         (MODIFIER_LIST (DEFAULT_KW "default"))
-        (VOID_KW "void")
-        (IDENT "d")
-        (L_PAREN "(")
-        (R_PAREN ")")
-        (L_CURLY "{")
-        (R_CURLY "}"))
-      (MEMBER_PLACEHOLDER
+        (PRIMITIVE_TYPE (VOID_KW "void"))
+        (NAME (IDENT "d"))
+        (PARAM_LIST
+          (L_PAREN "(")
+          (R_PAREN ")"))
+        (BLOCK
+          (L_CURLY "{")
+          (R_CURLY "}")))
+      (METHOD_DECL
         (MODIFIER_LIST (STATIC_KW "static"))
-        (VOID_KW "void")
-        (IDENT "s")
-        (L_PAREN "(")
-        (R_PAREN ")")
-        (L_CURLY "{")
-        (R_CURLY "}"))
+        (PRIMITIVE_TYPE (VOID_KW "void"))
+        (NAME (IDENT "s"))
+        (PARAM_LIST
+          (L_PAREN "(")
+          (R_PAREN ")"))
+        (BLOCK
+          (L_CURLY "{")
+          (R_CURLY "}")))
       (R_CURLY "}")))
   (ANNOTATION_TYPE_DECL
     (AT "@")
@@ -39,12 +45,14 @@
     (NAME (IDENT "A"))
     (CLASS_BODY
       (L_CURLY "{")
-      (MEMBER_PLACEHOLDER
-        (INT_KW "int")
-        (IDENT "value")
-        (L_PAREN "(")
-        (R_PAREN ")")
-        (DEFAULT_KW "default")
-        (INT_NUMBER "5")
+      (METHOD_DECL
+        (PRIMITIVE_TYPE (INT_KW "int"))
+        (NAME (IDENT "value"))
+        (PARAM_LIST
+          (L_PAREN "(")
+          (R_PAREN ")"))
+        (DEFAULT_VALUE
+          (DEFAULT_KW "default")
+          (EXPR_PLACEHOLDER (INT_NUMBER "5")))
         (SEMICOLON ";"))
       (R_CURLY "}"))))

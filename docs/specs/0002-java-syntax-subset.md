@@ -252,21 +252,73 @@ Acceptance:
 
 ### M2: Members, types and basic statements
 
-*Unlocks*: document symbols (outline), hover on declarations.
+Statements contain expressions, which arrive in M3, so M2 is delivered in two steps.
 
-Nodes: `FIELD_DECL`, `METHOD_DECL`, `CONSTRUCTOR_DECL`, `INITIALIZER`, `PARAM_LIST`, `PARAM`,
-`TYPE_PARAMS`, `TYPE_PARAM`, `TYPE_ARGS`, `TYPE_ARG`, `TYPE_BOUND`, `ARRAY_TYPE`,
-`PRIMITIVE_TYPE`, `PATH_TYPE`, `WILDCARD_TYPE`, `THROWS_CLAUSE`, `ENUM_BODY`,
-`ENUM_CONSTANT`, `RECORD_COMPONENT_LIST`, `BLOCK`, `LOCAL_VAR_DECL`, `EXPR_STMT`,
-`RETURN_STMT`, `IF_STMT`, `WHILE_STMT`, `FOR_STMT`, `FOREACH_STMT`, `DO_STMT`,
-`BREAK_STMT`, `CONTINUE_STMT`, `THROW_STMT`, `TRY_STMT`, `CATCH_CLAUSE`, `FINALLY_CLAUSE`,
-`SWITCH_STMT`, `EMPTY_STMT`, `LABELED_STMT`, `SYNCHRONIZED_STMT`, `ASSERT_STMT`.
+#### M2a: Members and parameters (declaration level)
 
-Replaces `MEMBER_PLACEHOLDER` from M1.
+*Unlocks*: document symbols (outline).
 
-Acceptance: the outline feature can list every class, interface, enum, record, field, method
-and constructor in the fixture set with correct name ranges; error fixtures keep unaffected
-members intact.
+Nodes: `FIELD_DECL` (with one `VARIABLE_DECLARATOR` per declared name), `METHOD_DECL`,
+`CONSTRUCTOR_DECL` (including compact record constructors), `INITIALIZER`, `PARAM_LIST`,
+`PARAM`, `THROWS_CLAUSE`, `DEFAULT_VALUE` (annotation method defaults), `ENUM_BODY`,
+`ENUM_CONSTANT`, `RECORD_COMPONENT` (children of the existing `RECORD_COMPONENT_LIST`).
+`void` is a `PRIMITIVE_TYPE`.
+
+Grammar (informal):
+
+```
+Member          = ';' | Initializer | Modifiers? (TypeDecl | Constructor | Method | Field)
+Initializer     = 'static'? Block
+Constructor     = TypeParams? Name ParamList Throws? Body | Name Block     (compact form)
+Method          = TypeParams? Type Name ParamList Dims? Throws? ('default' Value)? Body
+Field           = Type Declarator (',' Declarator)* ';'
+Declarator      = Name ('[' ']')* ('=' Initializer)?
+Body            = Block | ';'
+Param           = Modifiers? Type '...'? Name ('[' ']')*
+EnumBody        = '{' (EnumConstant (',' EnumConstant)* ','?)? (';' Member*)? '}'
+EnumConstant    = Annotation* Name ArgList? ClassBody?
+```
+
+Still shallow in M2a, to be replaced later:
+
+- `BLOCK` (method, constructor and initializer bodies) is a brace-balanced token run, replaced
+  by real statements in M2b. A body still open when `public`, `private` or `protected` shows up
+  at its top level is treated as unclosed (these can never start a statement), so one missing
+  `}` does not swallow the rest of the class.
+- `EXPR_PLACEHOLDER` (field initializers, annotation method defaults) is a token run that ends
+  at a `;` or unmatched `}` outside braces; at `public`, `private`, `protected`, `abstract`,
+  `static`, `class`, `interface` or `enum` outside any brackets (a half-typed initializer must
+  not swallow the next member; `Foo.class` is not affected); and, in variable declarators only,
+  at a `,` outside brackets and generic arguments that is followed by something that looks like
+  another declarator (`name =`, `name ,`, `name ;`, `name [`). Generic arguments are tracked
+  heuristically (`<` after an identifier opens, `>` closes). An empty initializer is reported as
+  `expected an expression`. `ARG_LIST` (enum constant arguments) is a balanced parenthesised
+  run. All of these are replaced by real expressions in M3.
+
+Member-level recovery: a member that cannot start with a type, a name, a modifier or a block is
+wrapped in an `ERROR` node up to the next `;` (consumed), `}`, modifier, annotation or type
+declaration keyword. Missing pieces are reported without consuming anything (`expected ';'`,
+`expected a name`, `expected ')'`, `expected '{' or ';'`).
+
+Acceptance:
+
+- every class, interface, enum, record, field, method, constructor and enum constant in the
+  fixture set appears in the CST with its name in a `NAME` node;
+- `ide::document_symbols` lists them hierarchically with correct ranges (each field declarator
+  is its own symbol; record components are fields of the record; declarations without a name
+  are left out and their members hoisted), and the LSP server serves
+  `textDocument/documentSymbol`;
+- error fixtures keep unaffected members intact.
+
+#### M2b: Statements
+
+*Unlocks*: recovery inside method bodies (an unclosed block no longer swallows the class).
+
+Nodes: `BLOCK`, `LOCAL_VAR_DECL`, `EXPR_STMT`, `RETURN_STMT`, `IF_STMT`, `WHILE_STMT`,
+`FOR_STMT`, `FOREACH_STMT`, `DO_STMT`, `BREAK_STMT`, `CONTINUE_STMT`, `THROW_STMT`, `TRY_STMT`,
+`CATCH_CLAUSE`, `FINALLY_CLAUSE`, `SWITCH_STMT`, `EMPTY_STMT`, `LABELED_STMT`,
+`SYNCHRONIZED_STMT`, `ASSERT_STMT`. Statement-level recovery sets are given under "Error
+recovery". Statements embed `EXPR_PLACEHOLDER` until M3.
 
 ### M3: Expressions
 

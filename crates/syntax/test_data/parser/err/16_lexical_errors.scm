@@ -4,15 +4,17 @@
     (NAME (IDENT "A"))
     (CLASS_BODY
       (L_CURLY "{")
-      (MEMBER_PLACEHOLDER
-        (IDENT "String")
-        (IDENT "s")
-        (EQ "=")
-        (STRING_LITERAL "\"unterminated;")
-        (INT_KW "int")
-        (IDENT "x")
-        (EQ "=")
-        (INT_NUMBER "0x")
+      (FIELD_DECL
+        (PATH_TYPE (NAME_REF (IDENT "String")))
+        (VARIABLE_DECLARATOR
+          (NAME (IDENT "s"))
+          (EQ "=")
+          (EXPR_PLACEHOLDER
+            (STRING_LITERAL "\"unterminated;")
+            (INT_KW "int")
+            (IDENT "x")
+            (EQ "=")
+            (INT_NUMBER "0x")))
         (SEMICOLON ";")))))
 (errors
   (error "unterminated string literal" "2:16..2:30")

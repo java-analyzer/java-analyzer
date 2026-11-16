@@ -2,58 +2,67 @@
   (ENUM_DECL
     (ENUM_KW "enum")
     (NAME (IDENT "Color"))
-    (CLASS_BODY
+    (ENUM_BODY
       (L_CURLY "{")
-      (MEMBER_PLACEHOLDER
-        (IDENT "RED")
-        (COMMA ",")
-        (IDENT "GREEN")
-        (COMMA ",")
-        (IDENT "BLUE"))
+      (ENUM_CONSTANT (NAME (IDENT "RED")))
+      (COMMA ",")
+      (ENUM_CONSTANT (NAME (IDENT "GREEN")))
+      (COMMA ",")
+      (ENUM_CONSTANT (NAME (IDENT "BLUE")))
       (R_CURLY "}")))
   (ENUM_DECL
     (ENUM_KW "enum")
     (NAME (IDENT "Planet"))
-    (CLASS_BODY
+    (ENUM_BODY
       (L_CURLY "{")
-      (MEMBER_PLACEHOLDER
-        (IDENT "MERCURY")
-        (L_PAREN "(")
-        (DOUBLE_NUMBER "1.0")
-        (R_PAREN ")")
-        (COMMA ",")
-        (IDENT "VENUS")
-        (L_PAREN "(")
-        (DOUBLE_NUMBER "2.0")
-        (R_PAREN ")")
-        (L_CURLY "{")
-        (VOID_KW "void")
-        (IDENT "f")
-        (L_PAREN "(")
-        (R_PAREN ")")
-        (L_CURLY "{")
-        (R_CURLY "}")
-        (R_CURLY "}"))
-      (MEMBER_PLACEHOLDER (SEMICOLON ";"))
-      (MEMBER_PLACEHOLDER
+      (ENUM_CONSTANT
+        (NAME (IDENT "MERCURY"))
+        (ARG_LIST
+          (L_PAREN "(")
+          (DOUBLE_NUMBER "1.0")
+          (R_PAREN ")")))
+      (COMMA ",")
+      (ENUM_CONSTANT
+        (NAME (IDENT "VENUS"))
+        (ARG_LIST
+          (L_PAREN "(")
+          (DOUBLE_NUMBER "2.0")
+          (R_PAREN ")"))
+        (CLASS_BODY
+          (L_CURLY "{")
+          (METHOD_DECL
+            (PRIMITIVE_TYPE (VOID_KW "void"))
+            (NAME (IDENT "f"))
+            (PARAM_LIST
+              (L_PAREN "(")
+              (R_PAREN ")"))
+            (BLOCK
+              (L_CURLY "{")
+              (R_CURLY "}")))
+          (R_CURLY "}")))
+      (SEMICOLON ";")
+      (FIELD_DECL
         (MODIFIER_LIST
           (PRIVATE_KW "private")
           (FINAL_KW "final"))
-        (DOUBLE_KW "double")
-        (IDENT "mass")
+        (PRIMITIVE_TYPE (DOUBLE_KW "double"))
+        (VARIABLE_DECLARATOR (NAME (IDENT "mass")))
         (SEMICOLON ";"))
-      (MEMBER_PLACEHOLDER
-        (IDENT "Planet")
-        (L_PAREN "(")
-        (DOUBLE_KW "double")
-        (IDENT "mass")
-        (R_PAREN ")")
-        (L_CURLY "{")
-        (THIS_KW "this")
-        (DOT ".")
-        (IDENT "mass")
-        (EQ "=")
-        (IDENT "mass")
-        (SEMICOLON ";")
-        (R_CURLY "}"))
+      (CONSTRUCTOR_DECL
+        (NAME (IDENT "Planet"))
+        (PARAM_LIST
+          (L_PAREN "(")
+          (PARAM
+            (PRIMITIVE_TYPE (DOUBLE_KW "double"))
+            (NAME (IDENT "mass")))
+          (R_PAREN ")"))
+        (BLOCK
+          (L_CURLY "{")
+          (THIS_KW "this")
+          (DOT ".")
+          (IDENT "mass")
+          (EQ "=")
+          (IDENT "mass")
+          (SEMICOLON ";")
+          (R_CURLY "}")))
       (R_CURLY "}"))))

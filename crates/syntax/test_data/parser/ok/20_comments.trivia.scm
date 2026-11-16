@@ -13,10 +13,10 @@
       (WHITESPACE "\n    ")
       (LINE_COMMENT "// leading")
       (WHITESPACE "\n    ")
-      (MEMBER_PLACEHOLDER
-        (INT_KW "int")
+      (FIELD_DECL
+        (PRIMITIVE_TYPE (INT_KW "int"))
         (WHITESPACE " ")
-        (IDENT "x")
+        (VARIABLE_DECLARATOR (NAME (IDENT "x")))
         (SEMICOLON ";"))
       (WHITESPACE " ")
       (LINE_COMMENT "// trailing")

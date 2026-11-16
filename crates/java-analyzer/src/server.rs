@@ -7,9 +7,10 @@ use lsp_types::{
         DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
         PublishDiagnostics,
     },
-    request::{HoverRequest, Request as _},
-    DiagnosticSeverity, Hover, HoverContents, HoverParams, HoverProviderCapability, MarkupContent,
-    MarkupKind, PublishDiagnosticsParams, ServerCapabilities, TextDocumentSyncCapability,
+    request::{DocumentSymbolRequest, HoverRequest, Request as _},
+    DiagnosticSeverity, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, Hover,
+    HoverContents, HoverParams, HoverProviderCapability, MarkupContent, MarkupKind, OneOf,
+    PublishDiagnosticsParams, ServerCapabilities, SymbolKind, TextDocumentSyncCapability,
     TextDocumentSyncKind, Url,
 };
 
@@ -83,6 +84,16 @@ impl GlobalState {
         }
     }
 
+    fn document_symbols(&self, params: DocumentSymbolParams) -> Option<DocumentSymbolResponse> {
+        let file_id = *self.files.get(&params.text_document.uri)?;
+        let text = self.db.file_text(file_id);
+        let symbols = ide::document_symbols(&self.db, file_id)
+            .iter()
+            .map(|node| to_document_symbol(&text, node))
+            .collect();
+        Some(DocumentSymbolResponse::Nested(symbols))
+    }
+
     fn hover(&self, params: HoverParams) -> Option<Hover> {
         let pos = params.text_document_position_params;
         let file_id = *self.files.get(&pos.text_document.uri)?;
@@ -103,7 +114,37 @@ pub fn capabilities() -> ServerCapabilities {
     ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
+        document_symbol_provider: Some(OneOf::Left(true)),
         ..Default::default()
+    }
+}
+
+#[allow(deprecated)] // `DocumentSymbol::deprecated` is deprecated but has no default.
+fn to_document_symbol(text: &str, node: &ide::StructureNode) -> DocumentSymbol {
+    let range = |r: ide::TextRange| text_range_to_range(text, r.start().into(), r.end().into());
+    DocumentSymbol {
+        name: node.name.clone(),
+        detail: node.detail.clone(),
+        kind: match node.kind {
+            ide::SymbolKind::Class => SymbolKind::CLASS,
+            ide::SymbolKind::Interface | ide::SymbolKind::Annotation => SymbolKind::INTERFACE,
+            ide::SymbolKind::Enum => SymbolKind::ENUM,
+            ide::SymbolKind::Record => SymbolKind::STRUCT,
+            ide::SymbolKind::Field => SymbolKind::FIELD,
+            ide::SymbolKind::Method => SymbolKind::METHOD,
+            ide::SymbolKind::Constructor => SymbolKind::CONSTRUCTOR,
+            ide::SymbolKind::EnumConstant => SymbolKind::ENUM_MEMBER,
+        },
+        tags: None,
+        deprecated: None,
+        range: range(node.range),
+        selection_range: range(node.selection_range),
+        children: Some(
+            node.children
+                .iter()
+                .map(|c| to_document_symbol(text, c))
+                .collect(),
+        ),
     }
 }
 
@@ -136,6 +177,10 @@ fn handle_request(state: &GlobalState, req: Request) -> Response {
     match req.method.as_str() {
         HoverRequest::METHOD => match cast_request::<HoverRequest>(req) {
             Ok((id, params)) => Response::new_ok(id, state.hover(params)),
+            Err(response) => response,
+        },
+        DocumentSymbolRequest::METHOD => match cast_request::<DocumentSymbolRequest>(req) {
+            Ok((id, params)) => Response::new_ok(id, state.document_symbols(params)),
             Err(response) => response,
         },
         _ => Response::new_err(

@@ -8,7 +8,7 @@
   (ENUM_DECL
     (ENUM_KW "enum")
     (NAME (IDENT "E"))
-    (CLASS_BODY
+    (ENUM_BODY
       (L_CURLY "{")
       (R_CURLY "}")))
   (RECORD_DECL
@@ -16,11 +16,13 @@
     (NAME (IDENT "R"))
     (RECORD_COMPONENT_LIST
       (L_PAREN "(")
-      (INT_KW "int")
-      (IDENT "x")
+      (RECORD_COMPONENT
+        (PRIMITIVE_TYPE (INT_KW "int"))
+        (NAME (IDENT "x")))
       (COMMA ",")
-      (IDENT "String")
-      (IDENT "y")
+      (RECORD_COMPONENT
+        (PATH_TYPE (NAME_REF (IDENT "String")))
+        (NAME (IDENT "y")))
       (R_PAREN ")"))
     (CLASS_BODY
       (L_CURLY "{")

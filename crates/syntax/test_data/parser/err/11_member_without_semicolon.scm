@@ -4,11 +4,12 @@
     (NAME (IDENT "A"))
     (CLASS_BODY
       (L_CURLY "{")
-      (MEMBER_PLACEHOLDER
-        (INT_KW "int")
-        (IDENT "x")
-        (EQ "=")
-        (INT_NUMBER "5"))
+      (FIELD_DECL
+        (PRIMITIVE_TYPE (INT_KW "int"))
+        (VARIABLE_DECLARATOR
+          (NAME (IDENT "x"))
+          (EQ "=")
+          (EXPR_PLACEHOLDER (INT_NUMBER "5"))))
       (R_CURLY "}")))
   (CLASS_DECL
     (CLASS_KW "class")

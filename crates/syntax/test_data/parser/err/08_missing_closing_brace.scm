@@ -4,8 +4,8 @@
     (NAME (IDENT "A"))
     (CLASS_BODY
       (L_CURLY "{")
-      (MEMBER_PLACEHOLDER
-        (INT_KW "int")
-        (IDENT "x")
+      (FIELD_DECL
+        (PRIMITIVE_TYPE (INT_KW "int"))
+        (VARIABLE_DECLARATOR (NAME (IDENT "x")))
         (SEMICOLON ";")))))
 (errors (error "expected '}'" "2:11..2:11"))
