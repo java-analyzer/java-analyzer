@@ -1,0 +1,139 @@
+=====
+Empty source
+=====
+---
+
+=====
+Class declaration
+=====
+class Foo {}
+---
+CLASS_KW "class" @ 1:1
+IDENT "Foo" @ 1:7
+L_CURLY "{" @ 1:11
+R_CURLY "}" @ 1:12
+
+=====
+Reserved keywords
+=====
+abstract assert boolean break byte case catch char class const continue default do double
+else enum extends final finally float for goto if implements import instanceof int interface
+long native new package private protected public return short static strictfp super switch
+synchronized this throw throws transient try void volatile while _
+---
+ABSTRACT_KW "abstract" @ 1:1
+ASSERT_KW "assert" @ 1:10
+BOOLEAN_KW "boolean" @ 1:17
+BREAK_KW "break" @ 1:25
+BYTE_KW "byte" @ 1:31
+CASE_KW "case" @ 1:36
+CATCH_KW "catch" @ 1:41
+CHAR_KW "char" @ 1:47
+CLASS_KW "class" @ 1:52
+CONST_KW "const" @ 1:58
+CONTINUE_KW "continue" @ 1:64
+DEFAULT_KW "default" @ 1:73
+DO_KW "do" @ 1:81
+DOUBLE_KW "double" @ 1:84
+ELSE_KW "else" @ 2:1
+ENUM_KW "enum" @ 2:6
+EXTENDS_KW "extends" @ 2:11
+FINAL_KW "final" @ 2:19
+FINALLY_KW "finally" @ 2:25
+FLOAT_KW "float" @ 2:33
+FOR_KW "for" @ 2:39
+GOTO_KW "goto" @ 2:43
+IF_KW "if" @ 2:48
+IMPLEMENTS_KW "implements" @ 2:51
+IMPORT_KW "import" @ 2:62
+INSTANCEOF_KW "instanceof" @ 2:69
+INT_KW "int" @ 2:80
+INTERFACE_KW "interface" @ 2:84
+LONG_KW "long" @ 3:1
+NATIVE_KW "native" @ 3:6
+NEW_KW "new" @ 3:13
+PACKAGE_KW "package" @ 3:17
+PRIVATE_KW "private" @ 3:25
+PROTECTED_KW "protected" @ 3:33
+PUBLIC_KW "public" @ 3:43
+RETURN_KW "return" @ 3:50
+SHORT_KW "short" @ 3:57
+STATIC_KW "static" @ 3:63
+STRICTFP_KW "strictfp" @ 3:70
+SUPER_KW "super" @ 3:79
+SWITCH_KW "switch" @ 3:85
+SYNCHRONIZED_KW "synchronized" @ 4:1
+THIS_KW "this" @ 4:14
+THROW_KW "throw" @ 4:19
+THROWS_KW "throws" @ 4:25
+TRANSIENT_KW "transient" @ 4:32
+TRY_KW "try" @ 4:42
+VOID_KW "void" @ 4:46
+VOLATILE_KW "volatile" @ 4:51
+WHILE_KW "while" @ 4:60
+UNDERSCORE_KW "_" @ 4:66
+
+=====
+Literal keywords
+=====
+true false null
+---
+TRUE_KW "true" @ 1:1
+FALSE_KW "false" @ 1:6
+NULL_KW "null" @ 1:12
+
+=====
+Contextual keywords are identifiers
+=====
+var yield record sealed permits when module open requires exports opens uses provides to with transitive
+---
+IDENT "var" @ 1:1
+IDENT "yield" @ 1:5
+IDENT "record" @ 1:11
+IDENT "sealed" @ 1:18
+IDENT "permits" @ 1:25
+IDENT "when" @ 1:33
+IDENT "module" @ 1:38
+IDENT "open" @ 1:45
+IDENT "requires" @ 1:50
+IDENT "exports" @ 1:59
+IDENT "opens" @ 1:67
+IDENT "uses" @ 1:73
+IDENT "provides" @ 1:78
+IDENT "to" @ 1:87
+IDENT "with" @ 1:90
+IDENT "transitive" @ 1:95
+
+=====
+Hyphenated non-sealed is three tokens
+=====
+non-sealed
+---
+IDENT "non" @ 1:1
+MINUS "-" @ 1:4
+IDENT "sealed" @ 1:5
+
+=====
+Identifiers
+=====
+foo _foo $bar1 classy größe __ _1 $ Ünïcode
+---
+IDENT "foo" @ 1:1
+IDENT "_foo" @ 1:5
+IDENT "$bar1" @ 1:10
+IDENT "classy" @ 1:16
+IDENT "größe" @ 1:23
+IDENT "__" @ 1:29
+IDENT "_1" @ 1:32
+IDENT "$" @ 1:35
+IDENT "Ünïcode" @ 1:37
+
+=====
+Keyword prefixes are identifiers
+=====
+classes iff intx _x
+---
+IDENT "classes" @ 1:1
+IDENT "iff" @ 1:9
+IDENT "intx" @ 1:13
+IDENT "_x" @ 1:18

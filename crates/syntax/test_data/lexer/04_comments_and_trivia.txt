@@ -1,0 +1,98 @@
+=====
+Trivia is omitted by default
+=====
+class /* c */ A { // line
+}
+---
+CLASS_KW "class" @ 1:1
+IDENT "A" @ 1:15
+L_CURLY "{" @ 1:17
+R_CURLY "}" @ 2:1
+
+=====
+Trivia can be included
+=====
+class /* c */ A { // line
+}
+--- trivia
+CLASS_KW "class" @ 1:1
+WHITESPACE " " @ 1:6
+BLOCK_COMMENT "/* c */" @ 1:7
+WHITESPACE " " @ 1:14
+IDENT "A" @ 1:15
+WHITESPACE " " @ 1:16
+L_CURLY "{" @ 1:17
+WHITESPACE " " @ 1:18
+LINE_COMMENT "// line" @ 1:19
+WHITESPACE "\n" @ 1:26
+R_CURLY "}" @ 2:1
+WHITESPACE "\n" @ 2:2
+
+=====
+Doc comment
+=====
+/** Javadoc */
+class A {}
+--- trivia
+BLOCK_COMMENT "/** Javadoc */" @ 1:1
+WHITESPACE "\n" @ 1:15
+CLASS_KW "class" @ 2:1
+WHITESPACE " " @ 2:6
+IDENT "A" @ 2:7
+WHITESPACE " " @ 2:8
+L_CURLY "{" @ 2:9
+R_CURLY "}" @ 2:10
+WHITESPACE "\n" @ 2:11
+
+=====
+Line comment excludes the line terminator
+=====
+// one
+// two
+x
+--- trivia
+LINE_COMMENT "// one" @ 1:1
+WHITESPACE "\n" @ 1:7
+LINE_COMMENT "// two" @ 2:1
+WHITESPACE "\n" @ 2:7
+IDENT "x" @ 3:1
+WHITESPACE "\n" @ 3:2
+
+=====
+Block comment is not nested
+=====
+/* a /* b */ c */
+--- trivia
+BLOCK_COMMENT "/* a /* b */" @ 1:1
+WHITESPACE " " @ 1:13
+IDENT "c" @ 1:14
+WHITESPACE " " @ 1:15
+STAR "*" @ 1:16
+SLASH "/" @ 1:17
+WHITESPACE "\n" @ 1:18
+
+=====
+Unterminated block comment consumes to end of input
+=====
+class A {
+/* never closed
+}
+--- trivia
+CLASS_KW "class" @ 1:1
+WHITESPACE " " @ 1:6
+IDENT "A" @ 1:7
+WHITESPACE " " @ 1:8
+L_CURLY "{" @ 1:9
+WHITESPACE "\n" @ 1:10
+BLOCK_COMMENT "/* never closed\n}\n" @ 2:1
+error: unterminated block comment @ 2:1
+
+=====
+Mixed spaces and tabs form one whitespace token
+=====
+a  	b
+--- trivia
+IDENT "a" @ 1:1
+WHITESPACE "  \t" @ 1:2
+IDENT "b" @ 1:5
+WHITESPACE "\n" @ 1:6

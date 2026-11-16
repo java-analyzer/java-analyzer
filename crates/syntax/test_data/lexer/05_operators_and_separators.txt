@@ -1,0 +1,132 @@
+=====
+Separators
+=====
+( ) { } [ ] ; , . ... @ ::
+---
+L_PAREN "(" @ 1:1
+R_PAREN ")" @ 1:3
+L_CURLY "{" @ 1:5
+R_CURLY "}" @ 1:7
+L_BRACK "[" @ 1:9
+R_BRACK "]" @ 1:11
+SEMICOLON ";" @ 1:13
+COMMA "," @ 1:15
+DOT "." @ 1:17
+DOT3 "..." @ 1:19
+AT "@" @ 1:23
+COLON2 "::" @ 1:25
+
+=====
+Operators
+=====
+= < > ! ~ ? : -> == <= != && || ++ -- + - * / & | ^ % <<
+---
+EQ "=" @ 1:1
+L_ANGLE "<" @ 1:3
+R_ANGLE ">" @ 1:5
+BANG "!" @ 1:7
+TILDE "~" @ 1:9
+QUESTION "?" @ 1:11
+COLON ":" @ 1:13
+ARROW "->" @ 1:15
+EQ2 "==" @ 1:18
+LTEQ "<=" @ 1:21
+NEQ "!=" @ 1:24
+AMP2 "&&" @ 1:27
+PIPE2 "||" @ 1:30
+PLUS2 "++" @ 1:33
+MINUS2 "--" @ 1:36
+PLUS "+" @ 1:39
+MINUS "-" @ 1:41
+STAR "*" @ 1:43
+SLASH "/" @ 1:45
+AMP "&" @ 1:47
+PIPE "|" @ 1:49
+CARET "^" @ 1:51
+PERCENT "%" @ 1:53
+SHL "<<" @ 1:55
+
+=====
+Compound assignment
+=====
++= -= *= /= &= |= ^= %= <<=
+---
+PLUSEQ "+=" @ 1:1
+MINUSEQ "-=" @ 1:4
+STAREQ "*=" @ 1:7
+SLASHEQ "/=" @ 1:10
+AMPEQ "&=" @ 1:13
+PIPEEQ "|=" @ 1:16
+CARETEQ "^=" @ 1:19
+PERCENTEQ "%=" @ 1:22
+SHLEQ "<<=" @ 1:25
+
+=====
+Greater-than is never combined
+=====
+> >> >>> >= >>= >>>=
+---
+R_ANGLE ">" @ 1:1
+R_ANGLE ">" @ 1:3
+R_ANGLE ">" @ 1:4
+R_ANGLE ">" @ 1:6
+R_ANGLE ">" @ 1:7
+R_ANGLE ">" @ 1:8
+R_ANGLE ">" @ 1:10
+EQ "=" @ 1:11
+R_ANGLE ">" @ 1:13
+R_ANGLE ">" @ 1:14
+EQ "=" @ 1:15
+R_ANGLE ">" @ 1:17
+R_ANGLE ">" @ 1:18
+R_ANGLE ">" @ 1:19
+EQ "=" @ 1:20
+
+=====
+Nested generics
+=====
+List<List<String>> x;
+---
+IDENT "List" @ 1:1
+L_ANGLE "<" @ 1:5
+IDENT "List" @ 1:6
+L_ANGLE "<" @ 1:10
+IDENT "String" @ 1:11
+R_ANGLE ">" @ 1:17
+R_ANGLE ">" @ 1:18
+IDENT "x" @ 1:20
+SEMICOLON ";" @ 1:21
+
+=====
+Longest match
+=====
+a+++b a---b a<<=b a...b a::b
+---
+IDENT "a" @ 1:1
+PLUS2 "++" @ 1:2
+PLUS "+" @ 1:4
+IDENT "b" @ 1:5
+IDENT "a" @ 1:7
+MINUS2 "--" @ 1:8
+MINUS "-" @ 1:10
+IDENT "b" @ 1:11
+IDENT "a" @ 1:13
+SHLEQ "<<=" @ 1:14
+IDENT "b" @ 1:17
+IDENT "a" @ 1:19
+DOT3 "..." @ 1:20
+IDENT "b" @ 1:23
+IDENT "a" @ 1:25
+COLON2 "::" @ 1:26
+IDENT "b" @ 1:28
+
+=====
+Lambda and method reference
+=====
+x -> x::toString
+---
+IDENT "x" @ 1:1
+ARROW "->" @ 1:3
+IDENT "x" @ 1:6
+COLON2 "::" @ 1:7
+IDENT "toString" @ 1:9

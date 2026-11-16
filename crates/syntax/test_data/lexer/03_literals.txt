@@ -1,0 +1,100 @@
+=====
+Char literals
+=====
+'a' '\n' '\'' '\\' '\u0041' 'é'
+---
+CHAR_LITERAL "'a'" @ 1:1
+CHAR_LITERAL "'\\n'" @ 1:5
+CHAR_LITERAL "'\\''" @ 1:10
+CHAR_LITERAL "'\\\\'" @ 1:15
+CHAR_LITERAL "'\\u0041'" @ 1:20
+CHAR_LITERAL "'é'" @ 1:29
+
+=====
+String literals
+=====
+"" "hi" "a\"b" "a\\" "tab\t" "é😀"
+---
+STRING_LITERAL "\"\"" @ 1:1
+STRING_LITERAL "\"hi\"" @ 1:4
+STRING_LITERAL "\"a\\\"b\"" @ 1:9
+STRING_LITERAL "\"a\\\\\"" @ 1:16
+STRING_LITERAL "\"tab\\t\"" @ 1:22
+STRING_LITERAL "\"é😀\"" @ 1:30
+
+=====
+Text block
+=====
+String s = """
+    hello "quoted"
+      indented
+    """;
+---
+IDENT "String" @ 1:1
+IDENT "s" @ 1:8
+EQ "=" @ 1:10
+TEXT_BLOCK "\"\"\"\n    hello \"quoted\"\n      indented\n    \"\"\"" @ 1:12
+SEMICOLON ";" @ 4:8
+
+=====
+Text block with escaped delimiter
+=====
+"""
+  esc \""" still inside
+  """ after
+---
+TEXT_BLOCK "\"\"\"\n  esc \\\"\"\" still inside\n  \"\"\"" @ 1:1
+IDENT "after" @ 3:7
+
+=====
+Unterminated string stops at line end
+=====
+"abc
+foo
+---
+STRING_LITERAL "\"abc" @ 1:1
+error: unterminated string literal @ 1:1
+IDENT "foo" @ 2:1
+
+=====
+Unterminated string at end of input
+=====
+"abc
+---
+STRING_LITERAL "\"abc" @ 1:1
+error: unterminated string literal @ 1:1
+
+=====
+Unterminated string ending in a backslash
+=====
+"abc\
+---
+STRING_LITERAL "\"abc\\" @ 1:1
+error: unterminated string literal @ 1:1
+
+=====
+Unterminated char stops at line end
+=====
+'a
+b
+---
+CHAR_LITERAL "'a" @ 1:1
+error: unterminated character literal @ 1:1
+IDENT "b" @ 2:1
+
+=====
+Empty char literal is still one token
+=====
+''
+---
+CHAR_LITERAL "''" @ 1:1
+
+=====
+Unterminated text block extends to end of input
+=====
+"""
+never closed
+class Foo {}
+---
+TEXT_BLOCK "\"\"\"\nnever closed\nclass Foo {}\n" @ 1:1
+error: unterminated text block @ 1:1

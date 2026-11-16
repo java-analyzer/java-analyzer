@@ -1,0 +1,98 @@
+=====
+Integer literals
+=====
+0 42 1_000 0x1F 0XfF 0b101 0B1_0 017
+---
+INT_NUMBER "0" @ 1:1
+INT_NUMBER "42" @ 1:3
+INT_NUMBER "1_000" @ 1:6
+INT_NUMBER "0x1F" @ 1:12
+INT_NUMBER "0XfF" @ 1:17
+INT_NUMBER "0b101" @ 1:22
+INT_NUMBER "0B1_0" @ 1:28
+INT_NUMBER "017" @ 1:34
+
+=====
+Long literals
+=====
+42L 42l 0xFFL 0b1L 1_000L
+---
+LONG_NUMBER "42L" @ 1:1
+LONG_NUMBER "42l" @ 1:5
+LONG_NUMBER "0xFFL" @ 1:9
+LONG_NUMBER "0b1L" @ 1:15
+LONG_NUMBER "1_000L" @ 1:20
+
+=====
+Float literals
+=====
+1.5f 1e3F .5f 3f 0x1.8p1f
+---
+FLOAT_NUMBER "1.5f" @ 1:1
+FLOAT_NUMBER "1e3F" @ 1:6
+FLOAT_NUMBER ".5f" @ 1:11
+FLOAT_NUMBER "3f" @ 1:15
+FLOAT_NUMBER "0x1.8p1f" @ 1:18
+
+=====
+Double literals
+=====
+1.5 1e10 1E-3 1.5e+3 2d 2D .5 1. 0x1.8p1 0x1p-2
+---
+DOUBLE_NUMBER "1.5" @ 1:1
+DOUBLE_NUMBER "1e10" @ 1:5
+DOUBLE_NUMBER "1E-3" @ 1:10
+DOUBLE_NUMBER "1.5e+3" @ 1:15
+DOUBLE_NUMBER "2d" @ 1:22
+DOUBLE_NUMBER "2D" @ 1:25
+DOUBLE_NUMBER ".5" @ 1:28
+DOUBLE_NUMBER "1." @ 1:31
+DOUBLE_NUMBER "0x1.8p1" @ 1:34
+DOUBLE_NUMBER "0x1p-2" @ 1:42
+
+=====
+Dots after integers
+=====
+1..2
+1...
+---
+INT_NUMBER "1" @ 1:1
+DOT "." @ 1:2
+DOUBLE_NUMBER ".2" @ 1:3
+INT_NUMBER "1" @ 2:1
+DOT3 "..." @ 2:2
+
+=====
+Exponent requires digits
+=====
+1e
+1e+
+---
+INT_NUMBER "1" @ 1:1
+IDENT "e" @ 1:2
+INT_NUMBER "1" @ 2:1
+IDENT "e" @ 2:2
+PLUS "+" @ 2:3
+
+=====
+Member access and addition with small integers
+=====
+a.b 1+2
+---
+IDENT "a" @ 1:1
+DOT "." @ 1:2
+IDENT "b" @ 1:3
+INT_NUMBER "1" @ 1:5
+PLUS "+" @ 1:6
+INT_NUMBER "2" @ 1:7
+
+=====
+Hex and binary without digits
+=====
+0x
+0b
+---
+INT_NUMBER "0x" @ 1:1
+error: expected hexadecimal digits @ 1:1
+INT_NUMBER "0b" @ 2:1
+error: expected binary digits @ 2:1

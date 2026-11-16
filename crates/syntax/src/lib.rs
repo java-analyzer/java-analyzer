@@ -11,8 +11,13 @@ impl rowan::Language for JavaLanguage {
     type Kind = SyntaxKind;
 
     fn kind_from_raw(raw: rowan::SyntaxKind) -> Self::Kind {
-        assert!(raw.0 <= SyntaxKind::CLASS_DECL as u16);
-        // Safety: We ensure that the u16 corresponds to our SyntaxKind repr
+        assert!(
+            raw.0 < SyntaxKind::__LAST as u16,
+            "invalid raw syntax kind: {}",
+            raw.0
+        );
+        // Safety: `SyntaxKind` is `#[repr(u16)]` with contiguous discriminants starting at 0,
+        // and we just checked `raw` is below the `__LAST` sentinel.
         unsafe { std::mem::transmute::<u16, SyntaxKind>(raw.0) }
     }
 

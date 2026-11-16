@@ -290,14 +290,43 @@ type annotations.
 
 ## Test strategy
 
-1. **Lexer unit tests**: one test per token class including edge cases (`1_000`, `0x1.8p1`,
-   `'\''`, unterminated forms, `>>` lexed as two `>`, `non-sealed`).
-2. **Inline CST snapshot tests**: source string in, `{:#?}` of the `SyntaxNode` out,
-   compared against an expect-style snapshot stored next to the test. A small helper
-   (`check(src, expect![[...]])` style) is part of M1; adopt the `expect-test` crate.
-3. **Fixture directories** under `crates/syntax/test_data/{ok,err}/<milestone>/`. `ok`
-   fixtures assert zero errors; `err` fixtures assert the snapshot including errors. A single
-   test walks the directory; `UPDATE_EXPECT=1` regenerates snapshots.
+1. **Text fixtures (the main corpus)**, modelled on the sibling `bourbon-lang` scanner tests.
+   Fixtures live in `crates/syntax/test_data/<phase>/*.txt` (`lexer/`, later `parser/ok/` and
+   `parser/err/`). A fixture file holds one or more cases:
+
+   ```
+   =====
+   Case title
+   =====
+   <source code under test, verbatim>
+   ---
+   <expected output, one item per line>
+   ```
+
+   - A case starts at a line of three or more `=`, a title line, and another `=` line. The
+     source runs to the first line of three or more `-`. The expected output runs to the next
+     case header or end of file.
+   - The source is the lines between the two rules, each terminated by `\n` (an empty source
+     is the empty string).
+   - Text after the dashes of the separator holds options, e.g. `--- trivia` includes trivia
+     tokens in the lexer output (omitted by default).
+   - **Lexer output** is one line per token, `KIND "lexeme" @ line:col` (1-based line,
+     1-based column counted in `char`s, lexeme in Rust `{:?}` escaping), followed directly by
+     `error: <message> @ line:col` for any lexical error starting at that token.
+   - **Parser output** (M1 onwards) is the indented CST with `@ range` omitted, followed by
+     one `error: <message> @ line:col` line per syntax error.
+   - Unlike bourbon, expectations carry no line-synchronised `---` markers and are
+     **generated, not hand-aligned**: running the tests with `UPDATE_EXPECT=1` rewrites the
+     expected sections, and the diff is reviewed like a snapshot. Expected sections must not
+     contain comments (they are discarded on update).
+   - A single test per phase walks the directory, collects every mismatch and reports each
+     as a unified diff naming the file, case title and line, so one failing fixture does not
+     hide the others.
+2. **Inline unit tests** for properties that are awkward in fixtures (e.g. `>` never combining
+   with a following `>`/`=`, losslessness on arbitrary input), plus small `expect-test`
+   snapshots (`check(src, expect![[...]])` style) where a fixture would be overkill.
+3. **Lexer/parser unit tests** may still assert on specific token kinds directly when that is
+   clearer than a fixture.
 4. **Invariants checked on every fixture and in property tests**:
    - Roundtrip: `SyntaxNode::new_root(green).text() == input`.
    - No panic and termination (with a step budget).
@@ -310,8 +339,8 @@ type annotations.
 
 ## Impacted code
 
-- `crates/syntax`: `syntax_kind.rs` (many new kinds, `__LAST`), `lexer.rs`, new
-  `parser/` module (`grammar/`, `event.rs`, `tree_builder.rs`, `token_set.rs`), `lib.rs`
+- `crates/syntax`: `tests/` (fixture harness), `test_data/` (fixtures), `syntax_kind.rs` (many
+  new kinds, `__LAST`), `lexer.rs`, new `parser/` module (`grammar/`, `event.rs`, `tree_builder.rs`, `token_set.rs`), `lib.rs`
   (`Parse`, `SyntaxError`).
 - `crates/hir`: `parse` query returns `Parse`/green node, new `syntax_errors` query.
 - `crates/ide`: `diagnostics(db, file_id)`.
@@ -324,7 +353,8 @@ type annotations.
 2. **Language level**: no gating. Accept any valid Java syntax, including future syntax.
 3. **Doc comments**: siblings of the declaration node, matching `rust-analyzer`.
 4. **Lexer**: hand-written, consistent with spec 0001.
-5. **Snapshot tooling**: the `expect-test` crate.
+5. **Snapshot tooling**: text fixtures with `UPDATE_EXPECT=1` regeneration for the corpus (see
+   "Test strategy"), and the `expect-test` crate for small inline snapshots.
 
 ## Immediate next steps
 
