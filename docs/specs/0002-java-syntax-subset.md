@@ -312,13 +312,42 @@ Acceptance:
 
 #### M2b: Statements
 
-*Unlocks*: recovery inside method bodies (an unclosed block no longer swallows the class).
+*Unlocks*: recovery inside method bodies (a broken statement no longer swallows the class) and a
+real block structure for M3.
 
-Nodes: `BLOCK`, `LOCAL_VAR_DECL`, `EXPR_STMT`, `RETURN_STMT`, `IF_STMT`, `WHILE_STMT`,
-`FOR_STMT`, `FOREACH_STMT`, `DO_STMT`, `BREAK_STMT`, `CONTINUE_STMT`, `THROW_STMT`, `TRY_STMT`,
-`CATCH_CLAUSE`, `FINALLY_CLAUSE`, `SWITCH_STMT`, `EMPTY_STMT`, `LABELED_STMT`,
-`SYNCHRONIZED_STMT`, `ASSERT_STMT`. Statement-level recovery sets are given under "Error
-recovery". Statements embed `EXPR_PLACEHOLDER` until M3.
+Nodes: `BLOCK`, `LOCAL_VAR_DECL`, `EXPR_STMT`, `EMPTY_STMT`, `IF_STMT`, `WHILE_STMT`, `DO_STMT`,
+`FOR_STMT`, `FOREACH_STMT`, `RETURN_STMT`, `BREAK_STMT`, `CONTINUE_STMT`, `THROW_STMT`,
+`YIELD_STMT`, `ASSERT_STMT`, `SYNCHRONIZED_STMT`, `LABELED_STMT`, `TRY_STMT`, `RESOURCE_LIST`,
+`RESOURCE`, `CATCH_CLAUSE`, `FINALLY_CLAUSE`, `SWITCH_STMT`, `SWITCH_BODY`, `SWITCH_CASE`,
+`SWITCH_LABEL`. Local class, interface, enum and record declarations reuse the member-level
+declaration nodes. Statements embed `EXPR_PLACEHOLDER` until M3; the placeholder ends where its
+position requires (`;`, an unmatched `)`, `:` outside a `?:`, `->`).
+
+Grammar notes:
+
+- **Declaration or expression?** A statement starting with a type that is directly followed by
+  an identifier (`Foo x`, `List<String> xs`, `int[] a`) is a declaration; nothing else can
+  look like that. The type is recognised by a bounded lookahead over tokens that may occur in a
+  type, so `a < b` is never mistaken for generic arguments. A primitive type keyword not
+  followed by `.`, `[` or `::` is always a declaration (`int ;` is a declaration with a
+  missing name).
+- `yield` is a contextual keyword: it starts a yield statement unless it is followed by an
+  assignment operator, `.`, `[`, `++`, `--`, `:`, `;`, `}` or end of input.
+- `switch` bodies hold `SWITCH_CASE` nodes, each a `SWITCH_LABEL` (`case ...:` / `default:` /
+  `case ... ->`) followed by its statements, or for the arrow form by exactly one statement. A
+  statement before the first label is reported as `expected 'case' or 'default'`.
+- `try` requires a `catch`, a `finally` or a resource list.
+
+Statement-level recovery:
+
+- A block that is still open at `public`, `private` or `protected` (they can never start a
+  statement) is unclosed; every enclosing open block reports its own `expected '}'`.
+- `else`, `catch`, `finally`, `case` and `default` where a statement should start are reported
+  as `unexpected '<keyword>'` and consumed into an `ERROR` node.
+- A control-flow construct whose body is missing reports `expected a statement` and consumes
+  nothing.
+- Missing `(`, `)`, `;`, `{`, `while`, `:` and `->` are reported at the end of the previous
+  token without consuming input.
 
 ### M3: Expressions
 

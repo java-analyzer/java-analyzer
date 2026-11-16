@@ -106,9 +106,10 @@
           (R_PAREN ")"))
         (BLOCK
           (L_CURLY "{")
-          (RETURN_KW "return")
-          (IDENT "x")
-          (SEMICOLON ";")
+          (RETURN_STMT
+            (RETURN_KW "return")
+            (EXPR_PLACEHOLDER (IDENT "x"))
+            (SEMICOLON ";"))
           (R_CURLY "}")))
       (METHOD_DECL
         (PRIMITIVE_TYPE (INT_KW "int"))
@@ -120,9 +121,10 @@
         (R_BRACK "]")
         (BLOCK
           (L_CURLY "{")
-          (RETURN_KW "return")
-          (NULL_KW "null")
-          (SEMICOLON ";")
+          (RETURN_STMT
+            (RETURN_KW "return")
+            (EXPR_PLACEHOLDER (NULL_KW "null"))
+            (SEMICOLON ";"))
           (R_CURLY "}")))
       (METHOD_DECL
         (PATH_TYPE (NAME_REF (IDENT "String")))
@@ -140,9 +142,10 @@
           (R_PAREN ")"))
         (BLOCK
           (L_CURLY "{")
-          (RETURN_KW "return")
-          (STRING_LITERAL "\"\"")
-          (SEMICOLON ";")
+          (RETURN_STMT
+            (RETURN_KW "return")
+            (EXPR_PLACEHOLDER (STRING_LITERAL "\"\""))
+            (SEMICOLON ";"))
           (R_CURLY "}")))
       (METHOD_DECL
         (PRIMITIVE_TYPE (VOID_KW "void"))
@@ -207,10 +210,12 @@
           (PATH_TYPE (NAME_REF (IDENT "Exception"))))
         (BLOCK
           (L_CURLY "{")
-          (THIS_KW "this")
-          (L_PAREN "(")
-          (R_PAREN ")")
-          (SEMICOLON ";")
+          (EXPR_STMT
+            (EXPR_PLACEHOLDER
+              (THIS_KW "this")
+              (L_PAREN "(")
+              (R_PAREN ")"))
+            (SEMICOLON ";"))
           (R_CURLY "}")))
       (METHOD_DECL
         (MODIFIER_LIST (NATIVE_KW "native"))

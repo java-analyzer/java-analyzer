@@ -180,10 +180,36 @@ pub enum SyntaxKind {
     PARAM,
     THROWS_CLAUSE,
     DEFAULT_VALUE,
-    /// A brace-balanced token run; replaced by real statements in M2b.
-    BLOCK,
     /// A token run standing in for an expression; replaced by real expressions in M3.
     EXPR_PLACEHOLDER,
+
+    // ---- Nodes: statements ----
+    BLOCK,
+    LOCAL_VAR_DECL,
+    EXPR_STMT,
+    EMPTY_STMT,
+    IF_STMT,
+    WHILE_STMT,
+    DO_STMT,
+    FOR_STMT,
+    FOREACH_STMT,
+    RETURN_STMT,
+    BREAK_STMT,
+    CONTINUE_STMT,
+    THROW_STMT,
+    YIELD_STMT,
+    ASSERT_STMT,
+    SYNCHRONIZED_STMT,
+    LABELED_STMT,
+    TRY_STMT,
+    RESOURCE_LIST,
+    RESOURCE,
+    CATCH_CLAUSE,
+    FINALLY_CLAUSE,
+    SWITCH_STMT,
+    SWITCH_BODY,
+    SWITCH_CASE,
+    SWITCH_LABEL,
     /// Enum constant arguments for now; becomes the real argument list in M3.
     ARG_LIST,
 

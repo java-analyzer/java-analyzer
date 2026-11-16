@@ -6,6 +6,7 @@
 //! `docs/specs/0002-java-syntax-subset.md`.
 
 mod grammar;
+mod statements;
 pub(crate) mod tree_builder;
 
 use std::cell::Cell;

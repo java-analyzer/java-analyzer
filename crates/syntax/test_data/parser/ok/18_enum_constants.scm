@@ -58,11 +58,13 @@
           (R_PAREN ")"))
         (BLOCK
           (L_CURLY "{")
-          (THIS_KW "this")
-          (DOT ".")
-          (IDENT "mass")
-          (EQ "=")
-          (IDENT "mass")
-          (SEMICOLON ";")
+          (EXPR_STMT
+            (EXPR_PLACEHOLDER
+              (THIS_KW "this")
+              (DOT ".")
+              (IDENT "mass")
+              (EQ "=")
+              (IDENT "mass"))
+            (SEMICOLON ";"))
           (R_CURLY "}")))
       (R_CURLY "}"))))

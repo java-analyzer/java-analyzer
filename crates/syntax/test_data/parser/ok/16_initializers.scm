@@ -8,17 +8,21 @@
         (MODIFIER_LIST (STATIC_KW "static"))
         (BLOCK
           (L_CURLY "{")
-          (IDENT "init")
-          (L_PAREN "(")
-          (R_PAREN ")")
-          (SEMICOLON ";")
+          (EXPR_STMT
+            (EXPR_PLACEHOLDER
+              (IDENT "init")
+              (L_PAREN "(")
+              (R_PAREN ")"))
+            (SEMICOLON ";"))
           (R_CURLY "}")))
       (INITIALIZER
         (BLOCK
           (L_CURLY "{")
-          (IDENT "instance")
-          (L_PAREN "(")
-          (R_PAREN ")")
-          (SEMICOLON ";")
+          (EXPR_STMT
+            (EXPR_PLACEHOLDER
+              (IDENT "instance")
+              (L_PAREN "(")
+              (R_PAREN ")"))
+            (SEMICOLON ";"))
           (R_CURLY "}")))
       (R_CURLY "}"))))

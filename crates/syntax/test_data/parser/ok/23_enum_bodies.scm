@@ -71,9 +71,10 @@
               (R_PAREN ")"))
             (BLOCK
               (L_CURLY "{")
-              (RETURN_KW "return")
-              (INT_NUMBER "1")
-              (SEMICOLON ";")
+              (RETURN_STMT
+                (RETURN_KW "return")
+                (EXPR_PLACEHOLDER (INT_NUMBER "1"))
+                (SEMICOLON ";"))
               (R_CURLY "}")))
           (R_CURLY "}")))
       (COMMA ",")
@@ -105,11 +106,13 @@
           (R_PAREN ")"))
         (BLOCK
           (L_CURLY "{")
-          (THIS_KW "this")
-          (L_PAREN "(")
-          (INT_NUMBER "0")
-          (R_PAREN ")")
-          (SEMICOLON ";")
+          (EXPR_STMT
+            (EXPR_PLACEHOLDER
+              (THIS_KW "this")
+              (L_PAREN "(")
+              (INT_NUMBER "0")
+              (R_PAREN ")"))
+            (SEMICOLON ";"))
           (R_CURLY "}")))
       (CONSTRUCTOR_DECL
         (NAME (IDENT "WithBodies"))
@@ -121,12 +124,14 @@
           (R_PAREN ")"))
         (BLOCK
           (L_CURLY "{")
-          (THIS_KW "this")
-          (DOT ".")
-          (IDENT "x")
-          (EQ "=")
-          (IDENT "x")
-          (SEMICOLON ";")
+          (EXPR_STMT
+            (EXPR_PLACEHOLDER
+              (THIS_KW "this")
+              (DOT ".")
+              (IDENT "x")
+              (EQ "=")
+              (IDENT "x"))
+            (SEMICOLON ";"))
           (R_CURLY "}")))
       (CONSTRUCTOR_DECL
         (NAME (IDENT "WithBodies"))
@@ -142,11 +147,13 @@
           (R_PAREN ")"))
         (BLOCK
           (L_CURLY "{")
-          (THIS_KW "this")
-          (L_PAREN "(")
-          (IDENT "x")
-          (R_PAREN ")")
-          (SEMICOLON ";")
+          (EXPR_STMT
+            (EXPR_PLACEHOLDER
+              (THIS_KW "this")
+              (L_PAREN "(")
+              (IDENT "x")
+              (R_PAREN ")"))
+            (SEMICOLON ";"))
           (R_CURLY "}")))
       (METHOD_DECL
         (PRIMITIVE_TYPE (INT_KW "int"))
@@ -156,8 +163,9 @@
           (R_PAREN ")"))
         (BLOCK
           (L_CURLY "{")
-          (RETURN_KW "return")
-          (IDENT "x")
-          (SEMICOLON ";")
+          (RETURN_STMT
+            (RETURN_KW "return")
+            (EXPR_PLACEHOLDER (IDENT "x"))
+            (SEMICOLON ";"))
           (R_CURLY "}")))
       (R_CURLY "}"))))

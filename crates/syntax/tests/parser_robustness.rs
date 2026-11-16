@@ -4,7 +4,15 @@
 
 mod support;
 
+/// Checks the properties for `text`, printing the offending input if any of them fails.
 fn check(text: &str) {
+    if let Err(panic) = std::panic::catch_unwind(|| check_properties(text)) {
+        eprintln!("robustness check failed for input: {text:?}");
+        std::panic::resume_unwind(panic);
+    }
+}
+
+fn check_properties(text: &str) {
     let parse = syntax::parse(text);
     assert_eq!(
         parse.syntax_node().text().to_string(),

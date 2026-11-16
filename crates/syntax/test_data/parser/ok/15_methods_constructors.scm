@@ -21,16 +21,20 @@
           (R_PAREN ")"))
         (BLOCK
           (L_CURLY "{")
-          (IF_KW "if")
-          (L_PAREN "(")
-          (IDENT "x")
-          (R_PAREN ")")
-          (L_CURLY "{")
-          (IDENT "y")
-          (L_PAREN "(")
-          (R_PAREN ")")
-          (SEMICOLON ";")
-          (R_CURLY "}")
+          (IF_STMT
+            (IF_KW "if")
+            (L_PAREN "(")
+            (EXPR_PLACEHOLDER (IDENT "x"))
+            (R_PAREN ")")
+            (BLOCK
+              (L_CURLY "{")
+              (EXPR_STMT
+                (EXPR_PLACEHOLDER
+                  (IDENT "y")
+                  (L_PAREN "(")
+                  (R_PAREN ")"))
+                (SEMICOLON ";"))
+              (R_CURLY "}")))
           (R_CURLY "}")))
       (METHOD_DECL
         (MODIFIER_LIST (ABSTRACT_KW "abstract"))
@@ -62,8 +66,9 @@
           (PATH_TYPE (NAME_REF (IDENT "Exception"))))
         (BLOCK
           (L_CURLY "{")
-          (RETURN_KW "return")
-          (IDENT "a")
-          (SEMICOLON ";")
+          (RETURN_STMT
+            (RETURN_KW "return")
+            (EXPR_PLACEHOLDER (IDENT "a"))
+            (SEMICOLON ";"))
           (R_CURLY "}")))
       (R_CURLY "}"))))

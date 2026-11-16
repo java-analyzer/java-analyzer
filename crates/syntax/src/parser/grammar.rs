@@ -1,8 +1,8 @@
-//! Grammar rules for milestone M1 (see `docs/specs/0002-java-syntax-subset.md`): the compilation
-//! unit, type declarations, modifiers and annotations, and the minimal type syntax their headers
-//! need. Class members are parsed shallowly into `MEMBER_PLACEHOLDER` nodes until M2.
+//! Grammar rules for milestones M1 and M2a (see `docs/specs/0002-java-syntax-subset.md`): the
+//! compilation unit, type declarations, members, modifiers and annotations, and types. Statements
+//! live in `statements.rs`; expressions are token-run placeholders until M3.
 
-use super::{Marker, Parser};
+use super::{statements::block, Marker, Parser};
 use crate::syntax_kind::SyntaxKind::{self, *};
 
 pub(super) fn source_file(p: &mut Parser<'_, '_>) {
@@ -78,7 +78,7 @@ fn package_rest(p: &mut Parser<'_, '_>) {
 
 // ---- Names and paths ----
 
-fn name(p: &mut Parser<'_, '_>) {
+pub(super) fn name(p: &mut Parser<'_, '_>) {
     if p.at(IDENT) {
         let m = p.start();
         p.bump(IDENT);
@@ -88,7 +88,7 @@ fn name(p: &mut Parser<'_, '_>) {
     }
 }
 
-fn name_ref(p: &mut Parser<'_, '_>) {
+pub(super) fn name_ref(p: &mut Parser<'_, '_>) {
     if p.at(IDENT) {
         let m = p.start();
         p.bump(IDENT);
@@ -117,7 +117,7 @@ fn path(p: &mut Parser<'_, '_>) {
 
 // ---- Modifiers and annotations ----
 
-fn is_modifier_kw(kind: SyntaxKind) -> bool {
+pub(super) fn is_modifier_kw(kind: SyntaxKind) -> bool {
     matches!(
         kind,
         PUBLIC_KW
@@ -144,7 +144,7 @@ fn modifier_may_follow(p: &Parser<'_, '_>, n: usize) -> bool {
         || p.nth_at_contextual_kw(n, "non")
 }
 
-fn modifiers(p: &mut Parser<'_, '_>) {
+pub(super) fn modifiers(p: &mut Parser<'_, '_>) {
     let m = p.start();
     let mut any = false;
     loop {
@@ -251,7 +251,7 @@ fn balanced_parens(p: &mut Parser<'_, '_>, kind: SyntaxKind) {
 
 /// If the parser is at the keyword that starts a type declaration (after the modifiers),
 /// returns the kind of node it declares.
-fn type_decl_kind(p: &Parser<'_, '_>) -> Option<SyntaxKind> {
+pub(super) fn type_decl_kind(p: &Parser<'_, '_>) -> Option<SyntaxKind> {
     match p.current() {
         CLASS_KW => Some(CLASS_DECL),
         INTERFACE_KW => Some(INTERFACE_DECL),
@@ -269,7 +269,7 @@ fn type_decl_kind(p: &Parser<'_, '_>) -> Option<SyntaxKind> {
 }
 
 /// Parses everything of a type declaration after its modifiers.
-fn type_decl_rest(p: &mut Parser<'_, '_>, kind: SyntaxKind) {
+pub(super) fn type_decl_rest(p: &mut Parser<'_, '_>, kind: SyntaxKind) {
     match kind {
         CLASS_DECL => {
             p.bump(CLASS_KW);
@@ -419,7 +419,7 @@ fn enum_constant(p: &mut Parser<'_, '_>) {
     m.complete(p, ENUM_CONSTANT);
 }
 
-fn is_primitive_kw(kind: SyntaxKind) -> bool {
+pub(super) fn is_primitive_kw(kind: SyntaxKind) -> bool {
     matches!(
         kind,
         BOOLEAN_KW | BYTE_KW | SHORT_KW | INT_KW | LONG_KW | CHAR_KW | FLOAT_KW | DOUBLE_KW
@@ -512,15 +512,19 @@ fn method_or_field(p: &mut Parser<'_, '_>, m: Marker) {
         if p.at(DEFAULT_KW) {
             let d = p.start();
             p.bump(DEFAULT_KW);
-            expr_placeholder(p, false);
+            expr_placeholder(p, ExprEnd::default());
             d.complete(p, DEFAULT_VALUE);
         }
         body_or_semicolon(p);
         m.complete(p, METHOD_DECL);
     } else {
-        let mut named = variable_declarator(p);
+        let end = ExprEnd {
+            comma: true,
+            ..ExprEnd::default()
+        };
+        let mut named = variable_declarator(p, end);
         while p.eat(COMMA) {
-            named &= variable_declarator(p);
+            named &= variable_declarator(p, end);
         }
         // A missing name was already reported; do not pile a second error on top of it.
         if !p.eat(SEMICOLON) && named {
@@ -531,19 +535,19 @@ fn method_or_field(p: &mut Parser<'_, '_>, m: Marker) {
 }
 
 /// `Name ('[' ']')* ('=' Initializer)?`. Returns whether the name was present.
-fn variable_declarator(p: &mut Parser<'_, '_>) -> bool {
+pub(super) fn variable_declarator(p: &mut Parser<'_, '_>, end: ExprEnd) -> bool {
     let m = p.start();
     let named = p.at(IDENT);
     name(p);
     dims(p);
     if p.eat(EQ) {
-        expr_placeholder(p, true);
+        expr_placeholder(p, end);
     }
     m.complete(p, VARIABLE_DECLARATOR);
     named
 }
 
-fn dims(p: &mut Parser<'_, '_>) {
+pub(super) fn dims(p: &mut Parser<'_, '_>) {
     while p.at(L_BRACK) && p.nth_at(1, R_BRACK) {
         p.bump(L_BRACK);
         p.bump(R_BRACK);
@@ -618,48 +622,28 @@ fn param(p: &mut Parser<'_, '_>, kind: SyntaxKind) {
     m.complete(p, kind);
 }
 
-/// A method, constructor or initializer body. Statements are not parsed yet (M2b): the body is a
-/// brace-balanced token run. As a recovery aid, a body that is still open when a member-only
-/// modifier shows up at its top level (`public`, `private`, `protected` can never start a
-/// statement) is considered unclosed, so one missing `}` does not swallow the rest of the class.
-fn block(p: &mut Parser<'_, '_>) {
-    let m = p.start();
-    p.bump(L_CURLY);
-    let mut depth = 1usize;
-    loop {
-        match p.current() {
-            EOF => {
-                p.error_missing("expected '}'");
-                break;
-            }
-            PUBLIC_KW | PRIVATE_KW | PROTECTED_KW if depth == 1 => {
-                p.error_missing("expected '}'");
-                break;
-            }
-            L_CURLY => {
-                depth += 1;
-                p.bump_any();
-            }
-            R_CURLY => {
-                depth -= 1;
-                p.bump_any();
-                if depth == 0 {
-                    break;
-                }
-            }
-            _ => p.bump_any(),
-        }
-    }
-    m.complete(p, BLOCK);
+/// Where an [`expr_placeholder`] ends, besides the always-active terminators (`;` or `}` outside
+/// braces, EOF, and member-only modifiers and declaration keywords outside any brackets).
+#[derive(Clone, Copy, Default)]
+pub(super) struct ExprEnd {
+    /// A `,` outside brackets that is followed by what looks like another declarator
+    /// (`name =`, `name ,`, `name ;`, `name [`).
+    pub comma: bool,
+    /// An unmatched `)`: the placeholder sits inside parentheses the caller owns.
+    pub rparen: bool,
+    /// A `:` outside brackets that is not the else-branch of a `?:` seen earlier.
+    pub colon: bool,
+    /// A `->` outside brackets (switch rules).
+    pub arrow: bool,
 }
 
-/// A stand-in for an expression (M3): a token run that ends at a `;` or `}` outside braces, at a
-/// member-only modifier or declaration keyword outside any brackets, and, if `stop_at_comma`, at
-/// a comma that is followed by what looks like another declarator (`name =`, `name ,`, ...).
-fn expr_placeholder(p: &mut Parser<'_, '_>, stop_at_comma: bool) {
+/// A stand-in for an expression (M3): a token run that ends where `end` says. Generic arguments
+/// are tracked heuristically (`<` after an identifier opens, `>` closes) so that their commas do
+/// not look like declarator separators. An empty run is reported as `expected an expression`.
+pub(super) fn expr_placeholder(p: &mut Parser<'_, '_>, end: ExprEnd) {
     let m = p.start();
     let start = p.pos();
-    let (mut parens, mut curlies, mut angles) = (0usize, 0usize, 0usize);
+    let (mut parens, mut curlies, mut angles, mut questions) = (0usize, 0usize, 0usize, 0usize);
     let mut prev = EOF;
     loop {
         let kind = p.current();
@@ -667,17 +651,25 @@ fn expr_placeholder(p: &mut Parser<'_, '_>, stop_at_comma: bool) {
         match kind {
             EOF => break,
             SEMICOLON | R_CURLY if curlies == 0 => break,
+            R_PAREN if end.rparen && top_level => break,
+            COLON if end.colon && top_level && questions == 0 => break,
+            ARROW if end.arrow && top_level => break,
+            // `, name =` cannot occur inside generic arguments, so it always starts the next
+            // declarator. `, name ,` and friends could be `Foo<A, B, C>`, so they only count
+            // outside what looks like generic arguments.
             COMMA
-                if stop_at_comma
+                if end.comma
                     && top_level
-                    && angles == 0
                     && p.nth_at(1, IDENT)
-                    && matches!(p.nth(2), EQ | COMMA | SEMICOLON | L_BRACK) =>
+                    && (p.nth_at(2, EQ)
+                        || (angles == 0 && matches!(p.nth(2), COMMA | SEMICOLON | L_BRACK))) =>
             {
                 break
             }
             PUBLIC_KW | PRIVATE_KW | PROTECTED_KW | ABSTRACT_KW | STATIC_KW if top_level => break,
             CLASS_KW | INTERFACE_KW | ENUM_KW if top_level && prev != DOT => break,
+            QUESTION if top_level && angles == 0 => questions += 1,
+            COLON if top_level && questions > 0 => questions -= 1,
             L_CURLY => curlies += 1,
             R_CURLY => curlies -= 1,
             L_PAREN | L_BRACK => parens += 1,
@@ -700,7 +692,7 @@ fn expr_placeholder(p: &mut Parser<'_, '_>, stop_at_comma: bool) {
 // ---- Types ----
 
 /// Parses a type. Returns false (after reporting an error) if there is none.
-fn type_(p: &mut Parser<'_, '_>) -> bool {
+pub(super) fn type_(p: &mut Parser<'_, '_>) -> bool {
     let mut completed = match p.current() {
         BOOLEAN_KW | BYTE_KW | SHORT_KW | INT_KW | LONG_KW | CHAR_KW | FLOAT_KW | DOUBLE_KW => {
             let m = p.start();

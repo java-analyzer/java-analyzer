@@ -357,6 +357,19 @@ Class B
     }
 
     #[test]
+    fn outline_ignores_local_declarations_inside_bodies() {
+        let text = "class A {\n    void f() {\n        class Local { int hidden; }\n        int local = 1;\n    }\n    int g;\n}\n";
+        assert_eq!(
+            outline(text),
+            "\
+Class A
+  Method f ()
+  Field g int
+"
+        );
+    }
+
+    #[test]
     fn outline_of_empty_and_declaration_free_files() {
         assert_eq!(outline(""), "");
         assert_eq!(outline("package a;\nimport b.C;\n"), "");
