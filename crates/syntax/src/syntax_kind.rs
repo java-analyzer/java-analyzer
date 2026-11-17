@@ -144,6 +144,9 @@ pub enum SyntaxKind {
     SOURCE_FILE,
     PACKAGE_DECL,
     IMPORT_DECL,
+    MODULE_DECL,
+    MODULE_BODY,
+    MODULE_DIRECTIVE,
 
     // ---- Nodes: names and paths ----
     NAME,

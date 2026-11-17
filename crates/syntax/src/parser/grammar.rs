@@ -40,6 +40,9 @@ fn top_level_item(p: &mut Parser<'_, '_>) {
             } else if let Some(kind) = type_decl_kind(p) {
                 type_decl_rest(p, kind);
                 m.complete(p, kind);
+            } else if at_module_decl(p) {
+                module_decl_rest(p);
+                m.complete(p, MODULE_DECL);
             } else {
                 p.error_unexpected("expected a class, interface, enum or record declaration");
                 if p.pos() == start {
@@ -60,6 +63,7 @@ fn at_top_level_recovery(p: &Parser<'_, '_>) -> bool {
     matches!(kind, SEMICOLON | IMPORT_KW | PACKAGE_KW | AT | R_CURLY)
         || is_modifier_kw(kind)
         || type_decl_kind(p).is_some()
+        || at_module_decl(p)
 }
 
 fn import_decl(p: &mut Parser<'_, '_>) {
@@ -79,6 +83,101 @@ fn package_rest(p: &mut Parser<'_, '_>) {
     p.bump(PACKAGE_KW);
     path(p);
     p.expect(SEMICOLON, "expected ';'");
+}
+
+fn at_module_decl(p: &Parser<'_, '_>) -> bool {
+    p.at_contextual_kw("module")
+        || (p.at_contextual_kw("open") && p.nth_at_contextual_kw(1, "module"))
+}
+
+fn at_module_directive(p: &Parser<'_, '_>) -> bool {
+    p.at(IDENT)
+        && matches!(
+            p.nth_text(0),
+            "requires" | "exports" | "opens" | "uses" | "provides"
+        )
+}
+
+fn module_decl_rest(p: &mut Parser<'_, '_>) {
+    if p.at_contextual_kw("open") {
+        p.bump(IDENT);
+    }
+    p.bump(IDENT); // contextual keyword `module`
+    path(p);
+    module_body(p);
+}
+
+fn module_body(p: &mut Parser<'_, '_>) {
+    if !p.at(L_CURLY) {
+        p.error_missing("expected '{'");
+        return;
+    }
+    let m = p.start();
+    p.bump(L_CURLY);
+    while !p.at_eof() && !p.at(R_CURLY) {
+        let before = p.pos();
+        if at_module_directive(p) {
+            module_directive(p);
+        } else {
+            let err = p.start();
+            p.error_unexpected("expected a module directive");
+            p.bump_any();
+            while !p.at_eof() && !p.at(R_CURLY) && !at_module_directive(p) {
+                if p.eat(SEMICOLON) {
+                    break;
+                }
+                p.bump_any();
+            }
+            err.complete(p, ERROR);
+        }
+        debug_assert!(p.pos() > before, "module body made no progress");
+    }
+    p.expect(R_CURLY, "expected '}'");
+    m.complete(p, MODULE_BODY);
+}
+
+fn module_directive(p: &mut Parser<'_, '_>) {
+    let m = p.start();
+    let kw = p.nth_text(0);
+    p.bump(IDENT);
+    match kw {
+        "requires" => {
+            while p.at(STATIC_KW)
+                || (p.at_contextual_kw("transitive")
+                    && (p.nth_at(1, IDENT) || p.nth_at(1, STATIC_KW)))
+            {
+                p.bump_any();
+            }
+            path(p);
+        }
+        "exports" | "opens" => {
+            path(p);
+            if p.at_contextual_kw("to") {
+                p.bump(IDENT);
+                path_list(p);
+            }
+        }
+        "uses" => path(p),
+        "provides" => {
+            path(p);
+            if p.at_contextual_kw("with") {
+                p.bump(IDENT);
+            } else {
+                p.error_missing("expected 'with'");
+            }
+            path_list(p);
+        }
+        _ => unreachable!("unexpected module directive: {kw}"),
+    }
+    p.expect(SEMICOLON, "expected ';'");
+    m.complete(p, MODULE_DIRECTIVE);
+}
+
+fn path_list(p: &mut Parser<'_, '_>) {
+    path(p);
+    while p.eat(COMMA) {
+        path(p);
+    }
 }
 
 // ---- Names and paths ----
