@@ -16,7 +16,7 @@ use crate::syntax_kind::SyntaxKind::{self, *};
 /// Recovery: a block that is still open when `public`, `private` or `protected` shows up where a
 /// statement should start is considered unclosed (those can never start a statement), so one
 /// missing `}` does not swallow the rest of the class. Every enclosing block that is still open
-/// reports its own missing `}`.\
+/// reports its own missing `}`.
 pub(super) fn block(p: &mut Parser<'_, '_>) {
     let m = p.start();
     p.bump(L_CURLY);
@@ -546,7 +546,19 @@ fn switch_case(p: &mut Parser<'_, '_>) {
         if p.at_eof() || p.at(R_CURLY) || at_member_only_modifier(p) || at_switch_label(p) {
             p.error_missing("expected a statement");
         } else {
-            statement(p);
+            let parsed = p.nested(false, |p| {
+                match p.current() {
+                    L_CURLY => block(p),
+                    THROW_KW => keyword_expr_stmt(p, THROW_STMT),
+                    _ => expr_stmt(p),
+                }
+                true
+            });
+            if !parsed {
+                let err = p.start();
+                p.bump_any();
+                err.complete(p, ERROR);
+            }
         }
     } else {
         statements(p, at_switch_label);
