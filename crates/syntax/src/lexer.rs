@@ -124,15 +124,73 @@ fn quoted(rest: &str, quote: char, kind: SyntaxKind, unterminated: &'static str)
     (kind, rest.len(), Some(unterminated))
 }
 
-/// Lexes a text block. An unterminated text block extends to the end of input.
+/// Lexes a text block (`""" ... """`), checking the opening line terminator and escape sequences.
+/// An unterminated text block extends to the end of input.
 fn text_block(rest: &str) -> Lexed {
     let bytes = rest.as_bytes();
     let mut i = 3;
+
+    // JLS 3.10.7: the opening `"""` must be followed by optional horizontal whitespace and a line
+    // terminator before the content (or closing delimiter) begins.
+    while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | 0x0c) {
+        i += 1;
+    }
+    let mut error: Option<&'static str> = None;
+    match bytes.get(i) {
+        Some(b'\n') => i += 1,
+        Some(b'\r') => {
+            i += 1;
+            if bytes.get(i) == Some(&b'\n') {
+                i += 1;
+            }
+        }
+        Some(_) => error = Some("expected line terminator after '\"\"\"'"),
+        None => return (TEXT_BLOCK, rest.len(), Some("unterminated text block")),
+    }
+
     while i < bytes.len() {
         match bytes[i] {
-            b'\\' => i += 2,
-            b'"' if rest[i..].starts_with("\"\"\"") => return (TEXT_BLOCK, i + 3, None),
-            _ => i += 1,
+            b'"' if rest[i..].starts_with("\"\"\"") => return (TEXT_BLOCK, i + 3, error),
+            b'\\' => {
+                i += 1;
+                let Some(c) = rest[i..].chars().next() else {
+                    return (TEXT_BLOCK, rest.len(), Some("unterminated text block"));
+                };
+                match c {
+                    'b' | 't' | 'n' | 'f' | 'r' | 's' | '"' | '\'' | '\\' | '0'..='7' | '\n' => {
+                        i += 1;
+                    }
+                    '\r' => {
+                        i += 1;
+                        if bytes.get(i) == Some(&b'\n') {
+                            i += 1;
+                        }
+                    }
+                    'u' => {
+                        while bytes.get(i) == Some(&b'u') {
+                            i += 1;
+                        }
+                        let hex_ok = bytes
+                            .get(i..i + 4)
+                            .is_some_and(|slice| slice.iter().all(u8::is_ascii_hexdigit));
+                        if hex_ok {
+                            i += 4;
+                        } else if error.is_none() {
+                            error = Some("invalid escape sequence");
+                        }
+                    }
+                    _ => {
+                        i += c.len_utf8();
+                        if error.is_none() {
+                            error = Some("invalid escape sequence");
+                        }
+                    }
+                }
+            }
+            _ => {
+                let c = rest[i..].chars().next().unwrap();
+                i += c.len_utf8();
+            }
         }
     }
     (TEXT_BLOCK, rest.len(), Some("unterminated text block"))

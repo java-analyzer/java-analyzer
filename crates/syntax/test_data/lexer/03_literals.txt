@@ -98,3 +98,36 @@ class Foo {}
 ---
 TEXT_BLOCK "\"\"\"\nnever closed\nclass Foo {}\n" @ 1:1
 error: unterminated text block @ 1:1
+
+=====
+Text block valid escapes and line continuation
+=====
+"""	 
+  \b\t\n\f\r\s\"\'\\\077\u0041\
+  continued
+  """
+---
+TEXT_BLOCK "\"\"\"\t \n  \\b\\t\\n\\f\\r\\s\\\"\\'\\\\\\077\\u0041\\\n  continued\n  \"\"\"" @ 1:1
+
+=====
+Text block missing newline after opening delimiter
+=====
+"""hello"""
+---
+TEXT_BLOCK "\"\"\"hello\"\"\"" @ 1:1
+error: expected line terminator after '"""' @ 1:1
+
+=====
+Text block invalid escape sequences
+=====
+"""
+  \q
+  """
+"""
+  \u12G
+  """
+---
+TEXT_BLOCK "\"\"\"\n  \\q\n  \"\"\"" @ 1:1
+error: invalid escape sequence @ 1:1
+TEXT_BLOCK "\"\"\"\n  \\u12G\n  \"\"\"" @ 4:1
+error: invalid escape sequence @ 4:1

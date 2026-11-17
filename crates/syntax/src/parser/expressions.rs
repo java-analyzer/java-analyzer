@@ -7,8 +7,8 @@
 
 use super::{
     grammar::{
-        annotations, at_param_start, binding_name, class_body, is_primitive_kw, lambda_param,
-        modifiers, name_ref, type_, type_args, type_marker,
+        annotation, annotations, at_param_start, binding_name, class_body, is_primitive_kw,
+        lambda_param, modifiers, name_ref, type_, type_args, type_marker,
     },
     lookahead::{skip_annotations, skip_parens, skip_type, MAX_SCAN},
     statements::{block, switch_expr},
@@ -40,10 +40,12 @@ pub(super) fn expr(p: &mut Parser<'_, '_>) -> Option<CompletedMarker> {
     })
 }
 
-/// A variable initializer or annotation element value: an expression or `{ ... }`.
+/// A variable initializer or annotation element value: an expression, `{ ... }` or `@Anno`.
 pub(super) fn initializer(p: &mut Parser<'_, '_>) {
     if p.at(L_CURLY) {
         array_init(p);
+    } else if p.at(AT) && !p.nth_at(1, INTERFACE_KW) {
+        annotation(p);
     } else {
         expr(p);
     }
@@ -80,7 +82,7 @@ pub(super) fn array_init(p: &mut Parser<'_, '_>) {
         while !p.at_eof()
             && !matches!(
                 p.current(),
-                R_CURLY | SEMICOLON | PUBLIC_KW | PRIVATE_KW | PROTECTED_KW
+                R_CURLY | R_PAREN | SEMICOLON | PUBLIC_KW | PRIVATE_KW | PROTECTED_KW
             )
         {
             initializer(p);
@@ -552,6 +554,9 @@ fn at_new_array_dim_start(p: &Parser<'_, '_>) -> bool {
 /// Everything of a `new` expression from the `new` keyword on. Also used after `outer.`
 fn new_expr_rest(p: &mut Parser<'_, '_>) {
     p.bump(NEW_KW);
+    if p.at(L_ANGLE) {
+        type_args(p);
+    }
     let Some(ty) = type_marker(p) else {
         return;
     };

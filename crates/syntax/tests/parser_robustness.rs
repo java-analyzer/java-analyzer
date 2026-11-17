@@ -128,6 +128,7 @@ fn pathologically_deep_input_does_not_overflow_the_stack() {
         in_method("x = ", &format!("{}1;", "x -> ".repeat(N))),
         in_method("x = ", &format!("{}1;", "() -> ".repeat(N))),
         in_method("x = ", &format!("{}1;", "new int[] {".repeat(N))),
+        in_method(&"@A(".repeat(N), "int x;"),
         in_method("x = ", &format!("{}1;", "a[".repeat(N))),
         in_method("x = ", &format!("{}y;", "new Foo(".repeat(N))),
         in_method(

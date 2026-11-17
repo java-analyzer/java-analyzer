@@ -201,7 +201,7 @@
                     (PATH (NAME_REF (IDENT "Anno")))
                     (ANNOTATION_ARGS
                       (L_PAREN "(")
-                      (STRING_LITERAL "\"x\"")
+                      (ANNOTATION_ARG (LITERAL (STRING_LITERAL "\"x\"")))
                       (R_PAREN ")")))
                   (NAME_REF (IDENT "String")))
                 (R_ANGLE ">")))

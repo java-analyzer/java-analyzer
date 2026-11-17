@@ -157,6 +157,7 @@ pub enum SyntaxKind {
     MODIFIER_LIST,
     ANNOTATION,
     ANNOTATION_ARGS,
+    ANNOTATION_ARG,
 
     // ---- Nodes: type declarations ----
     CLASS_DECL,

@@ -6,9 +6,10 @@
         (PATH (NAME_REF (IDENT "Anno")))
         (ANNOTATION_ARGS
           (L_PAREN "(")
-          (IDENT "x")
-          (EQ "=")
-          (STRING_LITERAL "\"a\""))))
+          (ANNOTATION_ARG
+            (NAME (IDENT "x"))
+            (EQ "=")
+            (LITERAL (STRING_LITERAL "\"a\""))))))
     (CLASS_KW "class")
     (NAME (IDENT "A"))
     (CLASS_BODY

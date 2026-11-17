@@ -188,7 +188,7 @@
                 (PATH (NAME_REF (IDENT "SuppressWarnings")))
                 (ANNOTATION_ARGS
                   (L_PAREN "(")
-                  (STRING_LITERAL "\"unchecked\"")
+                  (ANNOTATION_ARG (LITERAL (STRING_LITERAL "\"unchecked\"")))
                   (R_PAREN ")"))))
             (PATH_TYPE (NAME_REF (IDENT "List")))
             (VARIABLE_DECLARATOR

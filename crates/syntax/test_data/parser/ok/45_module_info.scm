@@ -26,9 +26,10 @@
         (PATH (NAME_REF (IDENT "Deprecated")))
         (ANNOTATION_ARGS
           (L_PAREN "(")
-          (IDENT "since")
-          (EQ "=")
-          (STRING_LITERAL "\"21\"")
+          (ANNOTATION_ARG
+            (NAME (IDENT "since"))
+            (EQ "=")
+            (LITERAL (STRING_LITERAL "\"21\"")))
           (R_PAREN ")"))))
     (IDENT "open")
     (IDENT "module")

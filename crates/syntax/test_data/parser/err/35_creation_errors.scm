@@ -141,6 +141,49 @@
           (R_CURLY "}")))
       (METHOD_DECL
         (PRIMITIVE_TYPE (VOID_KW "void"))
+        (NAME (IDENT "h"))
+        (PARAM_LIST
+          (L_PAREN "(")
+          (R_PAREN ")"))
+        (BLOCK
+          (L_CURLY "{")
+          (EXPR_STMT
+            (ASSIGN_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "x")))
+              (EQ "=")
+              (NEW_EXPR
+                (NEW_KW "new")
+                (TYPE_ARGS
+                  (L_ANGLE "<")
+                  (PATH_TYPE (NAME_REF (IDENT "String")))
+                  (R_ANGLE ">"))))
+            (SEMICOLON ";"))
+          (R_CURLY "}")))
+      (METHOD_DECL
+        (PRIMITIVE_TYPE (VOID_KW "void"))
+        (NAME (IDENT "i"))
+        (PARAM_LIST
+          (L_PAREN "(")
+          (R_PAREN ")"))
+        (BLOCK
+          (L_CURLY "{")
+          (EXPR_STMT
+            (ASSIGN_EXPR
+              (NAME_REF_EXPR (NAME_REF (IDENT "x")))
+              (EQ "=")
+              (NEW_EXPR
+                (NEW_KW "new")
+                (TYPE_ARGS
+                  (L_ANGLE "<")
+                  (PATH_TYPE (NAME_REF (IDENT "String"))))
+                (PATH_TYPE (NAME_REF (IDENT "Foo")))
+                (ARG_LIST
+                  (L_PAREN "(")
+                  (R_PAREN ")"))))
+            (SEMICOLON ";"))
+          (R_CURLY "}")))
+      (METHOD_DECL
+        (PRIMITIVE_TYPE (VOID_KW "void"))
         (NAME (IDENT "ok"))
         (PARAM_LIST
           (L_PAREN "(")
@@ -159,4 +202,6 @@
   (error "expected an expression" "8:19..8:19")
   (error "expected ';'" "8:19..8:19")
   (error "expected ';'" "8:22..8:22")
-  (error "expected an expression" "8:22..8:22"))
+  (error "expected an expression" "8:22..8:22")
+  (error "expected a type" "9:32..9:32")
+  (error "expected '>'" "10:31..10:31"))

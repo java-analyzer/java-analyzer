@@ -6,5 +6,7 @@ class A {
     void e() { x = new Foo(; }
     void f() { x = new int[] {1, 2; }
     void g() { x = {1, 2}; }
+    void h() { x = new <String>; }
+    void i() { x = new <String Foo(); }
     void ok() {}
 }

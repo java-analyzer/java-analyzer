@@ -303,7 +303,7 @@ pub(super) fn annotations(p: &mut Parser<'_, '_>) -> bool {
     any
 }
 
-fn annotation(p: &mut Parser<'_, '_>) {
+pub(super) fn annotation(p: &mut Parser<'_, '_>) {
     let m = p.start();
     p.bump(AT);
     if p.at(IDENT) {
@@ -312,69 +312,60 @@ fn annotation(p: &mut Parser<'_, '_>) {
         p.error_missing("expected an annotation name");
     }
     if p.at(L_PAREN) {
-        balanced_parens(p, ANNOTATION_ARGS);
+        annotation_args(p);
     }
     m.complete(p, ANNOTATION);
 }
 
-/// Consumes a parenthesised token run, tracking nesting. Used for annotation arguments and record
-/// components, where neither `;`, a modifier nor a type declaration keyword can legitimately
-/// appear (a class literal such as `Foo.class` is the one exception). Unclosed input therefore
-/// stops at any of those, at a `}` with no matching `{` inside the run, or at end of input, so a
-/// half-typed construct does not swallow the declarations that follow it.
-fn balanced_parens(p: &mut Parser<'_, '_>, kind: SyntaxKind) {
-    let m = p.start();
-    p.bump(L_PAREN);
-    let mut parens = 1usize;
-    let mut curlies = 0usize;
-    let mut prev = L_PAREN;
-    loop {
-        let current = p.current();
-        match current {
-            EOF => {
-                p.error_missing("expected ')'");
-                break;
-            }
-            SEMICOLON if curlies == 0 => {
-                p.error_missing("expected ')'");
-                break;
-            }
-            R_CURLY if curlies == 0 => {
-                p.error_missing("expected ')'");
-                break;
-            }
-            CLASS_KW | INTERFACE_KW | ENUM_KW if prev != DOT => {
-                p.error_missing("expected ')'");
-                break;
-            }
-            kind if is_modifier_kw(kind) => {
-                p.error_missing("expected ')'");
-                break;
-            }
-            L_CURLY => {
-                curlies += 1;
-                p.bump_any();
-            }
-            R_CURLY => {
-                curlies -= 1;
-                p.bump_any();
-            }
-            L_PAREN => {
-                parens += 1;
-                p.bump_any();
-            }
-            R_PAREN => {
-                parens -= 1;
-                p.bump_any();
-                if parens == 0 {
-                    break;
+fn at_annotation_args_end(p: &Parser<'_, '_>) -> bool {
+    let kind = p.current();
+    matches!(
+        kind,
+        EOF | R_PAREN | SEMICOLON | R_CURLY | PACKAGE_KW | IMPORT_KW
+    ) || is_modifier_kw(kind)
+        || type_decl_kind(p).is_some()
+}
+
+/// `( (Name '=' Value | Value) (',' ...)* )`. Stops at `;`, `}`, modifiers and type declarations
+/// so that an unclosed annotation argument list does not swallow what follows.
+fn annotation_args(p: &mut Parser<'_, '_>) {
+    p.nested((), |p| {
+        let m = p.start();
+        p.bump(L_PAREN);
+        while !at_annotation_args_end(p) {
+            let before = p.pos();
+            annotation_arg(p);
+            if !p.eat(COMMA) {
+                if p.pos() == before && !at_annotation_args_end(p) {
+                    let err = p.start();
+                    p.bump_any();
+                    err.complete(p, ERROR);
+                    continue;
                 }
+                break;
             }
-            _ => p.bump_any(),
+            if p.at(R_PAREN) {
+                p.error_missing("expected an expression");
+            }
         }
-        prev = current;
+        p.expect(R_PAREN, "expected ')'");
+        m.complete(p, ANNOTATION_ARGS);
+    });
+}
+
+fn annotation_arg(p: &mut Parser<'_, '_>) {
+    let m = p.start();
+    let before = p.pos();
+    if p.at(IDENT) && p.nth_at(1, EQ) {
+        name(p);
+        p.bump(EQ);
     }
-    m.complete(p, kind);
+    initializer(p);
+    if p.pos() == before {
+        m.abandon(p);
+    } else {
+        m.complete(p, ANNOTATION_ARG);
+    }
 }
 
 // ---- Type declarations ----
@@ -648,11 +639,7 @@ fn method_or_field(p: &mut Parser<'_, '_>, m: Marker) {
         if p.at(DEFAULT_KW) {
             let d = p.start();
             p.bump(DEFAULT_KW);
-            if p.at(AT) {
-                annotation(p);
-            } else {
-                initializer(p);
-            }
+            initializer(p);
             d.complete(p, DEFAULT_VALUE);
         }
         body_or_semicolon(p);

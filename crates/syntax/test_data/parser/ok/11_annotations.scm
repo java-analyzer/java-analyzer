@@ -9,11 +9,13 @@
         (PATH (NAME_REF (IDENT "SuppressWarnings")))
         (ANNOTATION_ARGS
           (L_PAREN "(")
-          (L_CURLY "{")
-          (STRING_LITERAL "\"a\"")
-          (COMMA ",")
-          (STRING_LITERAL "\"b\"")
-          (R_CURLY "}")
+          (ANNOTATION_ARG
+            (ARRAY_INIT
+              (L_CURLY "{")
+              (LITERAL (STRING_LITERAL "\"a\""))
+              (COMMA ",")
+              (LITERAL (STRING_LITERAL "\"b\""))
+              (R_CURLY "}")))
           (R_PAREN ")")))
       (ANNOTATION
         (AT "@")
@@ -25,17 +27,20 @@
           (NAME_REF (IDENT "Marker")))
         (ANNOTATION_ARGS
           (L_PAREN "(")
-          (IDENT "name")
-          (EQ "=")
-          (STRING_LITERAL "\"x\"")
+          (ANNOTATION_ARG
+            (NAME (IDENT "name"))
+            (EQ "=")
+            (LITERAL (STRING_LITERAL "\"x\"")))
           (COMMA ",")
-          (IDENT "values")
-          (EQ "=")
-          (L_CURLY "{")
-          (INT_NUMBER "1")
-          (COMMA ",")
-          (INT_NUMBER "2")
-          (R_CURLY "}")
+          (ANNOTATION_ARG
+            (NAME (IDENT "values"))
+            (EQ "=")
+            (ARRAY_INIT
+              (L_CURLY "{")
+              (LITERAL (INT_NUMBER "1"))
+              (COMMA ",")
+              (LITERAL (INT_NUMBER "2"))
+              (R_CURLY "}")))
           (R_PAREN ")")))
       (PUBLIC_KW "public"))
     (CLASS_KW "class")
