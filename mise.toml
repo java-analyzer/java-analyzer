@@ -1,2 +1,97 @@
 [tools]
+ast-grep = "latest"
+fd = "latest"
+jq = "latest"
+jujutsu = "latest"
 node = "lts"
+ripgrep = "latest"
+xh = "latest"
+yq = "latest"
+
+[tasks.conformance-fetch]
+description = "Download and unpack pinned Java corpora using xh"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+corpus_dir="target/conformance/corpus"
+archive_dir="target/conformance/archives"
+mkdir -p "$corpus_dir" "$archive_dir"
+
+tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/java-corpus.XXXXXX")"
+trap 'rm -rf "$tmp_root"' EXIT
+
+fetch_tarball() {
+  local id="$1"
+  local url="$2"
+  local subdir="$3"
+  local dest="$corpus_dir/$id"
+  local archive="$archive_dir/$id.tar.gz"
+
+  if [ -d "$dest" ] && [ "${FORCE:-0}" != "1" ]; then
+    echo "cached: $id ($dest)"
+    return 0
+  fi
+
+  echo "downloading $id from $url"
+  xh --download --follow --check-status --output "$archive" "$url"
+
+  local stage="$tmp_root/$id"
+  mkdir -p "$stage"
+  tar -xzf "$archive" -C "$stage"
+
+  local top
+  top="$(find "$stage" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+  if [ ! -d "$top/$subdir" ]; then
+    echo "error: expected $subdir inside $id archive" >&2
+    return 1
+  fi
+
+  rm -rf "$dest"
+  mv "$top/$subdir" "$dest"
+  echo "unpacked: $id -> $dest"
+}
+
+fetch_tarball \
+  "commons-lang" \
+  "https://github.com/apache/commons-lang/archive/refs/tags/rel/commons-lang-3.17.0.tar.gz" \
+  "src/main/java"
+
+fetch_tarball \
+  "jackson-core" \
+  "https://github.com/FasterXML/jackson-core/archive/refs/tags/jackson-core-2.18.2.tar.gz" \
+  "src/main/java"
+
+fetch_tarball \
+  "guava" \
+  "https://github.com/google/guava/archive/refs/tags/v33.4.0.tar.gz" \
+  "guava/src"
+
+fetch_tarball \
+  "google-java-format" \
+  "https://github.com/google/google-java-format/archive/refs/tags/v1.24.0.tar.gz" \
+  "core/src/main/java"
+'''
+
+[tasks.conformance]
+description = "Fetch corpora and run parser conformance checks"
+depends = ["conformance-fetch"]
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+corpus_dir="target/conformance/corpus"
+args=()
+for dir in "$corpus_dir"/*; do
+  if [ -d "$dir" ]; then
+    args+=(--valid "$dir")
+  fi
+done
+
+if [ -z "${args[*]:-}" ]; then
+  echo "error: no corpora found in $corpus_dir" >&2
+  exit 1
+fi
+
+cargo xtask conformance "${args[@]}" --out target/conformance
+'''
