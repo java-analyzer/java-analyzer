@@ -1,0 +1,23 @@
+# Known parser divergences and Spec 0002 robustness-limit exclusions.
+# Each entry matches a relative file path (or suffix) in a conformance corpus and excludes it from
+# unexpected gap counts while still recording it in `report.json` and `report.md`.
+
+[[divergence]]
+path = "jdk.charsets/share/classes/sun/nio/cs/ext/IBM33722.java"
+reason = "Generated string concatenation chain exceeds the 1024-link MAX_CHAIN robustness limit (Spec 0002)."
+
+[[divergence]]
+path = "jdk.localedata/share/classes/sun/text/resources/ext/CollationData_ja.java"
+reason = "Generated string concatenation chain exceeds the 1024-link MAX_CHAIN robustness limit (Spec 0002)."
+
+[[divergence]]
+path = "jdk.localedata/share/classes/sun/text/resources/ext/CollationData_ko.java"
+reason = "Generated string concatenation chain exceeds the 1024-link MAX_CHAIN robustness limit (Spec 0002)."
+
+[[divergence]]
+path = "jdk.localedata/share/classes/sun/text/resources/ext/CollationData_zh.java"
+reason = "Generated string concatenation chain exceeds the 1024-link MAX_CHAIN robustness limit (Spec 0002)."
+
+[[divergence]]
+path = "jdk.localedata/share/classes/sun/text/resources/ext/CollationData_zh_TW.java"
+reason = "Generated string concatenation chain exceeds the 1024-link MAX_CHAIN robustness limit (Spec 0002)."

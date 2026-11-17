@@ -2,8 +2,9 @@ use std::{fs, path::Path, time::Duration};
 
 use xtask::{
     cli::{self, Command},
-    conformance::{self, Config, Kind, Outcome, Source},
+    conformance::{self, Config, Kind, KnownDivergence, Outcome, Source},
     isolate::{run_isolated, Isolated},
+    jtreg::{self, Expectation, JtregCase},
 };
 
 /// A scratch directory under the target directory, removed first so reruns start clean.
@@ -23,7 +24,9 @@ fn write(dir: &Path, relative: &str, text: &str) {
 fn config(sources: Vec<Source>) -> Config {
     Config {
         sources,
+        level: syntax::LanguageLevel::latest(),
         timeout: Duration::from_secs(5),
+        known_divergences: Vec::new(),
     }
 }
 
@@ -254,10 +257,30 @@ fn command_line_parsing() {
     {
         Command::Conformance(parsed) => {
             assert_eq!(parsed.config.timeout_secs, 9);
+            assert_eq!(parsed.config.level, syntax::LanguageLevel::latest());
             assert_eq!(parsed.out, Path::new("target/conformance"));
             assert_eq!(
                 parsed.config.sources,
                 [(Kind::Valid, "a".into()), (Kind::Invalid, "b".into())]
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+
+    match cli::parse_args(args(&[
+        "conformance",
+        "--valid",
+        "a",
+        "--release",
+        "14",
+        "--preview",
+    ]))
+    .unwrap()
+    {
+        Command::Conformance(parsed) => {
+            assert_eq!(
+                parsed.config.level,
+                syntax::LanguageLevel::new(syntax::Release::JAVA_14, true)
             );
         }
         other => panic!("{other:?}"),
@@ -343,4 +366,130 @@ fn an_unwritable_output_directory_is_a_tool_failure() {
         dir.join("file/sub").to_str().unwrap(),
     ]));
     assert_eq!(code, 1);
+}
+
+// ---- jtreg header parser and allowlist classification ----
+
+#[test]
+fn jtreg_header_parsing_and_allowlist_classification() {
+    let allowlist = jtreg::parse_allowlist(include_str!("../conformance/parser_errors.txt"));
+    assert!(allowlist.contains("compiler.err.expected"));
+
+    // Plain `@compile`: valid at latest release.
+    let valid_src = "/*\n * @test\n * @compile Foo.java\n */\nclass Foo {}\n";
+    assert_eq!(
+        jtreg::classify(valid_src, |_| None, &allowlist),
+        JtregCase {
+            expectation: Expectation::Valid,
+            level: syntax::LanguageLevel::latest(),
+        }
+    );
+
+    // `@compile --release 14 --enable-preview`: valid at Java 14 preview.
+    let preview_src =
+        "/*\n * @test\n * @compile --release 14 --enable-preview R.java\n */\nrecord R() {}\n";
+    assert_eq!(
+        jtreg::classify(preview_src, |_| None, &allowlist),
+        JtregCase {
+            expectation: Expectation::Valid,
+            level: syntax::LanguageLevel::new(syntax::Release::JAVA_14, true),
+        }
+    );
+
+    // `@compile -source 1.8`: valid at Java 8.
+    let source8 = "/* @test\n * @compile -source 1.8 Old.java\n */\nclass Old { int _ = 1; }\n";
+    assert_eq!(
+        jtreg::classify(source8, |_| None, &allowlist),
+        JtregCase {
+            expectation: Expectation::Valid,
+            level: syntax::LanguageLevel::new(syntax::Release::JAVA_8, false),
+        }
+    );
+
+    // `@compile/fail/ref=Bad.out` with only parser-phase error codes: invalid.
+    let fail_syntax = "/*\n * @test\n * @compile/fail/ref=Bad.out -XDrawDiagnostics Bad.java\n */\nclass Bad {\n";
+    let bad_out = "Bad.java:5:12: compiler.err.premature.eof\n1 error\n";
+    assert_eq!(
+        jtreg::classify(
+            fail_syntax,
+            |name| (name == "Bad.out").then(|| bad_out.to_string()),
+            &allowlist
+        ),
+        JtregCase {
+            expectation: Expectation::Invalid,
+            level: syntax::LanguageLevel::latest(),
+        }
+    );
+
+    // `@compile/fail/ref=Sem.out` containing a semantic error code: skipped.
+    let fail_sem =
+        "/*\n * @test\n * @compile/fail/ref=Sem.out -XDrawDiagnostics Sem.java\n */\nclass Sem {}\n";
+    let sem_out =
+        "Sem.java:2:5: compiler.err.expected: ';'\nSem.java:3:5: compiler.err.cant.resolve.location: ...\n2 errors\n";
+    assert!(matches!(
+        jtreg::classify(
+            fail_sem,
+            |name| (name == "Sem.out").then(|| sem_out.to_string()),
+            &allowlist
+        )
+        .expectation,
+        Expectation::Skipped(_)
+    ));
+
+    // `@compile/fail` without a `ref=*.out` file: skipped.
+    let no_ref = "/* @test\n * @compile/fail NoRef.java\n */\nclass NoRef {}\n";
+    assert!(matches!(
+        jtreg::classify(no_ref, |_| None, &allowlist).expectation,
+        Expectation::Skipped(_)
+    ));
+
+    // Helper file with no `@compile` directive: skipped.
+    let helper = "/* helper class */\nclass Helper {}\n";
+    assert!(matches!(
+        jtreg::classify(helper, |_| None, &allowlist).expectation,
+        Expectation::Skipped(_)
+    ));
+}
+
+// ---- known divergences ----
+
+#[test]
+fn known_divergences_are_excluded_from_unexpected_gaps() {
+    let toml_text = r#"
+[[divergence]]
+path = "sub/KnownLongChain.java"
+reason = "Exceeds MAX_CHAIN limit"
+"#;
+    let divergences = conformance::parse_known_divergences(toml_text).unwrap();
+    assert_eq!(
+        divergences,
+        vec![KnownDivergence {
+            path: "sub/KnownLongChain.java".to_string(),
+            reason: "Exceeds MAX_CHAIN limit".to_string(),
+        }]
+    );
+
+    let valid = scratch("known-div-valid");
+    write(&valid, "Good.java", "class Good {}");
+    write(&valid, "sub/KnownLongChain.java", "class KnownLongChain {");
+    write(&valid, "Unexpected.java", "class Unexpected {");
+    let out = scratch("known-div-out");
+
+    let mut cfg = config(vec![source("jdk", &valid, Kind::Valid)]);
+    cfg.known_divergences = divergences;
+    let report = conformance::run(&cfg);
+    conformance::write_report(&report, &out).unwrap();
+
+    let s = &report.sources[0];
+    let unexpected: Vec<_> = s.gaps().map(|r| r.path.as_str()).collect();
+    assert_eq!(
+        unexpected,
+        ["Unexpected.java"],
+        "known divergence must be excluded from unexpected gaps"
+    );
+    let known: Vec<_> = s.known_divergences().map(|(r, _)| r.path.as_str()).collect();
+    assert_eq!(known, ["sub/KnownLongChain.java"]);
+
+    let failures = fs::read_to_string(out.join("failures/jdk/completeness.txt")).unwrap();
+    assert_eq!(failures, "Unexpected.java\n");
 }

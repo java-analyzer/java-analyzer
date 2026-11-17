@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use syntax::{Parse, SyntaxError, SyntaxNode};
+pub use syntax::{LanguageLevel, Parse, Release, SyntaxError, SyntaxNode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FileId(pub u32);
@@ -10,7 +10,11 @@ pub trait SourceDatabase: salsa::Database {
     #[salsa::input]
     fn file_text(&self, file_id: FileId) -> Arc<String>;
 
-    /// The parse result of a file. Cheap to clone; recomputed only when the file text changes.
+    #[salsa::input]
+    fn file_language_level(&self, file_id: FileId) -> LanguageLevel;
+
+    /// The parse result of a file. Cheap to clone; recomputed only when the file text or language
+    /// level changes.
     fn parse(&self, file_id: FileId) -> Parse;
 
     /// Root of the syntax tree of a file.
@@ -21,7 +25,7 @@ pub trait SourceDatabase: salsa::Database {
 }
 
 fn parse(db: &dyn SourceDatabase, file_id: FileId) -> Parse {
-    syntax::parse(&db.file_text(file_id))
+    syntax::parse_with_level(&db.file_text(file_id), db.file_language_level(file_id))
 }
 
 fn syntax_tree(db: &dyn SourceDatabase, file_id: FileId) -> SyntaxNode {
@@ -49,6 +53,7 @@ mod tests {
         let mut db = RootDatabase::default();
         let file_id = FileId(1);
         db.set_file_text(file_id, Arc::new(text.to_string()));
+        db.set_file_language_level(file_id, LanguageLevel::latest());
         (db, file_id)
     }
 
@@ -74,6 +79,17 @@ mod tests {
 
         db.set_file_text(file_id, Arc::new("class Main {}".to_string()));
         assert!(db.syntax_errors(file_id).is_empty());
+    }
+
+    #[test]
+    fn results_follow_language_level_changes() {
+        let (mut db, file_id) = db_with("record R(int x) {}");
+        assert!(db.syntax_errors(file_id).is_empty());
+
+        db.set_file_language_level(file_id, LanguageLevel::new(Release::JAVA_11, false));
+        let errors = db.syntax_errors(file_id);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].message, "records require language level 16");
     }
 }
 

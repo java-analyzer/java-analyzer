@@ -27,18 +27,18 @@ resolution, no type checking.
 ## Non-goals (for this spec)
 
 - Semantic analysis, type inference, overload resolution.
-- Preview or experimental language features.
 - Incremental reparsing of subtrees.
 - Annotation processing or build-system integration.
 
 ## Language baseline
 
-Target **Java 21** syntax (JLS 21) as the reference grammar, delivered progressively.
-The parser is **version-agnostic**: it accepts any syntactically valid Java, including
-constructs from future language versions, and never reports an error merely because a
-construct is newer than some language level. Grammar is added by milestone; syntax not yet
-supported by the current milestone must still lex and must produce an error node rather than
-corrupt surrounding structure.
+Target **Java 21+** syntax as the reference grammar, delivered progressively, with per-file
+language-level support (`LanguageLevel`: release 8 up to latest, plus `--enable-preview`) as
+specified in `docs/specs/0003-java-parser-conformance-testing.md`. Tree *structure* is
+**version-agnostic**: the parser builds the CST for any syntactically valid Java construct
+regardless of the declared level, consulting the level only for contextual-keyword
+ambiguities (`_`, `yield`, ...) and attaching feature-availability diagnostics when a
+construct predates or requires preview at the declared level.
 
 ## Lexer
 
@@ -153,7 +153,8 @@ Naming follows `rust-analyzer`: `UPPER_SNAKE_CASE`, tokens first, nodes after.
 ```rust
 pub struct Parse { pub green: GreenNode, pub errors: Vec<SyntaxError> }
 pub struct SyntaxError { pub message: String, pub range: TextRange }
-pub fn parse(text: &str) -> Parse;   // replaces today's fn returning GreenNode
+pub fn parse(text: &str) -> Parse;
+pub fn parse_with_level(text: &str, level: LanguageLevel) -> Parse;
 ```
 
 - The parser works over a *filtered* token stream that skips trivia; the tree builder
@@ -395,9 +396,6 @@ nodes or errors), and a single left-associative chain (`a + b + ...`, `a.b.c...`
 is limited to 1024 links (`expression is too long`). Token lookahead scans stop after 512
 tokens.
 
-Still unparsed: annotation arguments (`ANNOTATION_ARGS` is a balanced token run), and type
-annotations.
-
 ### M4: Modern Java
 
 Annotation arguments and element values, text block escape validation, module declarations
@@ -497,7 +495,9 @@ and any construct the JDK sources still show to be unsupported.
 
 1. **Unicode escapes** outside literals (`\u0041` in identifiers etc.): deferred. They lex as
    `ERROR` for now; revisit if real-world sources need them.
-2. **Language level**: no gating. Accept any valid Java syntax, including future syntax.
+2. **Language level**: see `docs/specs/0003-java-parser-conformance-testing.md`. Tree structure
+   is version-agnostic; contextual keywords and feature-availability diagnostics follow the
+   declared `LanguageLevel`.
 3. **Doc comments**: siblings of the declaration node, matching `rust-analyzer`.
 4. **Lexer**: hand-written, consistent with spec 0001.
 5. **Snapshot tooling**: text fixtures with `UPDATE_EXPECT=1` regeneration for the corpus (see

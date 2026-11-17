@@ -1,0 +1,37 @@
+# javac diagnostic keys emitted during lexing and parsing (com.sun.tools.javac.parser).
+# Used by `cargo xtask conformance` to classify jtreg `@compile/fail/ref=*.out` tests: a test is
+# syntactically invalid only if every `compiler.err.*` code in its `.out` file is listed here.
+
+compiler.err.expected
+compiler.err.expected2
+compiler.err.expected3
+compiler.err.illegal.start.of.expr
+compiler.err.illegal.start.of.type
+compiler.err.illegal.start.of.stmt
+compiler.err.premature.eof
+compiler.err.not.stmt
+compiler.err.illegal.char
+compiler.err.unclosed.str.lit
+compiler.err.unclosed.char.lit
+compiler.err.unclosed.comment
+compiler.err.unclosed.text.block
+compiler.err.illegal.text.block.open
+compiler.err.illegal.esc.char
+compiler.err.illegal.line.end.in.char.lit
+compiler.err.empty.char.lit
+compiler.err.malformed.fp.lit
+compiler.err.int.number.too.large
+compiler.err.orphaned
+compiler.err.else.without.if
+compiler.err.catch.without.try
+compiler.err.finally.without.try
+compiler.err.try.without.catch.or.finally
+compiler.err.try.without.catch.finally.or.resource.decls
+compiler.err.var.not.allowed
+compiler.err.underscore.as.identifier
+compiler.err.underscore.as.identifier.in.method
+compiler.err.unnamed.var.not.allowed
+compiler.err.preview.feature.disabled
+compiler.err.preview.feature.disabled.plural
+compiler.err.feature.not.supported.in.source
+compiler.err.feature.not.supported.in.source.plural

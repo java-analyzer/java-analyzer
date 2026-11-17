@@ -41,6 +41,8 @@ impl GlobalState {
                 let id = FileId(self.next_file_id);
                 self.next_file_id += 1;
                 self.files.insert(uri.clone(), id);
+                self.db
+                    .set_file_language_level(id, hir::LanguageLevel::latest());
                 id
             }
         };

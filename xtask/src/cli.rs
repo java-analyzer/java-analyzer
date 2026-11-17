@@ -13,6 +13,8 @@ code is 0 whatever the conformance results are, and non-zero only if the tool it
 Options:
   --valid <DIR>      A directory of files that must parse without errors (repeatable)
   --invalid <DIR>    A directory of files that must produce at least one error (repeatable)
+  --release <N>      Declared Java release version for parsing [latest]
+  --preview          Enable preview features at the declared release
   --out <DIR>        Where to write report.json, report.md and failures/ [target/conformance]
   --timeout <SECS>   Per-file parse limit; a file over it is a critical finding [5]
   -h, --help         Show this help
@@ -28,6 +30,7 @@ pub struct Args {
 #[derive(Debug, PartialEq, Eq)]
 pub struct ConfigArgs {
     pub sources: Vec<(Kind, PathBuf)>,
+    pub level: syntax::LanguageLevel,
     pub timeout_secs: u64,
 }
 
@@ -46,6 +49,8 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, Str
     }
 
     let mut sources = Vec::new();
+    let mut release = syntax::Release::LATEST;
+    let mut preview = false;
     let mut out = PathBuf::from("target/conformance");
     let mut timeout_secs = 5;
     while let Some(arg) = args.next() {
@@ -53,6 +58,13 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, Str
         match arg.as_str() {
             "--valid" => sources.push((Kind::Valid, PathBuf::from(value("--valid")?))),
             "--invalid" => sources.push((Kind::Invalid, PathBuf::from(value("--invalid")?))),
+            "--release" => {
+                let text = value("--release")?;
+                release = text
+                    .parse::<syntax::Release>()
+                    .map_err(|e| format!("--release: {e}"))?;
+            }
+            "--preview" => preview = true,
             "--out" => out = PathBuf::from(value("--out")?),
             "--timeout" => {
                 let text = value("--timeout")?;
@@ -68,6 +80,7 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, Str
     Ok(Command::Conformance(Args {
         config: ConfigArgs {
             sources,
+            level: syntax::LanguageLevel::new(release, preview),
             timeout_secs,
         },
         out,
@@ -96,6 +109,10 @@ fn source_ids(sources: &[(Kind, PathBuf)]) -> Vec<String> {
 
 pub fn to_config(args: &ConfigArgs) -> Config {
     let ids = source_ids(&args.sources);
+    let known_divergences = conformance::parse_known_divergences(include_str!(
+        "../conformance/known-divergences.toml"
+    ))
+    .expect("embedded known-divergences.toml is valid");
     Config {
         sources: args
             .sources
@@ -107,7 +124,9 @@ pub fn to_config(args: &ConfigArgs) -> Config {
                 kind: *kind,
             })
             .collect(),
+        level: args.level,
         timeout: Duration::from_secs(args.timeout_secs),
+        known_divergences,
     }
 }
 

@@ -40,11 +40,77 @@ pub struct Source {
     pub kind: Kind,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnownDivergence {
+    pub path: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub sources: Vec<Source>,
+    pub level: syntax::LanguageLevel,
     /// Per-file limit for parsing. A file that exceeds it is a critical finding.
     pub timeout: Duration,
+    /// Known gaps excluded from unexpected divergence counts.
+    pub known_divergences: Vec<KnownDivergence>,
+}
+
+/// Parses `known-divergences.toml` (`[[divergence]]` entries with `path` and `reason` strings).
+pub fn parse_known_divergences(text: &str) -> Result<Vec<KnownDivergence>, String> {
+    let mut list = Vec::new();
+    let mut current_path: Option<String> = None;
+    let mut current_reason: Option<String> = None;
+    let mut in_entry = false;
+
+    let flush = |list: &mut Vec<KnownDivergence>,
+                 path: &mut Option<String>,
+                 reason: &mut Option<String>|
+     -> Result<(), String> {
+        let Some(p) = path.take() else {
+            return Err("[[divergence]] entry is missing `path`".to_string());
+        };
+        let Some(r) = reason.take() else {
+            return Err(format!("[[divergence]] for `{p}` is missing `reason`"));
+        };
+        list.push(KnownDivergence { path: p, reason: r });
+        Ok(())
+    };
+
+    for (idx, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line == "[[divergence]]" {
+            if in_entry {
+                flush(&mut list, &mut current_path, &mut current_reason)?;
+            }
+            in_entry = true;
+            continue;
+        }
+        if !in_entry {
+            return Err(format!("line {}: expected `[[divergence]]`", idx + 1));
+        }
+        let Some((key, val)) = line.split_once('=') else {
+            return Err(format!("line {}: expected `key = \"value\"`", idx + 1));
+        };
+        let key = key.trim();
+        let val = val
+            .trim()
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .ok_or_else(|| format!("line {}: expected quoted string value", idx + 1))?;
+        match key {
+            "path" => current_path = Some(val.to_string()),
+            "reason" => current_reason = Some(val.to_string()),
+            other => return Err(format!("line {}: unknown key `{other}`", idx + 1)),
+        }
+    }
+    if in_entry {
+        flush(&mut list, &mut current_path, &mut current_reason)?;
+    }
+    Ok(list)
 }
 
 /// How a single file went.
@@ -81,11 +147,20 @@ pub struct SourceReport {
     pub results: Vec<FileResult>,
     /// Files that were not parsed, with the reason.
     pub skipped_files: Vec<(String, String)>,
+    /// Known divergences configured for this run.
+    pub known: Vec<KnownDivergence>,
 }
 
 impl SourceReport {
     fn files(&self) -> usize {
         self.results.len()
+    }
+
+    fn known_reason(&self, path: &str) -> Option<&str> {
+        self.known
+            .iter()
+            .find(|k| path == k.path || path.ends_with(&format!("/{}", k.path)))
+            .map(|k| k.reason.as_str())
     }
 
     /// Findings that mean a parser bug whatever the file is (panic, hang, lossy tree).
@@ -110,16 +185,29 @@ impl SourceReport {
             .count()
     }
 
-    /// Files that did not: valid files with errors, invalid files without. Critical findings are
-    /// counted separately.
+    /// Unexpected gaps: valid files with errors, invalid files without, excluding entries in
+    /// `known-divergences.toml`. Critical findings are counted separately.
     pub fn gaps(&self) -> impl Iterator<Item = &FileResult> {
-        self.results
-            .iter()
-            .filter(move |r| match (&r.outcome, self.kind) {
+        self.results.iter().filter(move |r| {
+            let is_gap = match (&r.outcome, self.kind) {
                 (Outcome::Errors { .. }, Kind::Valid) => true,
                 (Outcome::Clean, Kind::Invalid) => true,
                 _ => false,
-            })
+            };
+            is_gap && self.known_reason(&r.path).is_none()
+        })
+    }
+
+    /// Gaps that match an entry in `known-divergences.toml`, paired with their justification.
+    pub fn known_divergences(&self) -> impl Iterator<Item = (&FileResult, &str)> {
+        self.results.iter().filter_map(move |r| {
+            let is_gap = match (&r.outcome, self.kind) {
+                (Outcome::Errors { .. }, Kind::Valid) => true,
+                (Outcome::Clean, Kind::Invalid) => true,
+                _ => false,
+            };
+            is_gap.then(|| self.known_reason(&r.path).map(|reason| (r, reason))).flatten()
+        })
     }
 }
 
@@ -139,12 +227,17 @@ pub fn run(config: &Config) -> Report {
         sources: config
             .sources
             .iter()
-            .map(|s| run_source(s, config.timeout))
+            .map(|s| run_source(s, config.level, config.timeout, &config.known_divergences))
             .collect(),
     }
 }
 
-fn run_source(source: &Source, timeout: Duration) -> SourceReport {
+fn run_source(
+    source: &Source,
+    level: syntax::LanguageLevel,
+    timeout: Duration,
+    known_divergences: &[KnownDivergence],
+) -> SourceReport {
     let mut report = SourceReport {
         id: source.id.clone(),
         dir: source.dir.clone(),
@@ -152,6 +245,7 @@ fn run_source(source: &Source, timeout: Duration) -> SourceReport {
         skipped: None,
         results: Vec::new(),
         skipped_files: Vec::new(),
+        known: known_divergences.to_vec(),
     };
     if !source.dir.is_dir() {
         report.skipped = Some(format!("{} is not a directory", source.dir.display()));
@@ -186,7 +280,7 @@ fn run_source(source: &Source, timeout: Duration) -> SourceReport {
                     .skipped_files
                     .push((relative, "not valid UTF-8".to_string())),
                 Ok(text) => {
-                    let outcome = check_file(text, timeout);
+                    let outcome = check_file_with_level(text, level, timeout);
                     report.results.push(FileResult {
                         path: relative,
                         outcome,
@@ -214,10 +308,20 @@ fn collect_java_files(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
     Ok(())
 }
 
-/// Parses `text` in isolation and checks the parser's invariants.
+/// Parses `text` at [`syntax::LanguageLevel::latest`] in isolation and checks the parser's
+/// invariants.
 pub fn check_file(text: String, timeout: Duration) -> Outcome {
+    check_file_with_level(text, syntax::LanguageLevel::latest(), timeout)
+}
+
+/// Parses `text` at `level` in isolation and checks the parser's invariants.
+pub fn check_file_with_level(
+    text: String,
+    level: syntax::LanguageLevel,
+    timeout: Duration,
+) -> Outcome {
     let isolated = run_isolated(timeout, move || {
-        let parse = syntax::parse(&text);
+        let parse = syntax::parse_with_level(&text, level);
         if parse.syntax_node().text().to_string() != text {
             return Outcome::RoundtripFailed;
         }
@@ -275,6 +379,9 @@ pub fn to_json(report: &Report) -> Value {
                 "conforming": s.conforming(),
                 "critical": s.critical().map(file_json).collect::<Vec<_>>(),
                 "gaps": s.gaps().map(file_json).collect::<Vec<_>>(),
+                "knownDivergences": s.known_divergences()
+                    .map(|(r, reason)| json!({ "path": r.path, "reason": reason }))
+                    .collect::<Vec<_>>(),
                 "skippedFiles": s.skipped_files.iter()
                     .map(|(path, reason)| json!({ "path": path, "reason": reason }))
                     .collect::<Vec<_>>(),
@@ -387,6 +494,17 @@ pub fn to_markdown(report: &Report) -> String {
                 push_message_histogram(&mut out, &gaps);
             }
         }
+        let known: Vec<_> = s.known_divergences().collect();
+        if !known.is_empty() {
+            out.push_str(&format!(
+                "Known divergences excluded (`known-divergences.toml`): {}\n\n",
+                known.len()
+            ));
+            for (r, reason) in known.iter().take(MD_LIST_LIMIT) {
+                out.push_str(&format!("- `{}`: {reason}\n", r.path));
+            }
+            out.push('\n');
+        }
         for (path, reason) in s.skipped_files.iter().take(MD_LIST_LIMIT) {
             out.push_str(&format!("- skipped `{path}`: {reason}\n"));
         }
@@ -432,6 +550,7 @@ fn describe(outcome: &Outcome) -> String {
 
 /// Writes `failures/<source>/<category>.txt` file lists for triage.
 pub fn write_failure_lists(report: &Report, out_dir: &Path) -> io::Result<()> {
+    let _ = fs::remove_dir_all(out_dir.join("failures"));
     for s in &report.sources {
         let dir = out_dir.join("failures").join(sanitize(&s.id));
         let mut lists: BTreeMap<&str, Vec<&str>> = BTreeMap::new();

@@ -8,13 +8,16 @@
 use super::{
     grammar::{
         annotation, annotations, at_param_start, binding_name, class_body, is_primitive_kw,
-        lambda_param, modifiers, name_ref, type_, type_args, type_marker,
+        lambda_param, modifiers, name, name_ref, type_, type_args, type_marker,
     },
     lookahead::{skip_annotations, skip_parens, skip_type, MAX_SCAN},
     statements::{block, switch_expr},
     CompletedMarker, Parser,
 };
-use crate::syntax_kind::SyntaxKind::{self, *};
+use crate::{
+    language_level::Release,
+    syntax_kind::SyntaxKind::{self, *},
+};
 
 /// Longest left-associative chain (`a + b + ...`, `a.b.c...`, `f()()...`) of one expression. Each
 /// link nests the tree one level deeper, and a tree that is too deep overflows the stack when it
@@ -343,6 +346,7 @@ fn primary(p: &mut Parser<'_, '_>) -> Option<CompletedMarker> {
         }
         IDENT => Some(ident_primary(p)),
         UNDERSCORE_KW if p.nth_at(1, ARROW) && !p.no_lambda => Some(lambda(p)),
+        UNDERSCORE_KW if p.level.release == Release::JAVA_8 => Some(ident_primary(p)),
         THIS_KW | SUPER_KW => {
             let kind = if p.at(THIS_KW) { THIS_EXPR } else { SUPER_EXPR };
             let m = p.start();
@@ -642,8 +646,11 @@ pub(super) fn pattern(p: &mut Parser<'_, '_>) {
             }
             p.expect(R_PAREN, "expected ')'");
             RECORD_PATTERN
+        } else if p.at(UNDERSCORE_KW) {
+            p.bump(UNDERSCORE_KW);
+            TYPE_PATTERN
         } else {
-            binding_name(p);
+            name(p);
             TYPE_PATTERN
         };
         m.complete(p, kind);

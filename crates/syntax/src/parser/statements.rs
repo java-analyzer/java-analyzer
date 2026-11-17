@@ -9,7 +9,10 @@ use super::{
     lookahead::{skip_parens, skip_type, MAX_SCAN},
     CompletedMarker, Parser,
 };
-use crate::syntax_kind::SyntaxKind::{self, *};
+use crate::{
+    language_level::SWITCH_EXPRESSIONS,
+    syntax_kind::SyntaxKind::{self, *},
+};
 
 /// `{ statement* }`
 ///
@@ -138,9 +141,11 @@ fn is_bare_primitive(p: &Parser<'_, '_>) -> bool {
 }
 
 /// `yield` is a contextual keyword: it starts a yield statement unless it is clearly used as a
-/// variable (`yield = 1;`, `yield.x();`, `yield++;`, ...).
+/// variable (`yield = 1;`, `yield.x();`, `yield++;`, ...). At language levels where switch
+/// expressions are not available, `yield(...)` is a method call rather than a yield statement.
 fn is_yield_stmt(p: &Parser<'_, '_>) -> bool {
     p.at_contextual_kw("yield")
+        && !(p.nth_at(1, L_PAREN) && !p.level.is_available(&SWITCH_EXPRESSIONS))
         && !matches!(
             p.nth(1),
             EQ | DOT

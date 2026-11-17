@@ -44,6 +44,25 @@ impl Case {
     pub fn has_option(&self, name: &str) -> bool {
         self.options.iter().any(|o| o == name)
     }
+
+    pub fn language_level(&self) -> syntax::LanguageLevel {
+        parse_language_level(self.options.iter().map(String::as_str))
+    }
+}
+
+fn parse_language_level<'a>(options: impl IntoIterator<Item = &'a str>) -> syntax::LanguageLevel {
+    let mut release = syntax::Release::LATEST;
+    let mut preview = false;
+    for opt in options {
+        if opt == "preview" {
+            preview = true;
+        } else if let Some(ver) = opt.strip_prefix("release=") {
+            release = ver
+                .parse()
+                .unwrap_or_else(|e| panic!("invalid fixture option `{opt}`: {e}"));
+        }
+    }
+    syntax::LanguageLevel::new(release, preview)
 }
 
 fn is_header_rule(line: &str) -> bool {
@@ -272,6 +291,31 @@ pub struct PairCase {
     /// True when the expected file is `name.trivia.scm`: whitespace and comments are included
     /// in the expected tree.
     pub include_trivia: bool,
+}
+
+impl PairCase {
+    /// Reads optional `release=<N>` and `preview` directives from a leading `// ...` comment on
+    /// line 1 of the `.java` fixture, defaulting to [`syntax::LanguageLevel::latest`].
+    pub fn language_level(&self) -> syntax::LanguageLevel {
+        let Some(first_line) = self.source.lines().next() else {
+            return syntax::LanguageLevel::latest();
+        };
+        let Some(comment) = first_line.trim_start().strip_prefix("//") else {
+            return syntax::LanguageLevel::latest();
+        };
+        let words: Vec<&str> = comment
+            .trim_start_matches('-')
+            .split_whitespace()
+            .collect();
+        if words
+            .iter()
+            .all(|w| *w == "preview" || w.starts_with("release="))
+        {
+            parse_language_level(words)
+        } else {
+            syntax::LanguageLevel::latest()
+        }
+    }
 }
 
 struct PairFiles {

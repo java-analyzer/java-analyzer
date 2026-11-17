@@ -217,6 +217,7 @@ mod tests {
         let mut db = RootDatabase::default();
         let file_id = FileId(1);
         db.set_file_text(file_id, Arc::new(text.to_string()));
+        db.set_file_language_level(file_id, hir::LanguageLevel::latest());
         (db, file_id)
     }
 

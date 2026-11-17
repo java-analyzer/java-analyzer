@@ -14,6 +14,7 @@ pub(crate) mod tree_builder;
 use std::cell::Cell;
 
 use crate::{
+    language_level::{LanguageLevel, Release},
     lexer,
     syntax_kind::SyntaxKind::{self, *},
 };
@@ -99,10 +100,12 @@ pub(crate) struct Parser<'a, 't> {
     nesting_error_reported: bool,
     /// Set while parsing `case` labels, where `name ->` is a switch rule and not a lambda.
     no_lambda: bool,
+    /// Declared language level of the compilation unit.
+    level: LanguageLevel,
 }
 
 /// Parses `input` into events.
-pub(crate) fn parse(input: &Input<'_>) -> Vec<Event> {
+pub(crate) fn parse(input: &Input<'_>, level: LanguageLevel) -> Vec<Event> {
     let mut p = Parser {
         input,
         pos: 0,
@@ -111,6 +114,7 @@ pub(crate) fn parse(input: &Input<'_>) -> Vec<Event> {
         depth: 0,
         nesting_error_reported: false,
         no_lambda: false,
+        level,
     };
     grammar::source_file(&mut p);
     p.events
@@ -160,6 +164,11 @@ impl<'a, 't> Parser<'a, 't> {
 
     fn at_contextual_kw(&self, kw: &str) -> bool {
         self.nth_at_contextual_kw(0, kw)
+    }
+
+    /// Is the current token an identifier (`IDENT`, or `_` at language level 8)?
+    fn at_ident(&self) -> bool {
+        self.at(IDENT) || (self.at(UNDERSCORE_KW) && self.level.release == Release::JAVA_8)
     }
 
     /// Is token `n` immediately followed by token `n + 1`, with no trivia between them?

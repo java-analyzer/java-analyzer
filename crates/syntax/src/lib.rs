@@ -1,12 +1,14 @@
 //! Lossless, error-resilient Java parser producing a `rowan` concrete syntax tree.
 //! See `docs/specs/0002-java-syntax-subset.md`.
 
+pub mod language_level;
 pub mod lexer;
 mod parser;
 pub mod syntax_kind;
 
 use std::{fmt::Write as _, sync::Arc};
 
+pub use language_level::{Feature, LanguageLevel, Release, FEATURES};
 use rowan::{NodeOrToken, WalkEvent};
 pub use rowan::{TextRange, TextSize};
 use syntax_kind::SyntaxKind;
@@ -92,13 +94,22 @@ impl Parse {
     }
 }
 
-/// Parses `text`. Never fails or panics: malformed input yields a tree plus errors, and the
-/// text of the tree always equals `text`.
+/// Parses `text` at [`LanguageLevel::latest`]. Never fails or panics: malformed input yields a
+/// tree plus errors, and the text of the tree always equals `text`.
 pub fn parse(text: &str) -> Parse {
+    parse_with_level(text, LanguageLevel::latest())
+}
+
+/// Parses `text` according to `level`. Never fails or panics: malformed input yields a tree plus
+/// errors, and the text of the tree always equals `text`.
+pub fn parse_with_level(text: &str, level: LanguageLevel) -> Parse {
     let (tokens, lex_errors) = lexer::lex_with_errors(text);
     let input = parser::Input::new(text, &tokens);
-    let events = parser::parse(&input);
+    let events = parser::parse(&input, level);
     let (green, mut errors) = parser::tree_builder::build(text, &tokens, events);
+
+    let root = SyntaxNode::new_root(green.clone());
+    language_level::check_feature_gates(&root, level, &mut errors);
 
     errors.extend(lex_errors.into_iter().map(|e| SyntaxError {
         message: e.message.to_string(),

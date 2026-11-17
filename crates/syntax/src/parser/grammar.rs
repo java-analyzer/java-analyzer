@@ -183,21 +183,21 @@ fn path_list(p: &mut Parser<'_, '_>) {
 // ---- Names and paths ----
 
 pub(super) fn name(p: &mut Parser<'_, '_>) {
-    if p.at(IDENT) {
+    if p.at_ident() {
         let m = p.start();
-        p.bump(IDENT);
+        p.bump_any();
         m.complete(p, NAME);
     } else {
         p.error_missing("expected a name");
     }
 }
 
-/// A variable or pattern binding site: either an identifier (`NAME`) or `_` (`UNDERSCORE_KW`).
-/// Returns whether a binding token was present.
+/// A variable binding site: an identifier (`NAME`, including `_` at Java 8) or an unnamed
+/// variable `_` (`UNDERSCORE_KW` at Java 9+). Returns whether a binding token was present.
 pub(super) fn binding_name(p: &mut Parser<'_, '_>) -> bool {
-    if p.at(IDENT) {
+    if p.at_ident() {
         let m = p.start();
-        p.bump(IDENT);
+        p.bump_any();
         m.complete(p, NAME);
         true
     } else if p.at(UNDERSCORE_KW) {
@@ -210,9 +210,9 @@ pub(super) fn binding_name(p: &mut Parser<'_, '_>) -> bool {
 }
 
 pub(super) fn name_ref(p: &mut Parser<'_, '_>) {
-    if p.at(IDENT) {
+    if p.at_ident() {
         let m = p.start();
-        p.bump(IDENT);
+        p.bump_any();
         m.complete(p, NAME_REF);
     } else {
         p.error_missing("expected a name");
@@ -631,7 +631,7 @@ fn method_or_field(p: &mut Parser<'_, '_>, m: Marker) {
         type_(p);
     }
 
-    if p.at(L_PAREN) || (p.at(IDENT) && p.nth_at(1, L_PAREN)) {
+    if p.at(L_PAREN) || (p.at_ident() && p.nth_at(1, L_PAREN)) {
         name(p);
         param_list(p, PARAM_LIST, PARAM);
         dims(p);
@@ -660,7 +660,7 @@ fn method_or_field(p: &mut Parser<'_, '_>, m: Marker) {
 /// `Name ('[' ']')* ('=' Initializer)?`. Returns whether the name was present.
 fn variable_declarator(p: &mut Parser<'_, '_>) -> bool {
     let m = p.start();
-    let named = p.at(IDENT);
+    let named = p.at_ident();
     name(p);
     dims(p);
     if p.eat(EQ) {
