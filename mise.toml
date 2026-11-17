@@ -15,8 +15,7 @@ run = '''
 set -euo pipefail
 
 corpus_dir="target/conformance/corpus"
-archive_dir="target/conformance/archives"
-mkdir -p "$corpus_dir" "$archive_dir"
+mkdir -p "$corpus_dir"
 
 tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/java-corpus.XXXXXX")"
 trap 'rm -rf "$tmp_root"' EXIT
@@ -26,17 +25,15 @@ fetch_tarball() {
   local url="$2"
   local subdir="$3"
   local dest="$corpus_dir/$id"
-  local archive="$archive_dir/$id.tar.gz"
+  local archive="$tmp_root/$id.tar.gz"
 
   if [ -d "$dest" ] && [ "${FORCE:-0}" != "1" ]; then
     echo "cached: $id ($dest)"
     return 0
   fi
 
-  if [ ! -f "$archive" ] || [ "${FORCE:-0}" = "1" ]; then
-    echo "downloading $id from $url"
-    xh --download --follow --check-status --output "$archive" "$url" Accept-Encoding:gzip
-  fi
+  echo "downloading $id from $url"
+  xh --download --follow --check-status --output "$archive" "$url" Accept-Encoding:gzip
 
   local stage="$tmp_root/$id"
   mkdir -p "$stage"
@@ -100,24 +97,21 @@ case "$spec" in
 esac
 
 jdk_dir="target/conformance/jdk"
-archive_dir="target/conformance/archives"
 dest="$jdk_dir/$jdk_tag"
-archive="$archive_dir/$jdk_tag.tar.gz"
-mkdir -p "$jdk_dir" "$archive_dir"
+mkdir -p "$jdk_dir"
 
 if [ -d "$dest" ] && [ "${FORCE:-0}" != "1" ]; then
   echo "cached: $jdk_tag ($dest)"
   exit 0
 fi
 
-url="https://github.com/openjdk/jdk/archive/refs/tags/${jdk_tag}.tar.gz"
-if [ ! -f "$archive" ] || [ "${FORCE:-0}" = "1" ]; then
-  echo "downloading $jdk_tag from $url"
-  xh --download --follow --check-status --output "$archive" "$url" Accept-Encoding:gzip
-fi
-
 tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/java-corpus-jdk.XXXXXX")"
 trap 'rm -rf "$tmp_root"' EXIT
+archive="$tmp_root/$jdk_tag.tar.gz"
+
+url="https://github.com/openjdk/jdk/archive/refs/tags/${jdk_tag}.tar.gz"
+echo "downloading $jdk_tag from $url"
+xh --download --follow --check-status --output "$archive" "$url" Accept-Encoding:gzip
 
 # Extract only src/ so tests and build scripts don't bloat disk or skew valid-only results.
 top_dir="jdk-${jdk_tag//+/-}"
@@ -139,6 +133,11 @@ depends = ["conformance-fetch"]
 run = '''
 #!/usr/bin/env bash
 set -euo pipefail
+
+cleanup() {
+  rm -rf target/conformance/archives target/conformance/corpus
+}
+trap cleanup EXIT
 
 corpus_dir="target/conformance/corpus"
 args=()
@@ -162,9 +161,14 @@ run = '''
 #!/usr/bin/env bash
 set -euo pipefail
 
+cleanup() {
+  rm -rf target/conformance/archives target/conformance/corpus target/conformance/jdk
+}
+trap cleanup EXIT
+
 mise run conformance-fetch
 jdk_output="$(mise run conformance-fetch-jdk "$@" | tee /dev/stderr)"
-jdk_path="$(printf '%s\n' "$jdk_output" | sed -nE 's/^(cached|unpacked): [^ ]+ ->? ?\(?([^)]+)\)?$/\2/p' | tail -n 1)"
+jdk_path="$(printf '%s\n' "$jdk_output" | sed -nE 's/^.*(cached|unpacked): [^ ]+ (-> )?\(?([^)]+)\)?$/\3/p' | tail -n 1)"
 
 if [ -z "$jdk_path" ] || [ ! -d "$jdk_path" ]; then
   echo "error: could not locate unpacked JDK corpus" >&2
