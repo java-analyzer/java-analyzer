@@ -33,8 +33,10 @@ fetch_tarball() {
     return 0
   fi
 
-  echo "downloading $id from $url"
-  xh --download --follow --check-status --output "$archive" "$url"
+  if [ ! -f "$archive" ] || [ "${FORCE:-0}" = "1" ]; then
+    echo "downloading $id from $url"
+    xh --download --follow --check-status --output "$archive" "$url" Accept-Encoding:gzip
+  fi
 
   local stage="$tmp_root/$id"
   mkdir -p "$stage"
@@ -73,8 +75,66 @@ fetch_tarball \
   "core/src/main/java"
 '''
 
+[tasks.conformance-fetch-jdk]
+description = "Download and unpack OpenJDK source tree (arg or JDK_VERSION: latest|lts|<N>|<tag>)"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+spec="${1:-${JDK_TAG:-${JDK_VERSION:-latest}}}"
+case "$spec" in
+  latest)
+    ver="$(xh --body --check-status https://api.adoptium.net/v3/info/available_releases | jq -r '.most_recent_feature_release')"
+    jdk_tag="jdk-${ver}-ga"
+    ;;
+  lts)
+    ver="$(xh --body --check-status https://api.adoptium.net/v3/info/available_releases | jq -r '.most_recent_lts')"
+    jdk_tag="jdk-${ver}-ga"
+    ;;
+  *[!0-9]*)
+    jdk_tag="$spec"
+    ;;
+  *)
+    jdk_tag="jdk-${spec}-ga"
+    ;;
+esac
+
+jdk_dir="target/conformance/jdk"
+archive_dir="target/conformance/archives"
+dest="$jdk_dir/$jdk_tag"
+archive="$archive_dir/$jdk_tag.tar.gz"
+mkdir -p "$jdk_dir" "$archive_dir"
+
+if [ -d "$dest" ] && [ "${FORCE:-0}" != "1" ]; then
+  echo "cached: $jdk_tag ($dest)"
+  exit 0
+fi
+
+url="https://github.com/openjdk/jdk/archive/refs/tags/${jdk_tag}.tar.gz"
+if [ ! -f "$archive" ] || [ "${FORCE:-0}" = "1" ]; then
+  echo "downloading $jdk_tag from $url"
+  xh --download --follow --check-status --output "$archive" "$url" Accept-Encoding:gzip
+fi
+
+tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/java-corpus-jdk.XXXXXX")"
+trap 'rm -rf "$tmp_root"' EXIT
+
+# Extract only src/ so tests and build scripts don't bloat disk or skew valid-only results.
+top_dir="jdk-${jdk_tag//+/-}"
+tar -xzf "$archive" -C "$tmp_root" "$top_dir/src"
+
+if [ ! -d "$tmp_root/$top_dir/src" ]; then
+  echo "error: expected $top_dir/src inside $jdk_tag archive" >&2
+  exit 1
+fi
+
+rm -rf "$dest"
+mv "$tmp_root/$top_dir/src" "$dest"
+echo "unpacked: $jdk_tag -> $dest"
+'''
+
 [tasks.conformance]
-description = "Fetch corpora and run parser conformance checks"
+description = "Fetch library corpora and run parser conformance checks"
 depends = ["conformance-fetch"]
 run = '''
 #!/usr/bin/env bash
@@ -92,6 +152,32 @@ if [ -z "${args[*]:-}" ]; then
   echo "error: no corpora found in $corpus_dir" >&2
   exit 1
 fi
+
+cargo xtask conformance "${args[@]}" --out target/conformance
+'''
+
+[tasks.conformance-jdk]
+description = "Fetch library corpora + OpenJDK (arg or JDK_VERSION: latest|lts|<N>|<tag>) and run conformance"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+mise run conformance-fetch
+jdk_output="$(mise run conformance-fetch-jdk "$@" | tee /dev/stderr)"
+jdk_path="$(printf '%s\n' "$jdk_output" | sed -nE 's/^(cached|unpacked): [^ ]+ ->? ?\(?([^)]+)\)?$/\2/p' | tail -n 1)"
+
+if [ -z "$jdk_path" ] || [ ! -d "$jdk_path" ]; then
+  echo "error: could not locate unpacked JDK corpus" >&2
+  exit 1
+fi
+
+args=()
+for dir in target/conformance/corpus/*; do
+  if [ -d "$dir" ]; then
+    args+=(--valid "$dir")
+  fi
+done
+args+=(--valid "$jdk_path")
 
 cargo xtask conformance "${args[@]}" --out target/conformance
 '''
