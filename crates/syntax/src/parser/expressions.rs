@@ -7,10 +7,10 @@
 
 use super::{
     grammar::{
-        at_param_start, class_body, is_primitive_kw, modifiers, name, name_ref, param, type_,
-        type_args, type_marker,
+        annotations, at_param_start, class_body, is_primitive_kw, modifiers, name, name_ref, param,
+        type_, type_args, type_marker,
     },
-    lookahead::{skip_parens, skip_type, MAX_SCAN},
+    lookahead::{skip_annotations, skip_parens, skip_type, MAX_SCAN},
     statements::{block, switch_expr},
     CompletedMarker, Parser,
 };
@@ -451,7 +451,8 @@ fn is_cast_ahead(p: &Parser<'_, '_>) -> bool {
     let Some(mut n) = skip_type(p, 1) else {
         return false;
     };
-    let single_primitive = is_primitive_kw(p.nth(1)) && n == 2;
+    let single_primitive =
+        skip_annotations(p, 1).is_some_and(|start| is_primitive_kw(p.nth(start)) && n == start + 1);
     let mut intersections = 0;
     while p.nth_at(n, AMP) {
         intersections += 1;
@@ -542,6 +543,10 @@ fn new_expr(p: &mut Parser<'_, '_>) -> CompletedMarker {
     m.complete(p, NEW_EXPR)
 }
 
+fn at_new_array_dim_start(p: &Parser<'_, '_>) -> bool {
+    p.at(L_BRACK) || matches!(skip_annotations(p, 0), Some(n) if p.nth_at(n, L_BRACK))
+}
+
 /// Everything of a `new` expression from the `new` keyword on. Also used after `outer.`.
 fn new_expr_rest(p: &mut Parser<'_, '_>) {
     p.bump(NEW_KW);
@@ -555,9 +560,10 @@ fn new_expr_rest(p: &mut Parser<'_, '_>) {
                 class_body(p);
             }
         }
-        L_BRACK => {
-            // Dimension expressions followed by empty dimensions: `new int[3][]`.
-            while p.at(L_BRACK) {
+        _ if at_new_array_dim_start(p) => {
+            // Dimension expressions followed by empty dimensions: `new int[3][]`, `new int @A [3] @B []`.
+            while at_new_array_dim_start(p) {
+                annotations(p);
                 p.bump(L_BRACK);
                 if !p.at(R_BRACK) {
                     expr(p);
@@ -576,15 +582,32 @@ fn new_expr_rest(p: &mut Parser<'_, '_>) {
 
 // ---- Patterns ----
 
-/// Is a pattern (rather than a plain type or expression) next? True for a modifier or annotation,
-/// or a type followed by an identifier (`Foo f`) or `(` (`Point(int x, int y)`).
+/// Is a pattern (rather than a plain type or expression) next? True for a modifier or a type
+/// (with optional leading annotations) followed by an identifier (`Foo f`) or `(` (`Point(int x, int y)`).
 pub(super) fn is_pattern_ahead(p: &Parser<'_, '_>) -> bool {
-    p.at(FINAL_KW)
-        || p.at(AT)
-        || matches!(skip_type(p, 0), Some(n) if p.nth_at(n, IDENT) || p.nth_at(n, L_PAREN))
+    let mut n = 0;
+    let mut has_final = false;
+    loop {
+        if n > MAX_SCAN {
+            return false;
+        }
+        if p.nth_at(n, FINAL_KW) {
+            has_final = true;
+            n += 1;
+        } else if p.nth_at(n, AT) {
+            match skip_annotations(p, n) {
+                Some(after) if after > n => n = after,
+                _ => return false,
+            }
+        } else {
+            break;
+        }
+    }
+    has_final
+        || matches!(skip_type(p, n), Some(end) if p.nth_at(end, IDENT) || p.nth_at(end, L_PAREN))
 }
 
-/// `Type name`, `final Type name` or `Type(pattern, ...)`.
+/// `Type name`, `final Type name` or `Type(pattern, ...)` .
 pub(super) fn pattern(p: &mut Parser<'_, '_>) {
     p.nested((), |p| {
         let m = p.start();

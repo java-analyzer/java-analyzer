@@ -10,34 +10,71 @@ use crate::syntax_kind::SyntaxKind::*;
 /// How far ahead a scan looks at most.
 pub(super) const MAX_SCAN: usize = 512;
 
+/// Skips zero or more annotations starting at token `n`. Returns `None` if an annotation is
+/// malformed (no identifier after `@`, unclosed arguments) or exceeds [`MAX_SCAN`].
+pub(super) fn skip_annotations(p: &Parser<'_, '_>, mut n: usize) -> Option<usize> {
+    let limit = n + MAX_SCAN;
+    while p.nth_at(n, AT) && !p.nth_at(n + 1, INTERFACE_KW) {
+        if !p.nth_at(n + 1, IDENT) {
+            return None;
+        }
+        n += 2;
+        while p.nth_at(n, DOT) && p.nth_at(n + 1, IDENT) {
+            n += 2;
+            if n > limit {
+                return None;
+            }
+        }
+        if p.nth_at(n, L_PAREN) {
+            n = skip_parens(p, n)?;
+        }
+        if n > limit {
+            return None;
+        }
+    }
+    Some(n)
+}
+
 /// If a type starts at token `n`, returns the index just past it. Only looks at tokens that can
 /// occur in a type, so an expression such as `a < b` is not mistaken for one.
 pub(super) fn skip_type(p: &Parser<'_, '_>, mut n: usize) -> Option<usize> {
     let limit = n + MAX_SCAN;
+    n = skip_annotations(p, n)?;
     if is_primitive_kw(p.nth(n)) {
         n += 1;
     } else if p.nth_at(n, IDENT) {
-        n += 1;
         loop {
+            n += 1;
             if n > limit {
                 return None;
             }
             if p.nth_at(n, L_ANGLE) {
                 n = skip_type_args(p, n)?;
             }
-            if p.nth_at(n, DOT) && p.nth_at(n + 1, IDENT) {
-                n += 2;
-            } else {
-                break;
+            if p.nth_at(n, DOT) {
+                if let Some(after_annos) = skip_annotations(p, n + 1) {
+                    if p.nth_at(after_annos, IDENT) {
+                        n = after_annos;
+                        continue;
+                    }
+                }
             }
+            break;
         }
     } else {
         return None;
     }
-    while p.nth_at(n, L_BRACK) && p.nth_at(n + 1, R_BRACK) {
-        n += 2;
-        if n > limit {
-            return None;
+    loop {
+        let Some(after_annos) = skip_annotations(p, n) else {
+            break;
+        };
+        if p.nth_at(after_annos, L_BRACK) && p.nth_at(after_annos + 1, R_BRACK) {
+            n = after_annos + 2;
+            if n > limit {
+                return None;
+            }
+        } else {
+            break;
         }
     }
     Some(n)
@@ -60,8 +97,15 @@ fn skip_type_args(p: &Parser<'_, '_>, mut n: usize) -> Option<usize> {
                     return Some(n + 1);
                 }
             }
-            IDENT | DOT | COMMA | QUESTION | EXTENDS_KW | SUPER_KW | AMP | L_BRACK | R_BRACK
-            | AT => {}
+            AT => {
+                let after = skip_annotations(p, n)?;
+                if after == n {
+                    return None;
+                }
+                n = after;
+                continue;
+            }
+            IDENT | DOT | COMMA | QUESTION | EXTENDS_KW | SUPER_KW | AMP | L_BRACK | R_BRACK => {}
             kind if is_primitive_kw(kind) => {}
             _ => return None,
         }

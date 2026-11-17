@@ -4,6 +4,7 @@
 
 use super::{
     expressions::{arg_list, initializer},
+    lookahead::skip_annotations,
     statements::block,
     CompletedMarker, Marker, Parser,
 };
@@ -175,6 +176,15 @@ pub(super) fn modifiers(p: &mut Parser<'_, '_>) {
     } else {
         m.abandon(p);
     }
+}
+
+pub(super) fn annotations(p: &mut Parser<'_, '_>) -> bool {
+    let mut any = false;
+    while p.at(AT) && !p.nth_at(1, INTERFACE_KW) {
+        annotation(p);
+        any = true;
+    }
+    any
 }
 
 fn annotation(p: &mut Parser<'_, '_>) {
@@ -412,9 +422,7 @@ fn enum_body(p: &mut Parser<'_, '_>) {
 
 fn enum_constant(p: &mut Parser<'_, '_>) {
     let m = p.start();
-    while p.at(AT) {
-        annotation(p);
-    }
+    annotations(p);
     name(p);
     if p.at(L_PAREN) {
         arg_list(p);
@@ -434,7 +442,13 @@ pub(super) fn is_primitive_kw(kind: SyntaxKind) -> bool {
 
 fn at_type_start(p: &Parser<'_, '_>) -> bool {
     let kind = p.current();
-    kind == IDENT || kind == VOID_KW || is_primitive_kw(kind)
+    kind == IDENT
+        || kind == VOID_KW
+        || is_primitive_kw(kind)
+        || matches!(
+            skip_annotations(p, 0),
+            Some(n) if n > 0 && (matches!(p.nth(n), IDENT | VOID_KW) || is_primitive_kw(p.nth(n)))
+        )
 }
 
 fn member(p: &mut Parser<'_, '_>) {
@@ -553,8 +567,17 @@ pub(super) fn variable_declarator(p: &mut Parser<'_, '_>) -> bool {
     named
 }
 
+fn at_array_dim_start(p: &Parser<'_, '_>) -> bool {
+    (p.at(L_BRACK) && p.nth_at(1, R_BRACK))
+        || matches!(
+            skip_annotations(p, 0),
+            Some(n) if p.nth_at(n, L_BRACK) && p.nth_at(n + 1, R_BRACK)
+        )
+}
+
 pub(super) fn dims(p: &mut Parser<'_, '_>) {
-    while p.at(L_BRACK) && p.nth_at(1, R_BRACK) {
+    while at_array_dim_start(p) {
+        annotations(p);
         p.bump(L_BRACK);
         p.bump(R_BRACK);
     }
@@ -621,7 +644,10 @@ pub(super) fn param(p: &mut Parser<'_, '_>, kind: SyntaxKind) {
     let m = p.start();
     modifiers(p);
     if type_(p) {
-        p.eat(DOT3);
+        if p.at(DOT3) || matches!(skip_annotations(p, 0), Some(n) if p.nth_at(n, DOT3)) {
+            annotations(p);
+            p.bump(DOT3);
+        }
         name(p);
         dims(p);
     }
@@ -641,26 +667,33 @@ pub(super) fn type_(p: &mut Parser<'_, '_>) -> bool {
 
 /// Parses a type and returns its node, or `None` (after reporting an error) if there is none.
 pub(super) fn type_marker(p: &mut Parser<'_, '_>) -> Option<CompletedMarker> {
+    let m = p.start();
+    let has_annos = annotations(p);
     let mut completed = match p.current() {
         BOOLEAN_KW | BYTE_KW | SHORT_KW | INT_KW | LONG_KW | CHAR_KW | FLOAT_KW | DOUBLE_KW => {
-            let m = p.start();
             p.bump_any();
             m.complete(p, PRIMITIVE_TYPE)
         }
-        IDENT => path_type(p),
+        IDENT => path_type(p, m),
         _ => {
             p.error_missing("expected a type");
+            if has_annos {
+                m.complete(p, ERROR);
+            } else {
+                m.abandon(p);
+            }
             return None;
         }
     };
     let mut n_dims = 0;
-    while p.at(L_BRACK) && p.nth_at(1, R_BRACK) {
+    while at_array_dim_start(p) {
         if n_dims >= MAX_DIMS {
             p.error_unexpected("type is too long");
             break;
         }
         n_dims += 1;
         let m = completed.precede(p);
+        annotations(p);
         p.bump(L_BRACK);
         p.bump(R_BRACK);
         completed = m.complete(p, ARRAY_TYPE);
@@ -668,16 +701,16 @@ pub(super) fn type_marker(p: &mut Parser<'_, '_>) -> Option<CompletedMarker> {
     Some(completed)
 }
 
-/// `a.b.C<D>.E<F>`
-fn path_type(p: &mut Parser<'_, '_>) -> super::CompletedMarker {
-    let m = p.start();
+/// `a.b.C<D>.E<F>` (with optional type-use annotations on nested segments).
+fn path_type(p: &mut Parser<'_, '_>, m: Marker) -> super::CompletedMarker {
     loop {
         name_ref(p);
         if p.at(L_ANGLE) {
             type_args(p);
         }
-        if p.at(DOT) && p.nth_at(1, IDENT) {
+        if p.at(DOT) && (p.nth_at(1, IDENT) || (p.nth_at(1, AT) && !p.nth_at(2, INTERFACE_KW))) {
             p.bump(DOT);
+            annotations(p);
         } else {
             break;
         }
@@ -700,8 +733,9 @@ pub(super) fn type_args(p: &mut Parser<'_, '_>) {
 }
 
 fn type_arg(p: &mut Parser<'_, '_>) -> bool {
-    if p.at(QUESTION) {
+    if p.at(QUESTION) || matches!(skip_annotations(p, 0), Some(n) if p.nth_at(n, QUESTION)) {
         let m = p.start();
+        annotations(p);
         p.bump(QUESTION);
         if p.at(EXTENDS_KW) || p.at(SUPER_KW) {
             p.bump_any();
@@ -732,6 +766,7 @@ fn type_params_opt(p: &mut Parser<'_, '_>) {
 
 fn type_param(p: &mut Parser<'_, '_>) {
     let m = p.start();
+    annotations(p);
     name(p);
     if p.eat(EXTENDS_KW) {
         type_(p);
