@@ -93,6 +93,23 @@ pub(super) fn name(p: &mut Parser<'_, '_>) {
     }
 }
 
+/// A variable or pattern binding site: either an identifier (`NAME`) or `_` (`UNDERSCORE_KW`).
+/// Returns whether a binding token was present.
+pub(super) fn binding_name(p: &mut Parser<'_, '_>) -> bool {
+    if p.at(IDENT) {
+        let m = p.start();
+        p.bump(IDENT);
+        m.complete(p, NAME);
+        true
+    } else if p.at(UNDERSCORE_KW) {
+        p.bump(UNDERSCORE_KW);
+        true
+    } else {
+        p.error_missing("expected a name");
+        false
+    }
+}
+
 pub(super) fn name_ref(p: &mut Parser<'_, '_>) {
     if p.at(IDENT) {
         let m = p.start();
@@ -555,10 +572,22 @@ fn method_or_field(p: &mut Parser<'_, '_>, m: Marker) {
 }
 
 /// `Name ('[' ']')* ('=' Initializer)?`. Returns whether the name was present.
-pub(super) fn variable_declarator(p: &mut Parser<'_, '_>) -> bool {
+fn variable_declarator(p: &mut Parser<'_, '_>) -> bool {
     let m = p.start();
     let named = p.at(IDENT);
     name(p);
+    dims(p);
+    if p.eat(EQ) {
+        initializer(p);
+    }
+    m.complete(p, VARIABLE_DECLARATOR);
+    named
+}
+
+/// `(Name | '_') ('[' ']')* ('=' Initializer)?`. Returns whether the name or `_` was present.
+pub(super) fn local_variable_declarator(p: &mut Parser<'_, '_>) -> bool {
+    let m = p.start();
+    let named = binding_name(p);
     dims(p);
     if p.eat(EQ) {
         initializer(p);
@@ -614,7 +643,7 @@ fn param_list(p: &mut Parser<'_, '_>, list_kind: SyntaxKind, item_kind: SyntaxKi
             // `f(a, , b)`: the parameter between the commas is missing.
             p.error_missing("expected a parameter");
         } else if at_param_start(p) {
-            param(p, item_kind);
+            param_inner(p, item_kind, false);
         } else {
             let e = p.start();
             p.error_unexpected("expected a parameter");
@@ -640,7 +669,11 @@ pub(super) fn at_param_start(p: &Parser<'_, '_>) -> bool {
     kind == IDENT || kind == AT || is_primitive_kw(kind) || is_modifier_kw(kind)
 }
 
-pub(super) fn param(p: &mut Parser<'_, '_>, kind: SyntaxKind) {
+pub(super) fn lambda_param(p: &mut Parser<'_, '_>) {
+    param_inner(p, PARAM, true);
+}
+
+fn param_inner(p: &mut Parser<'_, '_>, kind: SyntaxKind, allow_unnamed: bool) {
     let m = p.start();
     modifiers(p);
     if type_(p) {
@@ -648,7 +681,11 @@ pub(super) fn param(p: &mut Parser<'_, '_>, kind: SyntaxKind) {
             annotations(p);
             p.bump(DOT3);
         }
-        name(p);
+        if allow_unnamed {
+            binding_name(p);
+        } else {
+            name(p);
+        }
         dims(p);
     }
     m.complete(p, kind);

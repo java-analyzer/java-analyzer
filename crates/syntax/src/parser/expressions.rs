@@ -7,8 +7,8 @@
 
 use super::{
     grammar::{
-        annotations, at_param_start, class_body, is_primitive_kw, modifiers, name, name_ref, param,
-        type_, type_args, type_marker,
+        annotations, at_param_start, binding_name, class_body, is_primitive_kw, lambda_param,
+        modifiers, name_ref, type_, type_args, type_marker,
     },
     lookahead::{skip_annotations, skip_parens, skip_type, MAX_SCAN},
     statements::{block, switch_expr},
@@ -340,6 +340,7 @@ fn primary(p: &mut Parser<'_, '_>) -> Option<CompletedMarker> {
             Some(m.complete(p, LITERAL))
         }
         IDENT => Some(ident_primary(p)),
+        UNDERSCORE_KW if p.nth_at(1, ARROW) && !p.no_lambda => Some(lambda(p)),
         THIS_KW | SUPER_KW => {
             let kind = if p.at(THIS_KW) { THIS_EXPR } else { SUPER_EXPR };
             let m = p.start();
@@ -495,24 +496,25 @@ fn is_cast_ahead(p: &Parser<'_, '_>) -> bool {
         )
 }
 
-/// `x -> body`, `(a, b) -> body`, `(int a, var b) -> body`; the body is a block or an expression.
+/// `x -> body`, `_ -> body`, `(a, b) -> body`, `(int a, var b) -> body`; the body is a block or
+/// an expression.
 fn lambda(p: &mut Parser<'_, '_>) -> CompletedMarker {
     let m = p.start();
     let params = p.start();
-    if p.at(IDENT) {
+    if p.at(IDENT) || p.at(UNDERSCORE_KW) {
         let single = p.start();
-        name(p);
+        binding_name(p);
         single.complete(p, PARAM);
     } else {
         p.bump(L_PAREN);
         while !p.at_eof() && !matches!(p.current(), R_PAREN | ARROW | L_CURLY | R_CURLY | SEMICOLON)
         {
-            if p.at(IDENT) && matches!(p.nth(1), COMMA | R_PAREN) {
+            if (p.at(IDENT) || p.at(UNDERSCORE_KW)) && matches!(p.nth(1), COMMA | R_PAREN) {
                 let bare = p.start();
-                name(p);
+                binding_name(p);
                 bare.complete(p, PARAM);
             } else if at_param_start(p) {
-                param(p, PARAM);
+                lambda_param(p);
             } else {
                 break;
             }
@@ -547,7 +549,7 @@ fn at_new_array_dim_start(p: &Parser<'_, '_>) -> bool {
     p.at(L_BRACK) || matches!(skip_annotations(p, 0), Some(n) if p.nth_at(n, L_BRACK))
 }
 
-/// Everything of a `new` expression from the `new` keyword on. Also used after `outer.`.
+/// Everything of a `new` expression from the `new` keyword on. Also used after `outer.`
 fn new_expr_rest(p: &mut Parser<'_, '_>) {
     p.bump(NEW_KW);
     let Some(ty) = type_marker(p) else {
@@ -583,7 +585,8 @@ fn new_expr_rest(p: &mut Parser<'_, '_>) {
 // ---- Patterns ----
 
 /// Is a pattern (rather than a plain type or expression) next? True for a modifier or a type
-/// (with optional leading annotations) followed by an identifier (`Foo f`) or `(` (`Point(int x, int y)`).
+/// (with optional leading annotations) followed by an identifier (`Foo f`), `_` (`Foo _`), or `(`
+/// (`Point(int x, int y)`).
 pub(super) fn is_pattern_ahead(p: &Parser<'_, '_>) -> bool {
     let mut n = 0;
     let mut has_final = false;
@@ -604,10 +607,13 @@ pub(super) fn is_pattern_ahead(p: &Parser<'_, '_>) -> bool {
         }
     }
     has_final
-        || matches!(skip_type(p, n), Some(end) if p.nth_at(end, IDENT) || p.nth_at(end, L_PAREN))
+        || matches!(
+            skip_type(p, n),
+            Some(end) if matches!(p.nth(end), IDENT | UNDERSCORE_KW | L_PAREN)
+        )
 }
 
-/// `Type name`, `final Type name` or `Type(pattern, ...)` .
+/// `Type name`, `Type _`, `final Type name` or `Type(pattern, ...)` .
 pub(super) fn pattern(p: &mut Parser<'_, '_>) {
     p.nested((), |p| {
         let m = p.start();
@@ -618,7 +624,13 @@ pub(super) fn pattern(p: &mut Parser<'_, '_>) {
             while !p.at_eof()
                 && !matches!(p.current(), R_PAREN | L_CURLY | R_CURLY | SEMICOLON | ARROW)
             {
-                pattern(p);
+                if p.at(UNDERSCORE_KW) {
+                    let u = p.start();
+                    p.bump(UNDERSCORE_KW);
+                    u.complete(p, UNNAMED_PATTERN);
+                } else {
+                    pattern(p);
+                }
                 if !p.eat(COMMA) {
                     break;
                 }
@@ -626,7 +638,7 @@ pub(super) fn pattern(p: &mut Parser<'_, '_>) {
             p.expect(R_PAREN, "expected ')'");
             RECORD_PATTERN
         } else {
-            name(p);
+            binding_name(p);
             TYPE_PATTERN
         };
         m.complete(p, kind);

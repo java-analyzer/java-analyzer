@@ -209,6 +209,7 @@ pub enum SyntaxKind {
     CLASS_LITERAL,
     TYPE_PATTERN,
     RECORD_PATTERN,
+    UNNAMED_PATTERN,
     GUARD,
 
     // ---- Nodes: statements ----

@@ -3,8 +3,8 @@
 use super::{
     expressions::{expr, is_pattern_ahead, pattern},
     grammar::{
-        dims, is_modifier_kw, is_primitive_kw, modifiers, name, name_ref, type_, type_decl_kind,
-        type_decl_rest, variable_declarator,
+        binding_name, dims, is_modifier_kw, is_primitive_kw, local_variable_declarator, modifiers,
+        name, name_ref, type_, type_decl_kind, type_decl_rest,
     },
     lookahead::{skip_parens, skip_type, MAX_SCAN},
     CompletedMarker, Parser,
@@ -16,7 +16,7 @@ use crate::syntax_kind::SyntaxKind::{self, *};
 /// Recovery: a block that is still open when `public`, `private` or `protected` shows up where a
 /// statement should start is considered unclosed (those can never start a statement), so one
 /// missing `}` does not swallow the rest of the class. Every enclosing block that is still open
-/// reports its own missing `}`.
+/// reports its own missing `}`.\
 pub(super) fn block(p: &mut Parser<'_, '_>) {
     let m = p.start();
     p.bump(L_CURLY);
@@ -115,9 +115,9 @@ fn local_var_decl_rest(p: &mut Parser<'_, '_>, semicolon: bool) {
         }
         return;
     }
-    let mut named = variable_declarator(p);
+    let mut named = local_variable_declarator(p);
     while p.eat(COMMA) {
-        named &= variable_declarator(p);
+        named &= local_variable_declarator(p);
     }
     // A missing name was already reported; do not pile a second error on top of it.
     if semicolon && !p.eat(SEMICOLON) && named {
@@ -125,10 +125,10 @@ fn local_var_decl_rest(p: &mut Parser<'_, '_>, semicolon: bool) {
     }
 }
 
-/// Is there a type at the start of the statement that is directly followed by an identifier?
-/// Nothing but a declaration can look like that (`Foo x`, `List<String> xs`, `int[] a`).
+/// Is there a type at the start of the statement that is directly followed by an identifier or `_`?
+/// Nothing but a declaration can look like that (`Foo x`, `List<String> xs`, `int[] a`, `var _`).
 fn is_local_var_decl(p: &Parser<'_, '_>) -> bool {
-    matches!(skip_type(p, 0), Some(n) if p.nth_at(n, IDENT))
+    matches!(skip_type(p, 0), Some(n) if matches!(p.nth(n), IDENT | UNDERSCORE_KW))
 }
 
 /// A primitive type keyword that is not the start of `int.class`, `int[].class` or `int[]::new`
@@ -326,7 +326,7 @@ fn for_stmt(p: &mut Parser<'_, '_>) {
             kind = FOREACH_STMT;
             modifiers(p);
             type_(p);
-            name(p);
+            binding_name(p);
             // The lookahead saw `Type name :`, but a malformed type can leave the real parse
             // somewhere else, so the colon is not guaranteed.
             p.expect(COLON, "expected ':'");
@@ -368,7 +368,7 @@ fn expr_list(p: &mut Parser<'_, '_>) {
     }
 }
 
-/// `[final|@Anno]* Type name :` — the header of an enhanced `for`.
+/// `[final|@Anno]* Type (name | '_') :` — the header of an enhanced `for`.
 fn is_foreach_header(p: &Parser<'_, '_>) -> bool {
     let mut n = 0;
     loop {
@@ -396,7 +396,7 @@ fn is_foreach_header(p: &Parser<'_, '_>) -> bool {
         }
     }
     match skip_type(p, n) {
-        Some(n) => p.nth_at(n, IDENT) && p.nth_at(n + 1, COLON),
+        Some(n) => matches!(p.nth(n), IDENT | UNDERSCORE_KW) && p.nth_at(n + 1, COLON),
         None => false,
     }
 }
@@ -443,14 +443,14 @@ fn resource_list(p: &mut Parser<'_, '_>) {
     m.complete(p, RESOURCE_LIST);
 }
 
-/// Either a declaration (`Type name = expr`) or an expression naming an effectively final
+/// Either a declaration (`Type (name | '_') = expr`) or an expression naming an effectively final
 /// variable.
 fn resource(p: &mut Parser<'_, '_>) {
     let m = p.start();
     if is_modifier_kw(p.current()) || p.at(AT) || is_local_var_decl(p) {
         modifiers(p);
         if type_(p) {
-            name(p);
+            binding_name(p);
             if p.eat(EQ) {
                 expr(p);
             } else {
@@ -472,7 +472,7 @@ fn catch_clause(p: &mut Parser<'_, '_>) {
         while p.eat(PIPE) {
             type_(p);
         }
-        name(p);
+        binding_name(p);
         dims(p);
         p.expect(R_PAREN, "expected ')'");
     }
