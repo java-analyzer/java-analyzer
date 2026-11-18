@@ -29,6 +29,14 @@ pub fn lex_with_errors(input: &str) -> (Vec<Token>, Vec<LexError>) {
     let mut tokens = Vec::new();
     let mut errors = Vec::new();
     let mut pos = 0;
+    if input.starts_with("#!") {
+        let len = input.find(['\n', '\r']).unwrap_or(input.len());
+        tokens.push(Token {
+            kind: SHEBANG,
+            len,
+        });
+        pos = len;
+    }
     while pos < input.len() {
         let (kind, len, error) = next_token(&input[pos..]);
         debug_assert!(len > 0 && input.is_char_boundary(pos + len));

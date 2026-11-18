@@ -274,6 +274,29 @@ pub const UNNAMED_VARIABLES: Feature = Feature {
     withdrawn_in: None,
 };
 
+pub const MODULE_IMPORTS: Feature = Feature {
+    id: "module-imports",
+    plural: "module imports",
+    jep: Some(511),
+    preview_in: &[Release::JAVA_23, Release::JAVA_24],
+    stable_in: Some(Release::JAVA_25),
+    withdrawn_in: None,
+};
+
+pub const COMPACT_SOURCE_FILES: Feature = Feature {
+    id: "compact-source-files",
+    plural: "compact source files",
+    jep: Some(512),
+    preview_in: &[
+        Release::JAVA_21,
+        Release::JAVA_22,
+        Release::JAVA_23,
+        Release::JAVA_24,
+    ],
+    stable_in: Some(Release::JAVA_25),
+    withdrawn_in: None,
+};
+
 /// All language features tracked after [`Release::FLOOR`].
 pub const FEATURES: &[Feature] = &[
     SWITCH_EXPRESSIONS,
@@ -284,6 +307,8 @@ pub const FEATURES: &[Feature] = &[
     RECORD_PATTERNS,
     PATTERN_MATCHING_SWITCH,
     UNNAMED_VARIABLES,
+    MODULE_IMPORTS,
+    COMPACT_SOURCE_FILES,
 ];
 
 /// Checks `root` for constructs whose feature is unavailable at `level`, appending syntax-phase
@@ -340,6 +365,16 @@ pub(crate) fn check_feature_gates(
                 _ => {}
             },
             NodeOrToken::Node(node) => match node.kind() {
+                IMPORT_DECL => {
+                    if is_module_import(&node) {
+                        report(&MODULE_IMPORTS, node.text_range());
+                    }
+                }
+                FIELD_DECL | METHOD_DECL | INITIALIZER => {
+                    if node.parent().is_some_and(|p| p.kind() == SOURCE_FILE) {
+                        report(&COMPACT_SOURCE_FILES, node.text_range());
+                    }
+                }
                 RECORD_DECL => report(&RECORDS, node.text_range()),
                 PERMITS_CLAUSE => report(&SEALED_CLASSES, node.text_range()),
                 SWITCH_EXPR | YIELD_STMT => report(&SWITCH_EXPRESSIONS, node.text_range()),
@@ -366,6 +401,15 @@ pub(crate) fn check_feature_gates(
             },
         }
     }
+}
+
+fn is_module_import(import_decl: &SyntaxNode) -> bool {
+    import_decl.children_with_tokens().any(|e| {
+        matches!(
+            e,
+            NodeOrToken::Token(t) if t.kind() == IDENT && t.text() == "module"
+        )
+    })
 }
 
 /// First `SWITCH_LABEL` of a `SWITCH_STMT` that uses Java 14 switch-expression syntax (`->` or

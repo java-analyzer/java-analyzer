@@ -4,7 +4,7 @@
 
 use super::{
     expressions::{arg_list, initializer},
-    lookahead::skip_annotations,
+    lookahead::{skip_annotations, skip_type, skip_type_args},
     statements::block,
     CompletedMarker, Marker, Parser,
 };
@@ -12,6 +12,7 @@ use crate::syntax_kind::SyntaxKind::{self, *};
 
 pub(super) fn source_file(p: &mut Parser<'_, '_>) {
     let m = p.start();
+    p.eat(SHEBANG);
     while !p.at_eof() {
         let before = p.pos();
         top_level_item(p);
@@ -43,6 +44,9 @@ fn top_level_item(p: &mut Parser<'_, '_>) {
             } else if at_module_decl(p) {
                 module_decl_rest(p);
                 m.complete(p, MODULE_DECL);
+            } else if at_top_level_member(p) {
+                type_params_opt(p);
+                method_or_field(p, m);
             } else {
                 p.error_unexpected("expected a class, interface, enum or record declaration");
                 if p.pos() == start {
@@ -57,6 +61,30 @@ fn top_level_item(p: &mut Parser<'_, '_>) {
     }
 }
 
+/// Is the parser at a top-level field or method declaration of a compact source file (JEP 512),
+/// rather than malformed top-level tokens such as `foo bar baz;`?
+fn at_top_level_member(p: &Parser<'_, '_>) -> bool {
+    let mut n = 0;
+    if p.nth_at(n, L_ANGLE) {
+        let Some(after) = skip_type_args(p, n) else {
+            return false;
+        };
+        n = after;
+    }
+    let after_type = if p.nth_at(n, VOID_KW) {
+        n + 1
+    } else if let Some(after) = skip_type(p, n) {
+        after
+    } else {
+        return false;
+    };
+    p.nth_at(after_type, IDENT)
+        && matches!(
+            p.nth(after_type + 1),
+            L_PAREN | EQ | SEMICOLON | COMMA | L_BRACK
+        )
+}
+
 /// Tokens at which skipping unexpected top level input stops.
 fn at_top_level_recovery(p: &Parser<'_, '_>) -> bool {
     let kind = p.current();
@@ -69,7 +97,9 @@ fn at_top_level_recovery(p: &Parser<'_, '_>) -> bool {
 fn import_decl(p: &mut Parser<'_, '_>) {
     let m = p.start();
     p.bump(IMPORT_KW);
-    p.eat(STATIC_KW);
+    if !p.eat(STATIC_KW) && p.at_contextual_kw("module") && p.nth_at(1, IDENT) {
+        p.bump(IDENT);
+    }
     path(p);
     if p.at(DOT) && p.nth_at(1, STAR) {
         p.bump(DOT);

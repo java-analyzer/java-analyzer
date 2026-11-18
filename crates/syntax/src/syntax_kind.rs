@@ -8,6 +8,7 @@ pub enum SyntaxKind {
     WHITESPACE,
     LINE_COMMENT,
     BLOCK_COMMENT,
+    SHEBANG,
 
     // ---- Tokens: identifiers and literals ----
     IDENT,

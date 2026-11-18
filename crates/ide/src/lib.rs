@@ -377,6 +377,18 @@ Class A
     }
 
     #[test]
+    fn outline_of_compact_source_file() {
+        let text = "#!/usr/bin/env java --source 25\nimport module java.base;\nint count = 1;\nvoid main(String[] args) {}\n";
+        assert_eq!(
+            outline(text),
+            "\
+Field count int
+Method main (String[] args)
+"
+        );
+    }
+
+    #[test]
     fn no_diagnostics_for_valid_code() {
         let (db, file_id) = db_with("package a;\nimport b.C;\nclass Main { int x; }\n");
         assert_eq!(diagnostics(&db, file_id), vec![]);

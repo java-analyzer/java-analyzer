@@ -126,6 +126,8 @@ fn every_feature_table_entry_is_gated_at_its_boundary_levels() {
             "unnamed-variables",
             "class A { void f() { int _ = 1; } }",
         ),
+        ("module-imports", "import module java.base;\nclass A {}"),
+        ("compact-source-files", "int count = 1;\nvoid main() {}"),
     ];
 
     assert_eq!(

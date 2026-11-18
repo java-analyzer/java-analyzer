@@ -82,7 +82,7 @@ pub(super) fn skip_type(p: &Parser<'_, '_>, mut n: usize) -> Option<usize> {
 
 /// Skips balanced `<...>` starting at token `n`. Fails on any token a type argument list cannot
 /// contain.
-fn skip_type_args(p: &Parser<'_, '_>, mut n: usize) -> Option<usize> {
+pub(super) fn skip_type_args(p: &Parser<'_, '_>, mut n: usize) -> Option<usize> {
     let limit = n + MAX_SCAN;
     let mut depth = 0usize;
     loop {

@@ -1,6 +1,14 @@
+pub mod workspace;
+
 use std::sync::Arc;
 
 pub use syntax::{LanguageLevel, Parse, Release, SyntaxError, SyntaxNode};
+pub use workspace::{
+    extract_file_header, infer_workspace_layout, normalize_rel_path, DeltaSet, FileHeader,
+    ModuleData, ModuleDelta, ModuleDependency, ModuleHeader, ModuleId, ModuleTarget,
+    PackageMismatch, ResourceRoot, ResourceRootId, RootScope, SourceRoot, SourceRootId,
+    WorkspaceDelta, WorkspaceLayout,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FileId(pub u32);

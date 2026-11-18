@@ -96,3 +96,15 @@ IDENT "a" @ 1:1
 WHITESPACE "  \t" @ 1:2
 IDENT "b" @ 1:5
 WHITESPACE "\n" @ 1:6
+
+=====
+Shebang on first line only
+=====
+#!/usr/bin/env java --source 25
+class A {}
+---
+SHEBANG "#!/usr/bin/env java --source 25" @ 1:1
+CLASS_KW "class" @ 2:1
+IDENT "A" @ 2:7
+L_CURLY "{" @ 2:9
+R_CURLY "}" @ 2:10
