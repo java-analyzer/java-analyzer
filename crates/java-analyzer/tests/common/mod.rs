@@ -58,34 +58,60 @@ impl Client {
     }
 
     pub fn open(&self, text: &str) {
+        self.open_uri(URI, text);
+    }
+
+    pub fn open_uri(&self, uri: &str, text: &str) {
         self.notify(
             "textDocument/didOpen",
-            json!({ "textDocument": { "uri": URI, "languageId": "java", "version": 1, "text": text } }),
+            json!({ "textDocument": { "uri": uri, "languageId": "java", "version": 1, "text": text } }),
         );
     }
 
     pub fn change(&self, version: i32, text: &str) {
+        self.change_uri(URI, version, text);
+    }
+
+    pub fn change_uri(&self, uri: &str, version: i32, text: &str) {
         self.notify(
             "textDocument/didChange",
             json!({
-                "textDocument": { "uri": URI, "version": version },
+                "textDocument": { "uri": uri, "version": version },
                 "contentChanges": [{ "text": text }]
             }),
         );
     }
 
     pub fn close(&self) {
+        self.close_uri(URI);
+    }
+
+    pub fn close_uri(&self, uri: &str) {
         self.notify(
             "textDocument/didClose",
-            json!({ "textDocument": { "uri": URI } }),
+            json!({ "textDocument": { "uri": uri } }),
         );
     }
 
     pub fn hover(&mut self, line: u32, character: u32) -> Value {
+        self.hover_uri(URI, line, character)
+    }
+
+    pub fn hover_uri(&mut self, uri: &str, line: u32, character: u32) -> Value {
         self.request(
             "textDocument/hover",
             json!({
-                "textDocument": { "uri": URI },
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character }
+            }),
+        )
+    }
+
+    pub fn definition_uri(&mut self, uri: &str, line: u32, character: u32) -> Value {
+        self.request(
+            "textDocument/definition",
+            json!({
+                "textDocument": { "uri": uri },
                 "position": { "line": line, "character": character }
             }),
         )
@@ -93,6 +119,18 @@ impl Client {
 }
 
 pub fn start_server() -> (Client, thread::JoinHandle<()>) {
+    start_server_with_init(json!({ "capabilities": {} }))
+}
+
+pub fn start_server_with_root(root_uri: &str) -> (Client, thread::JoinHandle<()>) {
+    start_server_with_init(json!({
+        "rootUri": root_uri,
+        "workspaceFolders": [{ "uri": root_uri, "name": "workspace" }],
+        "capabilities": {}
+    }))
+}
+
+pub fn start_server_with_init(init_params: Value) -> (Client, thread::JoinHandle<()>) {
     let (server_conn, client_conn) = Connection::memory();
     let handle = thread::spawn(move || {
         java_analyzer::server::run(server_conn).expect("server failed");
@@ -101,8 +139,9 @@ pub fn start_server() -> (Client, thread::JoinHandle<()>) {
         conn: client_conn,
         next_id: 0,
     };
-    let init = client.request("initialize", json!({ "capabilities": {} }));
+    let init = client.request("initialize", init_params);
     assert_eq!(init["capabilities"]["hoverProvider"], json!(true));
+    assert_eq!(init["capabilities"]["definitionProvider"], json!(true));
     client.notify("initialized", json!({}));
     (client, handle)
 }

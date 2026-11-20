@@ -1,13 +1,43 @@
-use hir::{FileId, SourceDatabase};
+use hir::{DefDatabase, FileId, ResolvedSymbol, ResolvedSymbolKind, SourceDatabase};
 use syntax::{syntax_kind::SyntaxKind::*, SyntaxNode};
 
 pub use syntax::TextRange;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HoverResult {
     pub content: String,
 }
 
-pub fn hover(db: &dyn SourceDatabase, file_id: FileId, offset: u32) -> Option<HoverResult> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NavigationTarget {
+    pub file_id: FileId,
+    /// Range of the entire declaration.
+    pub full_range: TextRange,
+    /// Range of the declaration's identifier (`NAME`), used as cursor destination.
+    pub focus_range: TextRange,
+}
+
+pub fn goto_definition(
+    db: &dyn DefDatabase,
+    file_id: FileId,
+    offset: u32,
+) -> Option<NavigationTarget> {
+    let resolved = hir::resolve_at_offset(db, file_id, offset)?;
+    let (file_id, full_range, focus_range) = resolved.location()?;
+    Some(NavigationTarget {
+        file_id,
+        full_range,
+        focus_range,
+    })
+}
+
+pub fn hover(db: &dyn DefDatabase, file_id: FileId, offset: u32) -> Option<HoverResult> {
+    if let Some(resolved) = hir::resolve_at_offset(db, file_id, offset) {
+        return Some(HoverResult {
+            content: format_resolved_hover(&resolved),
+        });
+    }
+
     let syntax_node = db.syntax_tree(file_id);
 
     // Hover positions refer to the character under the pointer, so prefer the token that
@@ -23,6 +53,128 @@ pub fn hover(db: &dyn SourceDatabase, file_id: FileId, offset: u32) -> Option<Ho
         }),
         _ => None,
     }
+}
+
+fn format_resolved_hover(sym: &ResolvedSymbol) -> String {
+    match sym.kind {
+        ResolvedSymbolKind::Class
+        | ResolvedSymbolKind::Interface
+        | ResolvedSymbolKind::Enum
+        | ResolvedSymbolKind::Record
+        | ResolvedSymbolKind::Annotation => {
+            let kw = match sym.kind {
+                ResolvedSymbolKind::Class => "class",
+                ResolvedSymbolKind::Interface => "interface",
+                ResolvedSymbolKind::Enum => "enum",
+                ResolvedSymbolKind::Record => "record",
+                ResolvedSymbolKind::Annotation => "@interface",
+                _ => unreachable!(),
+            };
+            let tparams = sym.detail.as_deref().unwrap_or("");
+            format!("```java\n{kw} {}{tparams}\n```", sym.qualified_name)
+        }
+        ResolvedSymbolKind::Field | ResolvedSymbolKind::RecordComponent => match &sym.detail {
+            Some(ty) => format!("```java\n{ty} {}\n```", sym.qualified_name),
+            None => format!("```java\n{}\n```", sym.qualified_name),
+        },
+        ResolvedSymbolKind::Method => {
+            let sig = format_method_signature(&sym.qualified_name, sym.detail.as_deref());
+            format!("```java\n{sig}\n```")
+        }
+        ResolvedSymbolKind::Constructor => {
+            let params = sym.detail.as_deref().unwrap_or("()");
+            format!("```java\n{}{params}\n```", sym.qualified_name)
+        }
+        ResolvedSymbolKind::EnumConstant => format!("```java\n{}\n```", sym.qualified_name),
+        ResolvedSymbolKind::LocalVar
+        | ResolvedSymbolKind::Param
+        | ResolvedSymbolKind::LambdaParam
+        | ResolvedSymbolKind::ForEachVar
+        | ResolvedSymbolKind::CatchParam
+        | ResolvedSymbolKind::ResourceVar
+        | ResolvedSymbolKind::PatternVar => {
+            let ty = sym.detail.as_deref().unwrap_or("var");
+            let label = match sym.kind {
+                ResolvedSymbolKind::LocalVar => "local variable",
+                ResolvedSymbolKind::Param => "parameter",
+                ResolvedSymbolKind::LambdaParam => "lambda parameter",
+                ResolvedSymbolKind::ForEachVar => "for-each variable",
+                ResolvedSymbolKind::CatchParam => "catch parameter",
+                ResolvedSymbolKind::ResourceVar => "resource variable",
+                ResolvedSymbolKind::PatternVar => "pattern variable",
+                _ => unreachable!(),
+            };
+            format!("```java\n{ty} {}\n```\n{label}", sym.name)
+        }
+        ResolvedSymbolKind::TypeParam => match &sym.detail {
+            Some(bounds) => format!("```java\ntype parameter {} {bounds}\n```", sym.name),
+            None => format!("```java\ntype parameter {}\n```", sym.name),
+        },
+        ResolvedSymbolKind::Package => format!("```java\npackage {}\n```", sym.qualified_name),
+    }
+}
+
+fn format_method_signature(qualified_name: &str, detail: Option<&str>) -> String {
+    let Some(detail) = detail else {
+        return format!("{qualified_name}()");
+    };
+    if let Some(paren_idx) = trailing_paren_group_start(detail) {
+        let ret = detail[..paren_idx].trim();
+        let params = detail[paren_idx..].trim_end();
+        if ret.is_empty() {
+            format!("{qualified_name}{params}")
+        } else {
+            format!("{ret} {qualified_name}{params}")
+        }
+    } else {
+        format!("{detail} {qualified_name}()")
+    }
+}
+
+fn trailing_paren_group_start(s: &str) -> Option<usize> {
+    let trimmed = s.trim_end();
+    if !trimmed.ends_with(')') {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    let mut group_start = None;
+    let mut last_group = None;
+    let mut in_quote: Option<char> = None;
+    let mut escaped = false;
+
+    for (idx, ch) in trimmed.char_indices() {
+        if let Some(q) = in_quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == q {
+                in_quote = None;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' | '\'' => in_quote = Some(ch),
+            '(' => {
+                if depth == 0 {
+                    group_start = Some(idx);
+                }
+                depth += 1;
+            }
+            ')' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    last_group = group_start.take().map(|start| (start, idx));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let (start, end) = last_group?;
+    (end == trimmed.len() - 1).then_some(start)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,7 +370,32 @@ mod tests {
         let file_id = FileId(1);
         db.set_file_text(file_id, Arc::new(text.to_string()));
         db.set_file_language_level(file_id, hir::LanguageLevel::latest());
+        db.set_workspace_files(Arc::new(vec![file_id]));
         (db, file_id)
+    }
+
+    fn db_with_files(files: &[(u32, &str)]) -> RootDatabase {
+        let mut db = RootDatabase::default();
+        let mut ids = Vec::with_capacity(files.len());
+        for &(id, text) in files {
+            let file_id = FileId(id);
+            db.set_file_text(file_id, Arc::new(text.to_string()));
+            db.set_file_language_level(file_id, hir::LanguageLevel::latest());
+            ids.push(file_id);
+        }
+        db.set_workspace_files(Arc::new(ids));
+        db
+    }
+
+    fn cursor(text: &str, marker: &str) -> u32 {
+        let idx = text
+            .find(marker)
+            .unwrap_or_else(|| panic!("marker not found: {marker:?}"));
+        (idx + marker.len()) as u32
+    }
+
+    fn slice(text: &str, range: TextRange) -> &str {
+        &text[usize::from(range.start())..usize::from(range.end())]
     }
 
     #[test]
@@ -240,11 +417,202 @@ mod tests {
 
     #[test]
     fn test_hover_ident() {
-        let (db, file_id) = db_with("class Main { }");
+        let (db, file_id) = db_with("class Main { String s; }");
 
-        // Offset 7 is inside 'Main'
-        let hover = hover(&db, file_id, 7).expect("Hover should return result");
-        assert_eq!(hover.content, "Identifier `Main`");
+        // Offset 7 is inside declared class 'Main' -> semantic hover.
+        let main_hover = hover(&db, file_id, 7).expect("Hover should return result");
+        assert_eq!(main_hover.content, "```java\nclass Main\n```");
+
+        // Offset 13 is inside external unresolved 'String' -> fallback identifier hover.
+        let string_hover = hover(&db, file_id, 13).expect("Hover should return fallback");
+        assert_eq!(string_hover.content, "Identifier `String`");
+    }
+
+    #[test]
+    fn test_hover_semantic_symbols() {
+        let model = "\
+package com.example;
+public class Box<T> {
+    public int size;
+    public int compute(int x, String y) { return x; }
+}
+";
+        let app = "\
+package com.app;
+import /*imp_pkg*/com.example./*imp_cls*/Box;
+public class App<E extends Number> {
+    private int count;
+    void run(Box<String> /*param*/param) {
+        int /*local*/local = /*field*/count;
+        int s = /*use_param*/param./*mem_field*/size;
+        int c = param./*mem_method*/compute(/*use_local*/local, \"\");
+        String unknown = null;
+    }
+}
+";
+        let db = db_with_files(&[(1, model), (2, app)]);
+        let app_id = FileId(2);
+
+        let cls_hover = hover(&db, app_id, cursor(app, "/*imp_cls*/")).unwrap();
+        assert_eq!(cls_hover.content, "```java\nclass com.example.Box<T>\n```");
+
+        let pkg_hover = hover(&db, app_id, cursor(app, "/*imp_pkg*/")).unwrap();
+        assert_eq!(pkg_hover.content, "```java\npackage com\n```");
+
+        let field_hover = hover(&db, app_id, cursor(app, "/*mem_field*/")).unwrap();
+        assert_eq!(
+            field_hover.content,
+            "```java\nint com.example.Box.size\n```"
+        );
+
+        let method_hover = hover(&db, app_id, cursor(app, "/*mem_method*/")).unwrap();
+        assert_eq!(
+            method_hover.content,
+            "```java\nint com.example.Box.compute(int x, String y)\n```"
+        );
+
+        let local_hover = hover(&db, app_id, cursor(app, "/*use_local*/")).unwrap();
+        assert_eq!(
+            local_hover.content,
+            "```java\nint local\n```\nlocal variable"
+        );
+
+        let param_hover = hover(&db, app_id, cursor(app, "/*use_param*/")).unwrap();
+        assert_eq!(
+            param_hover.content,
+            "```java\nBox<String> param\n```\nparameter"
+        );
+
+        let own_field_hover = hover(&db, app_id, cursor(app, "/*field*/")).unwrap();
+        assert_eq!(own_field_hover.content, "```java\nint com.app.App.count\n```");
+    }
+
+    #[test]
+    fn test_hover_method_with_return_type_annotation_parens() {
+        let text = "\
+class C {
+    <T> @Anno(\"x\") String /*m1*/foo(int a) { return \"\"; }
+    java.util.List<@Anno(\"x\") String> /*m2*/bar(int a) { return null; }
+}
+";
+        let (db, file_id) = db_with(text);
+
+        let h1 = hover(&db, file_id, cursor(text, "/*m1*/")).unwrap();
+        assert_eq!(
+            h1.content,
+            "```java\n@Anno(\"x\") String C.foo(int a)\n```"
+        );
+
+        let h2 = hover(&db, file_id, cursor(text, "/*m2*/")).unwrap();
+        assert_eq!(
+            h2.content,
+            "```java\njava.util.List<@Anno(\"x\") String> C.bar(int a)\n```"
+        );
+
+        assert_eq!(
+            format_method_signature("C.foo", Some("@Anno(\"x\") String (int a)")),
+            "@Anno(\"x\") String C.foo(int a)"
+        );
+        assert_eq!(
+            format_method_signature("C.foo", Some("@Anno(\")\") String (@Param(\"(\") int a)")),
+            "@Anno(\")\") String C.foo(@Param(\"(\") int a)"
+        );
+    }
+
+    #[test]
+    fn goto_definition_within_single_file() {
+        let text = "\
+class Calc {
+    int base = 10;
+    int helper(int v) { return v + 1; }
+    int compute(int param) {
+        int local = /*use_param*/param + /*use_field*/base;
+        return /*use_method*/helper(/*use_local*/local);
+    }
+}
+";
+        let (db, file_id) = db_with(text);
+
+        let param_target = goto_definition(&db, file_id, cursor(text, "/*use_param*/")).unwrap();
+        assert_eq!(param_target.file_id, file_id);
+        assert_eq!(slice(text, param_target.focus_range), "param");
+        assert_eq!(slice(text, param_target.full_range), "int param");
+
+        let field_target = goto_definition(&db, file_id, cursor(text, "/*use_field*/")).unwrap();
+        assert_eq!(field_target.file_id, file_id);
+        assert_eq!(slice(text, field_target.focus_range), "base");
+        assert_eq!(slice(text, field_target.full_range), "base = 10");
+
+        let method_target = goto_definition(&db, file_id, cursor(text, "/*use_method*/")).unwrap();
+        assert_eq!(method_target.file_id, file_id);
+        assert_eq!(slice(text, method_target.focus_range), "helper");
+        assert!(slice(text, method_target.full_range).starts_with("int helper(int v)"));
+
+        let local_target = goto_definition(&db, file_id, cursor(text, "/*use_local*/")).unwrap();
+        assert_eq!(local_target.file_id, file_id);
+        assert_eq!(slice(text, local_target.focus_range), "local");
+    }
+
+    #[test]
+    fn goto_definition_across_files_import_and_same_package() {
+        let helper = "\
+package com.util;
+public class Helper {
+    public int value;
+    public int work() { return value; }
+}
+";
+        let peer = "\
+package com.app;
+public class Peer {
+    public void ping() {}
+}
+";
+        let app = "\
+package com.app;
+import com.util./*imp*/Helper;
+public class App {
+    void run(/*peer*/Peer p) {
+        /*cls*/Helper h = new /*ctor_cls*/Helper();
+        int v = h./*field*/value;
+        int w = h./*method*/work();
+        p./*peer_method*/ping();
+    }
+}
+";
+        let helper_id = FileId(1);
+        let peer_id = FileId(2);
+        let app_id = FileId(3);
+        let db = db_with_files(&[(1, helper), (2, peer), (3, app)]);
+
+        let imp_target = goto_definition(&db, app_id, cursor(app, "/*imp*/")).unwrap();
+        assert_eq!(imp_target.file_id, helper_id);
+        assert_eq!(slice(helper, imp_target.focus_range), "Helper");
+
+        let cls_target = goto_definition(&db, app_id, cursor(app, "/*cls*/")).unwrap();
+        assert_eq!(cls_target.file_id, helper_id);
+        assert_eq!(slice(helper, cls_target.focus_range), "Helper");
+
+        let new_target = goto_definition(&db, app_id, cursor(app, "/*ctor_cls*/")).unwrap();
+        assert_eq!(new_target.file_id, helper_id);
+        assert_eq!(slice(helper, new_target.focus_range), "Helper");
+
+        let field_target = goto_definition(&db, app_id, cursor(app, "/*field*/")).unwrap();
+        assert_eq!(field_target.file_id, helper_id);
+        assert_eq!(slice(helper, field_target.focus_range), "value");
+
+        let method_target = goto_definition(&db, app_id, cursor(app, "/*method*/")).unwrap();
+        assert_eq!(method_target.file_id, helper_id);
+        assert_eq!(slice(helper, method_target.focus_range), "work");
+
+        let peer_target = goto_definition(&db, app_id, cursor(app, "/*peer*/")).unwrap();
+        assert_eq!(peer_target.file_id, peer_id);
+        assert_eq!(slice(peer, peer_target.focus_range), "Peer");
+
+        let peer_method_target =
+            goto_definition(&db, app_id, cursor(app, "/*peer_method*/")).unwrap();
+        assert_eq!(peer_method_target.file_id, peer_id);
+        assert_eq!(slice(peer, peer_method_target.focus_range), "ping");
     }
 
     /// Renders the outline as indented `Kind name detail` lines.

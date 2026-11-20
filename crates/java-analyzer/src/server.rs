@@ -1,17 +1,24 @@
-use std::{collections::HashMap, error::Error, path::Path, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    error::Error,
+    fs,
+    path::Path,
+    sync::Arc,
+};
 
-use hir::{normalize_rel_path, FileId, RootDatabase, SourceDatabase};
+use hir::{normalize_rel_path, DefDatabase, FileId, RootDatabase, SourceDatabase};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::{
     notification::{
         DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
         PublishDiagnostics,
     },
-    request::{DocumentSymbolRequest, HoverRequest, Request as _},
-    DiagnosticSeverity, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, Hover,
-    HoverContents, HoverParams, HoverProviderCapability, InitializeParams, MarkupContent,
-    MarkupKind, OneOf, PublishDiagnosticsParams, ServerCapabilities, SymbolKind,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+    request::{DocumentSymbolRequest, GotoDefinition, HoverRequest, Request as _},
+    DiagnosticSeverity, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
+    HoverProviderCapability, InitializeParams, Location, MarkupContent, MarkupKind, OneOf,
+    PublishDiagnosticsParams, ServerCapabilities, SymbolKind, TextDocumentSyncCapability,
+    TextDocumentSyncKind, Url,
 };
 
 use crate::{
@@ -25,6 +32,8 @@ type BoxError = Box<dyn Error + Sync + Send>;
 pub struct GlobalState {
     db: RootDatabase,
     files: HashMap<Url, FileId>,
+    file_urls: HashMap<FileId, Url>,
+    open_files: HashSet<Url>,
     next_file_id: u32,
     workspace_probe: Option<WorkspaceProbe>,
 }
@@ -40,116 +49,167 @@ impl GlobalState {
         Self {
             db: RootDatabase::default(),
             files: HashMap::new(),
+            file_urls: HashMap::new(),
+            open_files: HashSet::new(),
             next_file_id: 0,
             workspace_probe: None,
         }
     }
 
     pub fn with_workspace(workspace_dir: &Path) -> Self {
-        Self {
-            db: RootDatabase::default(),
-            files: HashMap::new(),
-            next_file_id: 0,
-            workspace_probe: Some(probe_workspace(workspace_dir)),
-        }
+        let mut state = Self::new();
+        state.set_workspace_root(workspace_dir);
+        state
     }
 
     pub fn set_workspace_root(&mut self, workspace_dir: &Path) {
-        self.workspace_probe = Some(probe_workspace(workspace_dir));
+        let probe = probe_workspace(workspace_dir);
+        for rel_path in probe.file_paths.keys() {
+            let abs_path = probe.workspace_dir.join(rel_path);
+            let Ok(uri) = Url::from_file_path(&abs_path) else {
+                continue;
+            };
+            if !self.open_files.contains(&uri) {
+                if let Ok(text) = fs::read_to_string(&abs_path) {
+                    let (file_id, _) = self.ensure_file_id(&uri);
+                    let level = parse_shebang_level(&text)
+                        .unwrap_or_else(|| probe.language_level_for_path(&abs_path));
+                    self.db.set_file_language_level(file_id, level);
+                    self.db.set_file_text(file_id, Arc::new(text));
+                }
+            }
+        }
+        self.workspace_probe = Some(probe);
+        self.sync_workspace_files();
     }
 
     pub fn workspace_probe(&self) -> Option<&WorkspaceProbe> {
         self.workspace_probe.as_ref()
     }
 
-    pub fn set_text(&mut self, uri: &Url, text: String) {
-        let level = parse_shebang_level(&text)
+    fn ensure_file_id(&mut self, uri: &Url) -> (FileId, bool) {
+        if let Some(&id) = self.files.get(uri) {
+            return (id, false);
+        }
+        let id = FileId(self.next_file_id);
+        self.next_file_id += 1;
+        self.files.insert(uri.clone(), id);
+        self.file_urls.insert(id, uri.clone());
+        (id, true)
+    }
+
+    fn sync_workspace_files(&mut self) {
+        let mut ids: Vec<FileId> = self.file_urls.keys().copied().collect();
+        ids.sort();
+        self.db.set_workspace_files(Arc::new(ids));
+    }
+
+    fn language_level_for(&self, uri: &Url, text: &str) -> hir::LanguageLevel {
+        parse_shebang_level(text)
             .or_else(|| {
                 let probe = self.workspace_probe.as_ref()?;
                 let path = uri.to_file_path().ok()?;
                 Some(probe.language_level_for_path(&path))
             })
-            .unwrap_or_else(hir::LanguageLevel::latest);
-
-        let file_id = match self.files.get(uri) {
-            Some(&id) => id,
-            None => {
-                let id = FileId(self.next_file_id);
-                self.next_file_id += 1;
-                self.files.insert(uri.clone(), id);
-                id
-            }
-        };
-        self.db.set_file_language_level(file_id, level);
-        self.db.set_file_text(file_id, Arc::new(text));
+            .unwrap_or_else(hir::LanguageLevel::latest)
     }
 
-    pub fn close(&mut self, uri: &Url) {
-        if let Some(file_id) = self.files.remove(uri) {
-            // Free the text; the FileId is never reused.
-            self.db.set_file_text(file_id, Arc::new(String::new()));
+    pub fn set_text(&mut self, uri: &Url, text: String) {
+        let level = self.language_level_for(uri, &text);
+        let (file_id, is_new) = self.ensure_file_id(uri);
+        self.open_files.insert(uri.clone());
+        self.db.set_file_language_level(file_id, level);
+        self.db.set_file_text(file_id, Arc::new(text));
+        if is_new {
+            self.sync_workspace_files();
         }
     }
 
+    pub fn close(&mut self, uri: &Url) {
+        self.open_files.remove(uri);
+        let Some(&file_id) = self.files.get(uri) else {
+            return;
+        };
+
+        if let Ok(path) = uri.to_file_path() {
+            if let Ok(disk_text) = fs::read_to_string(&path) {
+                let level = self.language_level_for(uri, &disk_text);
+                self.db.set_file_language_level(file_id, level);
+                self.db.set_file_text(file_id, Arc::new(disk_text));
+                return;
+            }
+        }
+
+        // Non-disk / deleted file: drop it from the workspace index and release its text.
+        self.files.remove(uri);
+        self.file_urls.remove(&file_id);
+        self.db.set_file_text(file_id, Arc::new(String::new()));
+        self.sync_workspace_files();
+    }
+
     pub fn diagnostics(&self, uri: &Url, version: Option<i32>) -> PublishDiagnosticsParams {
-        let mut diagnostics: Vec<lsp_types::Diagnostic> = match self.files.get(uri) {
-            Some(&file_id) => {
-                let text = self.db.file_text(file_id);
-                let mut diags: Vec<lsp_types::Diagnostic> = ide::diagnostics(&self.db, file_id)
-                    .into_iter()
-                    .map(|d| lsp_types::Diagnostic {
-                        range: text_range_to_range(
-                            &text,
-                            d.range.start().into(),
-                            d.range.end().into(),
-                        ),
-                        severity: Some(match d.severity {
-                            ide::Severity::Error => DiagnosticSeverity::ERROR,
-                        }),
-                        source: Some("java-analyzer".to_string()),
-                        message: d.message,
-                        ..Default::default()
-                    })
-                    .collect();
-
-                // Surface workspace-level diagnostics (PackageMismatch and multi-spec Conflicts)
-                if let Some(probe) = &self.workspace_probe {
-                    for conflict in &probe.conflicts {
-                        diags.push(lsp_types::Diagnostic {
-                            range: text_range_to_range(&text, 0, 0),
-                            severity: Some(DiagnosticSeverity::WARNING),
+        let mut diagnostics: Vec<lsp_types::Diagnostic> = if self.open_files.contains(uri) {
+            match self.files.get(uri) {
+                Some(&file_id) => {
+                    let text = self.db.file_text(file_id);
+                    let mut diags: Vec<lsp_types::Diagnostic> = ide::diagnostics(&self.db, file_id)
+                        .into_iter()
+                        .map(|d| lsp_types::Diagnostic {
+                            range: text_range_to_range(
+                                &text,
+                                d.range.start().into(),
+                                d.range.end().into(),
+                            ),
+                            severity: Some(match d.severity {
+                                ide::Severity::Error => DiagnosticSeverity::ERROR,
+                            }),
                             source: Some("java-analyzer".to_string()),
-                            message: conflict.diagnostic_message(),
+                            message: d.message,
                             ..Default::default()
-                        });
-                    }
+                        })
+                        .collect();
 
-                    if let Ok(file_path) = uri.to_file_path() {
-                        if let Ok(rel) = file_path.strip_prefix(&probe.workspace_dir) {
-                            let norm = normalize_rel_path(&rel.to_string_lossy());
-                            let syntax_tree = self.db.syntax_tree(file_id);
-                            if let Some(pkg_diag) =
-                                probe.layout.check_file_package(file_id, &norm, &syntax_tree)
-                            {
-                                diags.push(lsp_types::Diagnostic {
-                                    range: text_range_to_range(
-                                        &text,
-                                        pkg_diag.range.start().into(),
-                                        pkg_diag.range.end().into(),
-                                    ),
-                                    severity: Some(DiagnosticSeverity::ERROR),
-                                    source: Some("java-analyzer".to_string()),
-                                    message: pkg_diag.message(),
-                                    ..Default::default()
-                                });
+                    // Surface workspace-level diagnostics (PackageMismatch and multi-spec Conflicts)
+                    if let Some(probe) = &self.workspace_probe {
+                        for conflict in &probe.conflicts {
+                            diags.push(lsp_types::Diagnostic {
+                                range: text_range_to_range(&text, 0, 0),
+                                severity: Some(DiagnosticSeverity::WARNING),
+                                source: Some("java-analyzer".to_string()),
+                                message: conflict.diagnostic_message(),
+                                ..Default::default()
+                            });
+                        }
+
+                        if let Ok(file_path) = uri.to_file_path() {
+                            if let Ok(rel) = file_path.strip_prefix(&probe.workspace_dir) {
+                                let norm = normalize_rel_path(&rel.to_string_lossy());
+                                let syntax_tree = self.db.syntax_tree(file_id);
+                                if let Some(pkg_diag) =
+                                    probe.layout.check_file_package(file_id, &norm, &syntax_tree)
+                                {
+                                    diags.push(lsp_types::Diagnostic {
+                                        range: text_range_to_range(
+                                            &text,
+                                            pkg_diag.range.start().into(),
+                                            pkg_diag.range.end().into(),
+                                        ),
+                                        severity: Some(DiagnosticSeverity::ERROR),
+                                        source: Some("java-analyzer".to_string()),
+                                        message: pkg_diag.message(),
+                                        ..Default::default()
+                                    });
+                                }
                             }
                         }
                     }
-                }
 
-                diags
+                    diags
+                }
+                None => Vec::new(),
             }
-            None => Vec::new(),
+        } else {
+            Vec::new()
         };
         diagnostics.dedup_by(|a, b| a.range == b.range && a.message == b.message);
         PublishDiagnosticsParams {
@@ -183,12 +243,32 @@ impl GlobalState {
             range: None,
         })
     }
+
+    fn goto_definition(&self, params: GotoDefinitionParams) -> Option<GotoDefinitionResponse> {
+        let pos = params.text_document_position_params;
+        let file_id = *self.files.get(&pos.text_document.uri)?;
+        let text = self.db.file_text(file_id);
+        let offset = position_to_offset(&text, pos.position)?;
+        let target = ide::goto_definition(&self.db, file_id, offset)?;
+        let target_uri = self.file_urls.get(&target.file_id)?.clone();
+        let target_text = self.db.file_text(target.file_id);
+        let range = text_range_to_range(
+            &target_text,
+            target.focus_range.start().into(),
+            target.focus_range.end().into(),
+        );
+        Some(GotoDefinitionResponse::Scalar(Location {
+            uri: target_uri,
+            range,
+        }))
+    }
 }
 
 pub fn capabilities() -> ServerCapabilities {
     ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
+        definition_provider: Some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
         ..Default::default()
     }
@@ -267,6 +347,10 @@ fn handle_request(state: &GlobalState, req: Request) -> Response {
     match req.method.as_str() {
         HoverRequest::METHOD => match cast_request::<HoverRequest>(req) {
             Ok((id, params)) => Response::new_ok(id, state.hover(params)),
+            Err(response) => response,
+        },
+        GotoDefinition::METHOD => match cast_request::<GotoDefinition>(req) {
+            Ok((id, params)) => Response::new_ok(id, state.goto_definition(params)),
             Err(response) => response,
         },
         DocumentSymbolRequest::METHOD => match cast_request::<DocumentSymbolRequest>(req) {
