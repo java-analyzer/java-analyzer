@@ -1,36 +1,25 @@
-use std::env;
-
-use java_analyzer::cli::{help_text, parse_cli_args, run_configure, run_inspect, CliCommand};
+use clap::Parser;
+use java_analyzer::cli::{run_configure, run_inspect, Cli, Command};
 use lsp_server::Connection;
 
 fn main() -> Result<(), Box<dyn std::error::Error + Sync + Send>> {
-    let command = match parse_cli_args(env::args().skip(1)) {
-        Ok(cmd) => cmd,
-        Err(err) => {
-            eprintln!("error: {err}");
-            std::process::exit(2);
-        }
-    };
+    let cli = Cli::parse();
 
-    match command {
-        CliCommand::Help => {
-            print!("{}", help_text());
-            Ok(())
-        }
-        CliCommand::Inspect(args) => {
-            run_inspect(args)?;
-            Ok(())
-        }
-        CliCommand::Configure(args) => {
-            run_configure(args)?;
-            Ok(())
-        }
-        CliCommand::Lsp => {
+    match cli.command {
+        None | Some(Command::Lsp) => {
             eprintln!("Starting java-analyzer LSP server...");
             let (connection, io_threads) = Connection::stdio();
             java_analyzer::server::run(connection)?;
             io_threads.join()?;
             eprintln!("java-analyzer LSP server shut down");
+            Ok(())
+        }
+        Some(Command::Inspect(args)) => {
+            run_inspect(args)?;
+            Ok(())
+        }
+        Some(Command::Configure(args)) => {
+            run_configure(args)?;
             Ok(())
         }
     }

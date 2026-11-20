@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
 };
 
-use hir::{normalize_rel_path, DefDatabase, FileId, RootDatabase, SourceDatabase};
+use hir::{normalize_rel_path, FileId, RootDatabase, SourceDatabase};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::{
     notification::{
@@ -18,11 +18,11 @@ use lsp_types::{
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
     HoverProviderCapability, InitializeParams, Location, MarkupContent, MarkupKind, OneOf,
     PublishDiagnosticsParams, ServerCapabilities, SymbolKind, TextDocumentSyncCapability,
-    TextDocumentSyncKind, Url,
+    TextDocumentSyncKind, Uri,
 };
 
 use crate::{
-    convert::{position_to_offset, text_range_to_range},
+    convert::{path_to_uri, position_to_offset, text_range_to_range, uri_to_path},
     workspace_config::{parse_shebang_level, probe_workspace, WorkspaceProbe},
 };
 
@@ -31,9 +31,9 @@ type BoxError = Box<dyn Error + Sync + Send>;
 /// All mutable server state. Lives on the main loop thread only.
 pub struct GlobalState {
     db: RootDatabase,
-    files: HashMap<Url, FileId>,
-    file_urls: HashMap<FileId, Url>,
-    open_files: HashSet<Url>,
+    files: HashMap<Uri, FileId>,
+    file_urls: HashMap<FileId, Uri>,
+    open_files: HashSet<Uri>,
     next_file_id: u32,
     workspace_probe: Option<WorkspaceProbe>,
 }
@@ -66,7 +66,7 @@ impl GlobalState {
         let probe = probe_workspace(workspace_dir);
         for rel_path in probe.file_paths.keys() {
             let abs_path = probe.workspace_dir.join(rel_path);
-            let Ok(uri) = Url::from_file_path(&abs_path) else {
+            let Some(uri) = path_to_uri(&abs_path) else {
                 continue;
             };
             if !self.open_files.contains(&uri) {
@@ -87,7 +87,7 @@ impl GlobalState {
         self.workspace_probe.as_ref()
     }
 
-    fn ensure_file_id(&mut self, uri: &Url) -> (FileId, bool) {
+    fn ensure_file_id(&mut self, uri: &Uri) -> (FileId, bool) {
         if let Some(&id) = self.files.get(uri) {
             return (id, false);
         }
@@ -104,17 +104,17 @@ impl GlobalState {
         self.db.set_workspace_files(Arc::new(ids));
     }
 
-    fn language_level_for(&self, uri: &Url, text: &str) -> hir::LanguageLevel {
+    fn language_level_for(&self, uri: &Uri, text: &str) -> hir::LanguageLevel {
         parse_shebang_level(text)
             .or_else(|| {
                 let probe = self.workspace_probe.as_ref()?;
-                let path = uri.to_file_path().ok()?;
+                let path = uri_to_path(uri)?;
                 Some(probe.language_level_for_path(&path))
             })
             .unwrap_or_else(hir::LanguageLevel::latest)
     }
 
-    pub fn set_text(&mut self, uri: &Url, text: String) {
+    pub fn set_text(&mut self, uri: &Uri, text: String) {
         let level = self.language_level_for(uri, &text);
         let (file_id, is_new) = self.ensure_file_id(uri);
         self.open_files.insert(uri.clone());
@@ -125,13 +125,13 @@ impl GlobalState {
         }
     }
 
-    pub fn close(&mut self, uri: &Url) {
+    pub fn close(&mut self, uri: &Uri) {
         self.open_files.remove(uri);
         let Some(&file_id) = self.files.get(uri) else {
             return;
         };
 
-        if let Ok(path) = uri.to_file_path() {
+        if let Some(path) = uri_to_path(uri) {
             if let Ok(disk_text) = fs::read_to_string(&path) {
                 let level = self.language_level_for(uri, &disk_text);
                 self.db.set_file_language_level(file_id, level);
@@ -147,7 +147,7 @@ impl GlobalState {
         self.sync_workspace_files();
     }
 
-    pub fn diagnostics(&self, uri: &Url, version: Option<i32>) -> PublishDiagnosticsParams {
+    pub fn diagnostics(&self, uri: &Uri, version: Option<i32>) -> PublishDiagnosticsParams {
         let mut diagnostics: Vec<lsp_types::Diagnostic> = if self.open_files.contains(uri) {
             match self.files.get(uri) {
                 Some(&file_id) => {
@@ -181,7 +181,7 @@ impl GlobalState {
                             });
                         }
 
-                        if let Ok(file_path) = uri.to_file_path() {
+                        if let Some(file_path) = uri_to_path(uri) {
                             if let Ok(rel) = file_path.strip_prefix(&probe.workspace_dir) {
                                 let norm = normalize_rel_path(&rel.to_string_lossy());
                                 let syntax_tree = self.db.syntax_tree(file_id);
@@ -317,7 +317,7 @@ pub fn run(connection: Connection) -> Result<(), BoxError> {
             .map(|f| &f.uri)
             .or(init_params.root_uri.as_ref());
         if let Some(uri) = workspace_url {
-            if let Ok(dir) = uri.to_file_path() {
+            if let Some(dir) = uri_to_path(uri) {
                 state.set_workspace_root(&dir);
             }
         }
@@ -450,7 +450,7 @@ mod tests {
         fs::write(&bad_file, bad_text).unwrap();
 
         let mut state = GlobalState::with_workspace(&dir);
-        let uri = Url::from_file_path(&bad_file).unwrap();
+        let uri = path_to_uri(&bad_file).unwrap();
         state.set_text(&uri, bad_text.to_string());
 
         let pub_diags = state.diagnostics(&uri, Some(1));
@@ -496,7 +496,7 @@ mod tests {
         fs::write(&file_path, bad_text).unwrap();
 
         let mut state = GlobalState::with_workspace(&dir);
-        let uri = Url::from_file_path(&file_path).unwrap();
+        let uri = path_to_uri(&file_path).unwrap();
 
         // Remove package-info.java on disk after initial probe: if `set_text` re-probed disk,
         // it would lose the authoritative package-info knowledge.

@@ -29,8 +29,7 @@ impl Client {
         loop {
             match self.conn.receiver.recv().expect("server closed connection") {
                 Message::Response(resp) if resp.id == id => {
-                    assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
-                    return resp.result.unwrap_or(Value::Null);
+                    return resp.response_result.expect("unexpected error response");
                 }
                 _ => continue,
             }

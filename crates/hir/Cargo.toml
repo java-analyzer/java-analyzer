@@ -7,5 +7,5 @@ license.workspace = true
 description.workspace = true
 
 [dependencies]
-salsa = "0.16"
+salsa = "0.28"
 syntax = { path = "../syntax" }

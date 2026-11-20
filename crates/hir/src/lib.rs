@@ -2,7 +2,9 @@ pub mod resolve;
 pub mod symbols;
 pub mod workspace;
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
+
+use salsa::Setter as _;
 
 pub use resolve::{resolve_at_offset, LocalKind, ResolvedSymbol, ResolvedSymbolKind};
 pub use symbols::{
@@ -20,12 +22,45 @@ pub use workspace::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FileId(pub u32);
 
-#[salsa::query_group(SourceDatabaseStorage)]
+#[salsa::input]
+pub struct SourceFile {
+    pub file_id: FileId,
+    pub text: Arc<String>,
+    pub language_level: LanguageLevel,
+}
+
+#[salsa::input]
+pub struct WorkspaceFiles {
+    pub files: Arc<Vec<SourceFile>>,
+}
+
+#[salsa::tracked]
+fn parse_file(db: &dyn salsa::Database, file: SourceFile) -> Parse {
+    syntax::parse_with_level(&file.text(db), *file.language_level(db))
+}
+
+#[salsa::tracked]
+fn file_syntax_errors(db: &dyn salsa::Database, file: SourceFile) -> Arc<Vec<SyntaxError>> {
+    Arc::new(parse_file(db, file).errors().to_vec())
+}
+
+#[salsa::tracked]
+fn extract_symbols(db: &dyn salsa::Database, file: SourceFile) -> Arc<FileSymbols> {
+    let root = parse_file(db, file).syntax_node();
+    Arc::new(symbols::extract_file_symbols(*file.file_id(db), &root))
+}
+
+#[salsa::tracked]
+fn build_index(db: &dyn salsa::Database, workspace: WorkspaceFiles) -> Arc<WorkspaceIndex> {
+    let files = workspace.files(db);
+    let per_file: Vec<Arc<FileSymbols>> =
+        files.iter().map(|&f| extract_symbols(db, f).clone()).collect();
+    Arc::new(symbols::build_workspace_index(&per_file))
+}
+
 pub trait SourceDatabase: salsa::Database {
-    #[salsa::input]
     fn file_text(&self, file_id: FileId) -> Arc<String>;
 
-    #[salsa::input]
     fn file_language_level(&self, file_id: FileId) -> LanguageLevel;
 
     /// The parse result of a file. Cheap to clone; recomputed only when the file text or language
@@ -39,22 +74,8 @@ pub trait SourceDatabase: salsa::Database {
     fn syntax_errors(&self, file_id: FileId) -> Arc<Vec<SyntaxError>>;
 }
 
-fn parse(db: &dyn SourceDatabase, file_id: FileId) -> Parse {
-    syntax::parse_with_level(&db.file_text(file_id), db.file_language_level(file_id))
-}
-
-fn syntax_tree(db: &dyn SourceDatabase, file_id: FileId) -> SyntaxNode {
-    db.parse(file_id).syntax_node()
-}
-
-fn syntax_errors(db: &dyn SourceDatabase, file_id: FileId) -> Arc<Vec<SyntaxError>> {
-    Arc::new(db.parse(file_id).errors().to_vec())
-}
-
-#[salsa::query_group(DefDatabaseStorage)]
 pub trait DefDatabase: SourceDatabase {
     /// Ordered list of all `.java` files currently in the workspace.
-    #[salsa::input]
     fn workspace_files(&self) -> Arc<Vec<FileId>>;
 
     /// Declared package, imports, types, and members extracted from a single file.
@@ -64,33 +85,122 @@ pub trait DefDatabase: SourceDatabase {
     fn workspace_index(&self) -> Arc<WorkspaceIndex>;
 }
 
-fn file_symbols(db: &dyn DefDatabase, file_id: FileId) -> Arc<FileSymbols> {
-    let root = db.syntax_tree(file_id);
-    Arc::new(symbols::extract_file_symbols(file_id, &root))
-}
-
-fn workspace_index(db: &dyn DefDatabase) -> Arc<WorkspaceIndex> {
-    let file_ids = db.workspace_files();
-    let files: Vec<Arc<FileSymbols>> = file_ids.iter().map(|&id| db.file_symbols(id)).collect();
-    Arc::new(symbols::build_workspace_index(&files))
-}
-
-#[salsa::database(SourceDatabaseStorage, DefDatabaseStorage)]
+#[salsa::db]
 pub struct RootDatabase {
     storage: salsa::Storage<Self>,
+    files: HashMap<FileId, SourceFile>,
+    workspace: Option<WorkspaceFiles>,
 }
 
 impl Default for RootDatabase {
     fn default() -> Self {
-        let mut db = Self {
+        Self {
             storage: salsa::Storage::default(),
-        };
-        db.set_workspace_files(Arc::new(Vec::new()));
-        db
+            files: HashMap::new(),
+            workspace: None,
+        }
     }
 }
 
+#[salsa::db]
 impl salsa::Database for RootDatabase {}
+
+impl RootDatabase {
+    fn source_file(&self, file_id: FileId) -> SourceFile {
+        *self
+            .files
+            .get(&file_id)
+            .unwrap_or_else(|| panic!("unknown file id: {file_id:?}"))
+    }
+
+    fn ensure_source_file(&mut self, file_id: FileId) -> SourceFile {
+        if let Some(&file) = self.files.get(&file_id) {
+            return file;
+        }
+        let file = SourceFile::new(
+            self,
+            file_id,
+            Arc::new(String::new()),
+            LanguageLevel::latest(),
+        );
+        self.files.insert(file_id, file);
+        file
+    }
+
+    pub fn set_file_text(&mut self, file_id: FileId, text: Arc<String>) {
+        if let Some(&file) = self.files.get(&file_id) {
+            file.set_text(self).to(text);
+        } else {
+            let file = SourceFile::new(self, file_id, text, LanguageLevel::latest());
+            self.files.insert(file_id, file);
+        }
+    }
+
+    pub fn set_file_language_level(&mut self, file_id: FileId, level: LanguageLevel) {
+        if let Some(&file) = self.files.get(&file_id) {
+            file.set_language_level(self).to(level);
+        } else {
+            let file = SourceFile::new(self, file_id, Arc::new(String::new()), level);
+            self.files.insert(file_id, file);
+        }
+    }
+
+    pub fn set_workspace_files(&mut self, file_ids: Arc<Vec<FileId>>) {
+        let files: Arc<Vec<SourceFile>> = Arc::new(
+            file_ids
+                .iter()
+                .map(|&id| self.ensure_source_file(id))
+                .collect(),
+        );
+        if let Some(ws) = self.workspace {
+            ws.set_files(self).to(files);
+        } else {
+            self.workspace = Some(WorkspaceFiles::new(self, files));
+        }
+    }
+}
+
+impl SourceDatabase for RootDatabase {
+    fn file_text(&self, file_id: FileId) -> Arc<String> {
+        self.source_file(file_id).text(self).clone()
+    }
+
+    fn file_language_level(&self, file_id: FileId) -> LanguageLevel {
+        *self.source_file(file_id).language_level(self)
+    }
+
+    fn parse(&self, file_id: FileId) -> Parse {
+        parse_file(self, self.source_file(file_id)).clone()
+    }
+
+    fn syntax_tree(&self, file_id: FileId) -> SyntaxNode {
+        self.parse(file_id).syntax_node()
+    }
+
+    fn syntax_errors(&self, file_id: FileId) -> Arc<Vec<SyntaxError>> {
+        file_syntax_errors(self, self.source_file(file_id)).clone()
+    }
+}
+
+impl DefDatabase for RootDatabase {
+    fn workspace_files(&self) -> Arc<Vec<FileId>> {
+        match self.workspace {
+            Some(ws) => Arc::new(ws.files(self).iter().map(|&f| *f.file_id(self)).collect()),
+            None => Arc::new(Vec::new()),
+        }
+    }
+
+    fn file_symbols(&self, file_id: FileId) -> Arc<FileSymbols> {
+        extract_symbols(self, self.source_file(file_id)).clone()
+    }
+
+    fn workspace_index(&self) -> Arc<WorkspaceIndex> {
+        match self.workspace {
+            Some(ws) => build_index(self, ws).clone(),
+            None => Arc::new(WorkspaceIndex::default()),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -853,6 +963,8 @@ class LocalDecls {
     #[test]
     fn default_root_database_does_not_panic_on_workspace_queries() {
         let mut db = RootDatabase::default();
+        assert!(db.workspace_files().is_empty());
+
         let file_id = FileId(1);
         let text = "class Solo { int x; int y = /*r*/x; }";
         db.set_file_text(file_id, Arc::new(text.to_string()));
@@ -862,5 +974,31 @@ class LocalDecls {
         let res = resolve_at_offset(&db, file_id, cursor(text, "/*r*/")).unwrap();
         assert_eq!(res.kind, ResolvedSymbolKind::Field);
         assert_eq!(res.name, "x");
+    }
+
+    #[test]
+    fn workspace_files_updates_and_level_before_text() {
+        let mut db = RootDatabase::default();
+        let f1 = FileId(1);
+        let f2 = FileId(2);
+
+        db.set_file_language_level(f1, LanguageLevel::new(Release::JAVA_11, false));
+        db.set_file_text(f1, Arc::new("record R(int x) {}".to_string()));
+        assert_eq!(db.syntax_errors(f1).len(), 1);
+        assert_eq!(
+            db.file_language_level(f1),
+            LanguageLevel::new(Release::JAVA_11, false)
+        );
+
+        db.set_file_language_level(f2, LanguageLevel::latest());
+        db.set_file_text(f2, Arc::new("package p; class Keep {}".to_string()));
+
+        db.set_workspace_files(Arc::new(vec![f1, f2]));
+        assert_eq!(db.workspace_files().as_slice(), &[f1, f2]);
+        assert!(db.workspace_index().types_by_fqn.contains_key("p.Keep"));
+
+        db.set_workspace_files(Arc::new(vec![f1]));
+        assert_eq!(db.workspace_files().as_slice(), &[f1]);
+        assert!(!db.workspace_index().types_by_fqn.contains_key("p.Keep"));
     }
 }

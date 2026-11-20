@@ -11,6 +11,7 @@ use std::{
     sync::Arc,
 };
 
+use clap::{Args, Parser, Subcommand};
 use hir::{
     normalize_rel_path, DefDatabase, FileId, ModuleDependency, ModuleTarget, Release,
     RootDatabase, RootScope, SourceDatabase,
@@ -22,325 +23,176 @@ use crate::workspace_config::{
     WorkspaceProbe,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CliCommand {
-    /// Run the stdio LSP server (default when invoked with no arguments or `lsp`).
+#[derive(Debug, Parser)]
+#[command(
+    name = "java-analyzer",
+    version,
+    about = "A lightweight Java LSP server and workspace configurator"
+)]
+pub struct Cli {
+    /// Accepted for LSP clients that pass `--stdio` (default transport).
+    #[arg(long, hide = true)]
+    pub stdio: bool,
+
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum Command {
+    /// Start the Language Server Protocol server over stdio (default)
     Lsp,
-    /// Print CLI help message.
-    Help,
-    /// Run `java-analyzer inspect [--json] [--show-errors] [DIR]`.
+    /// Inspect inferred workspace structure, parse health, and symbol index
     Inspect(InspectArgs),
-    /// Run `java-analyzer configure [OPTIONS] [DIR]`.
+    /// Inspect, disambiguate, and configure a Java workspace
     Configure(ConfigureArgs),
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Args)]
 pub struct InspectArgs {
-    pub workspace_dir: Option<PathBuf>,
+    /// Emit machine-readable JSON summary
+    #[arg(long)]
     pub json: bool,
+
+    /// List files with syntax/parse errors
+    #[arg(long)]
     pub show_errors: bool,
-}
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ModuleDeltaArgs {
-    pub module_key: String,
-    pub include_sources: Vec<String>,
-    pub exclude_sources: Vec<String>,
-    pub include_resources: Vec<String>,
-    pub exclude_resources: Vec<String>,
-    pub include_deps: Vec<String>,
-    pub exclude_deps: Vec<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ConfigureArgs {
+    /// Workspace directory to inspect (defaults to current directory)
     pub workspace_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Args)]
+pub struct ConfigureArgs {
+    /// Pin the JDK installation directory
+    #[arg(long, value_name = "PATH")]
     pub jdk: Option<PathBuf>,
+
+    /// Pin the Java release version (8..=27)
+    #[arg(long, value_name = "N", value_parser = parse_release_arg)]
     pub release: Option<Release>,
-    pub preview: Option<bool>,
+
+    /// Enable Java preview features
+    #[arg(long, conflicts_with = "no_preview")]
+    pub preview: bool,
+
+    /// Disable Java preview features
+    #[arg(long, conflicts_with = "preview")]
+    pub no_preview: bool,
+
+    /// Disambiguate build tool (none, maven, gradle, ant, bazel, mill, sbt, elide, jbang, custom)
+    #[arg(long, value_name = "KIND", value_parser = parse_build_tool_arg)]
     pub build: Option<BuildToolKind>,
-    pub classpath_cmd: Vec<String>,
+
+    /// Set custom command to emit compile-time classpath
+    #[arg(long, value_name = "CMD")]
+    pub classpath_cmd: Option<String>,
+
+    /// Include an additional workspace module directory
+    #[arg(long = "include", value_name = "DIR")]
     pub include_modules: Vec<String>,
+
+    /// Exclude an auto-detected workspace module directory
+    #[arg(long = "exclude", value_name = "DIR")]
     pub exclude_modules: Vec<String>,
-    pub module_deltas: Vec<ModuleDeltaArgs>,
+
+    /// Target module for `--include-*` / `--exclude-*` flags
+    #[arg(long, default_value = ".", value_name = "PATH_OR_NAME")]
+    pub module: String,
+
+    /// Add a Java source root to the target module
+    #[arg(long, value_name = "DIR")]
+    pub include_source: Vec<String>,
+
+    /// Remove a Java source root from the target module
+    #[arg(long, value_name = "DIR")]
+    pub exclude_source: Vec<String>,
+
+    /// Add a resource root to the target module
+    #[arg(long, value_name = "DIR")]
+    pub include_resource: Vec<String>,
+
+    /// Remove a resource root from the target module
+    #[arg(long, value_name = "DIR")]
+    pub exclude_resource: Vec<String>,
+
+    /// Add a compile-time dependency (Maven coord, github:owner/repo#ref, path, or module)
+    #[arg(long, value_name = "SPEC")]
+    pub include_dep: Vec<String>,
+
+    /// Remove a compile-time dependency from the target module
+    #[arg(long, value_name = "SPEC")]
+    pub exclude_dep: Vec<String>,
+
+    /// Reconcile conflicting external version files (.java-version, .sdkmanrc, pom.xml, etc.)
+    #[arg(long)]
     pub reconcile: bool,
+
+    /// Print inferred workspace layout and minimal .java-analyzer.toml without writing
+    #[arg(long = "print", visible_alias = "dry-run")]
     pub print_only: bool,
+
+    /// Run non-interactively and write minimal .java-analyzer.toml if overrides are needed
+    #[arg(short = 'y', long)]
     pub yes: bool,
+
+    /// Workspace directory to configure (defaults to current directory)
+    pub workspace_dir: Option<PathBuf>,
 }
 
 impl ConfigureArgs {
+    pub fn preview_override(&self) -> Option<bool> {
+        if self.preview {
+            Some(true)
+        } else if self.no_preview {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    pub fn normalized_module_key(&self) -> String {
+        if self.module.is_empty() || self.module == "." {
+            ".".to_string()
+        } else if self.module.contains('/') {
+            normalize_rel_path(&self.module)
+        } else {
+            self.module.clone()
+        }
+    }
+
     pub fn has_explicit_mutation_flags(&self) -> bool {
         self.jdk.is_some()
             || self.release.is_some()
-            || self.preview.is_some()
+            || self.preview_override().is_some()
             || self.build.is_some()
-            || !self.classpath_cmd.is_empty()
+            || self
+                .classpath_cmd
+                .as_deref()
+                .is_some_and(|cmd| !cmd.trim().is_empty())
             || !self.include_modules.is_empty()
             || !self.exclude_modules.is_empty()
-            || !self.module_deltas.is_empty()
+            || !self.include_source.is_empty()
+            || !self.exclude_source.is_empty()
+            || !self.include_resource.is_empty()
+            || !self.exclude_resource.is_empty()
+            || !self.include_dep.is_empty()
+            || !self.exclude_dep.is_empty()
             || self.reconcile
     }
 }
 
-pub fn parse_cli_args<I, S>(args: I) -> Result<CliCommand, String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    let mut iter = args.into_iter().map(|s| s.as_ref().to_string());
-    let Some(first) = iter.next() else {
-        return Ok(CliCommand::Lsp);
-    };
-
-    match first.as_str() {
-        "lsp" | "--stdio" => Ok(CliCommand::Lsp),
-        "-h" | "--help" | "help" => Ok(CliCommand::Help),
-        "inspect" => {
-            let rest: Vec<String> = iter.collect();
-            parse_inspect_args(&rest)
-        }
-        "configure" => {
-            let rest: Vec<String> = iter.collect();
-            parse_configure_args(&rest)
-        }
-        other => Err(format!(
-            "Unknown subcommand or argument '{other}'. Run `java-analyzer --help` for usage."
-        )),
-    }
+fn parse_release_arg(s: &str) -> Result<Release, String> {
+    parse_version_string(s)
+        .ok_or_else(|| format!("Unsupported Java release '{s}' (expected 8..=27)"))
 }
 
-fn parse_inspect_args(args: &[String]) -> Result<CliCommand, String> {
-    let mut inspect = InspectArgs::default();
-    let mut i = 0;
-
-    while i < args.len() {
-        match args[i].as_str() {
-            "-h" | "--help" => return Ok(CliCommand::Help),
-            "--json" => {
-                inspect.json = true;
-                i += 1;
-            }
-            "--show-errors" => {
-                inspect.show_errors = true;
-                i += 1;
-            }
-            flag if flag.starts_with('-') => {
-                return Err(format!("Unknown option '{flag}' for `inspect`"));
-            }
-            dir => {
-                inspect.workspace_dir = Some(PathBuf::from(dir));
-                i += 1;
-            }
-        }
-    }
-
-    Ok(CliCommand::Inspect(inspect))
-}
-
-fn parse_configure_args(args: &[String]) -> Result<CliCommand, String> {
-    let mut cfg = ConfigureArgs::default();
-    let mut current_module = ".".to_string();
-    let mut i = 0;
-
-    while i < args.len() {
-        let arg = args[i].as_str();
-        match arg {
-            "-h" | "--help" => return Ok(CliCommand::Help),
-            "--print" | "--dry-run" => {
-                cfg.print_only = true;
-                i += 1;
-            }
-            "-y" | "--yes" => {
-                cfg.yes = true;
-                i += 1;
-            }
-            "--reconcile" => {
-                cfg.reconcile = true;
-                i += 1;
-            }
-            "--preview" => {
-                cfg.preview = Some(true);
-                i += 1;
-            }
-            "--no-preview" => {
-                cfg.preview = Some(false);
-                i += 1;
-            }
-            "--jdk" => {
-                let val = args.get(i + 1).ok_or("--jdk requires a <PATH> argument")?;
-                cfg.jdk = Some(PathBuf::from(val));
-                i += 2;
-            }
-            "--release" => {
-                let val = args
-                    .get(i + 1)
-                    .ok_or("--release requires a Java release number (8..=27)")?;
-                let rel = parse_version_string(val)
-                    .ok_or_else(|| format!("Unsupported Java release '{val}' (expected 8..=27)"))?;
-                cfg.release = Some(rel);
-                i += 2;
-            }
-            "--build" => {
-                let val = args
-                    .get(i + 1)
-                    .ok_or("--build requires a build tool kind (none, maven, gradle, ant, bazel, mill, sbt, elide, jbang, custom)")?;
-                let kind = parse_build_tool_kind(val)
-                    .ok_or_else(|| format!("Unknown build tool kind '{val}'"))?;
-                cfg.build = Some(kind);
-                i += 2;
-            }
-            "--classpath-cmd" => {
-                let val = args
-                    .get(i + 1)
-                    .ok_or("--classpath-cmd requires a command string")?;
-                cfg.classpath_cmd = val.split_whitespace().map(ToString::to_string).collect();
-                i += 2;
-            }
-            "--include" => {
-                let val = args
-                    .get(i + 1)
-                    .ok_or("--include requires a module directory path")?;
-                cfg.include_modules.push(normalize_rel_path(val));
-                i += 2;
-            }
-            "--exclude" => {
-                let val = args
-                    .get(i + 1)
-                    .ok_or("--exclude requires a module directory path")?;
-                cfg.exclude_modules.push(normalize_rel_path(val));
-                i += 2;
-            }
-            "--module" => {
-                let val = args
-                    .get(i + 1)
-                    .ok_or("--module requires a module relative path or JPMS name")?;
-                current_module = if val.contains('/') || val == "." {
-                    normalize_rel_path(val)
-                } else {
-                    val.clone()
-                };
-                i += 2;
-            }
-            "--include-source" => {
-                let val = args
-                    .get(i + 1)
-                    .ok_or("--include-source requires a directory path")?;
-                get_or_insert_mod_delta(&mut cfg.module_deltas, &current_module)
-                    .include_sources
-                    .push(normalize_rel_path(val));
-                i += 2;
-            }
-            "--exclude-source" => {
-                let val = args
-                    .get(i + 1)
-                    .ok_or("--exclude-source requires a directory path")?;
-                get_or_insert_mod_delta(&mut cfg.module_deltas, &current_module)
-                    .exclude_sources
-                    .push(normalize_rel_path(val));
-                i += 2;
-            }
-            "--include-resource" => {
-                let val = args
-                    .get(i + 1)
-                    .ok_or("--include-resource requires a directory path")?;
-                get_or_insert_mod_delta(&mut cfg.module_deltas, &current_module)
-                    .include_resources
-                    .push(normalize_rel_path(val));
-                i += 2;
-            }
-            "--exclude-resource" => {
-                let val = args
-                    .get(i + 1)
-                    .ok_or("--exclude-resource requires a directory path")?;
-                get_or_insert_mod_delta(&mut cfg.module_deltas, &current_module)
-                    .exclude_resources
-                    .push(normalize_rel_path(val));
-                i += 2;
-            }
-            "--include-dep" => {
-                let val = args
-                    .get(i + 1)
-                    .ok_or("--include-dep requires a dependency spec")?;
-                get_or_insert_mod_delta(&mut cfg.module_deltas, &current_module)
-                    .include_deps
-                    .push(val.clone());
-                i += 2;
-            }
-            "--exclude-dep" => {
-                let val = args
-                    .get(i + 1)
-                    .ok_or("--exclude-dep requires a dependency spec")?;
-                get_or_insert_mod_delta(&mut cfg.module_deltas, &current_module)
-                    .exclude_deps
-                    .push(val.clone());
-                i += 2;
-            }
-            flag if flag.starts_with('-') => {
-                return Err(format!("Unknown option '{flag}' for `configure`"));
-            }
-            dir => {
-                cfg.workspace_dir = Some(PathBuf::from(dir));
-                i += 1;
-            }
-        }
-    }
-
-    Ok(CliCommand::Configure(cfg))
-}
-
-fn get_or_insert_mod_delta<'a>(
-    deltas: &'a mut Vec<ModuleDeltaArgs>,
-    module_key: &str,
-) -> &'a mut ModuleDeltaArgs {
-    if let Some(pos) = deltas.iter().position(|d| d.module_key == module_key) {
-        return &mut deltas[pos];
-    }
-    deltas.push(ModuleDeltaArgs {
-        module_key: module_key.to_string(),
-        ..Default::default()
-    });
-    deltas.last_mut().unwrap()
-}
-
-pub fn help_text() -> &'static str {
-    "\
-java-analyzer - A lightweight Java LSP server and workspace configurator
-
-USAGE:
-    java-analyzer [lsp]
-    java-analyzer inspect [OPTIONS] [DIR]
-    java-analyzer configure [OPTIONS] [DIR]
-
-SUBCOMMANDS:
-    lsp          Start the Language Server Protocol server over stdio (default)
-    inspect      Probe workspace layout, check parse health, and print index summary
-    configure    Inspect, disambiguate, and configure a Java workspace
-
-INSPECT OPTIONS:
-    --json                       Emit machine-readable JSON summary
-    --show-errors                List files with syntax/parse errors
-    -h, --help                   Show this help message
-
-CONFIGURE OPTIONS:
-    --jdk <PATH>                 Pin the JDK installation directory
-    --release <N>                Pin the Java release version (8..=27)
-    --preview / --no-preview     Enable or disable Java preview features
-    --build <KIND>               Disambiguate build tool (none, maven, gradle, ant, bazel, mill, sbt, elide, jbang, custom)
-    --include <DIR>              Include an additional workspace module directory
-    --exclude <DIR>              Exclude an auto-detected workspace module directory
-    --module <PATH_OR_NAME>      Target module for subsequent --include-* / --exclude-* flags (default: \".\")
-    --include-source <DIR>       Add a Java source root to the target module
-    --exclude-source <DIR>       Remove a Java source root from the target module
-    --include-resource <DIR>     Add a resource root to the target module
-    --exclude-resource <DIR>     Remove a resource root from the target module
-    --include-dep <SPEC>         Add a compile-time dependency (Maven coord, github:owner/repo#ref, path, or module)
-    --exclude-dep <SPEC>         Remove a compile-time dependency from the target module
-    --classpath-cmd <CMD>        Set custom command to emit compile-time classpath
-    --reconcile                  Reconcile conflicting external version files (.java-version, .sdkmanrc, pom.xml, etc.)
-    --print, --dry-run           Print inferred workspace layout and minimal .java-analyzer.toml without writing
-    -y, --yes                    Run non-interactively and write minimal .java-analyzer.toml if overrides are needed
-    -h, --help                   Show this help message
-"
+fn parse_build_tool_arg(s: &str) -> Result<BuildToolKind, String> {
+    parse_build_tool_kind(s).ok_or_else(|| {
+        format!(
+            "Unknown build tool kind '{s}' (expected: none, maven, gradle, ant, bazel, mill, sbt, elide, jbang, custom)"
+        )
+    })
 }
 
 pub fn run_inspect(args: InspectArgs) -> io::Result<()> {
@@ -502,6 +354,25 @@ pub fn run_configure_with_io<R: BufRead, W: Write>(
     Ok(())
 }
 
+fn apply_delta_items(
+    items: &[String],
+    normalize: bool,
+    add_to: &mut Vec<String>,
+    remove_from: &mut Vec<String>,
+) {
+    for raw in items {
+        let val = if normalize {
+            normalize_rel_path(raw)
+        } else {
+            raw.clone()
+        };
+        if !add_to.contains(&val) {
+            add_to.push(val.clone());
+        }
+        remove_from.retain(|x| x != &val);
+    }
+}
+
 fn apply_cli_args_to_config(args: &ConfigureArgs, cfg: &mut ExplicitConfig) {
     if let Some(build) = args.build {
         cfg.build = Some(build);
@@ -512,62 +383,76 @@ fn apply_cli_args_to_config(args: &ConfigureArgs, cfg: &mut ExplicitConfig) {
     if let Some(rel) = args.release {
         cfg.release = Some(rel);
     }
-    if let Some(prev) = args.preview {
+    if let Some(prev) = args.preview_override() {
         cfg.preview = Some(prev);
     }
-    if !args.classpath_cmd.is_empty() {
-        cfg.classpath_command = args.classpath_cmd.clone();
+    if let Some(cmd) = &args.classpath_cmd {
+        let parts: Vec<String> = cmd.split_whitespace().map(ToString::to_string).collect();
+        if !parts.is_empty() {
+            cfg.classpath_command = parts;
+        }
     }
-    for inc in &args.include_modules {
-        if !cfg.delta.include.contains(inc) {
-            cfg.delta.include.push(inc.clone());
-        }
-        cfg.delta.exclude.retain(|x| x != inc);
-    }
-    for exc in &args.exclude_modules {
-        if !cfg.delta.exclude.contains(exc) {
-            cfg.delta.exclude.push(exc.clone());
-        }
-        cfg.delta.include.retain(|x| x != exc);
-    }
-    for md in &args.module_deltas {
-        let entry = cfg.delta.modules.entry(md.module_key.clone()).or_default();
-        for s in &md.include_sources {
-            if !entry.sources.include.contains(s) {
-                entry.sources.include.push(s.clone());
-            }
-            entry.sources.exclude.retain(|x| x != s);
-        }
-        for s in &md.exclude_sources {
-            if !entry.sources.exclude.contains(s) {
-                entry.sources.exclude.push(s.clone());
-            }
-            entry.sources.include.retain(|x| x != s);
-        }
-        for r in &md.include_resources {
-            if !entry.resources.include.contains(r) {
-                entry.resources.include.push(r.clone());
-            }
-            entry.resources.exclude.retain(|x| x != r);
-        }
-        for r in &md.exclude_resources {
-            if !entry.resources.exclude.contains(r) {
-                entry.resources.exclude.push(r.clone());
-            }
-            entry.resources.include.retain(|x| x != r);
-        }
-        for d in &md.include_deps {
-            if !entry.dependencies.include.contains(d) {
-                entry.dependencies.include.push(d.clone());
-            }
-            entry.dependencies.exclude.retain(|x| x != d);
-        }
-        for d in &md.exclude_deps {
-            if !entry.dependencies.exclude.contains(d) {
-                entry.dependencies.exclude.push(d.clone());
-            }
-            entry.dependencies.include.retain(|x| x != d);
-        }
+    apply_delta_items(
+        &args.include_modules,
+        true,
+        &mut cfg.delta.include,
+        &mut cfg.delta.exclude,
+    );
+    apply_delta_items(
+        &args.exclude_modules,
+        true,
+        &mut cfg.delta.exclude,
+        &mut cfg.delta.include,
+    );
+
+    let has_module_deltas = !args.include_source.is_empty()
+        || !args.exclude_source.is_empty()
+        || !args.include_resource.is_empty()
+        || !args.exclude_resource.is_empty()
+        || !args.include_dep.is_empty()
+        || !args.exclude_dep.is_empty();
+    if has_module_deltas {
+        let entry = cfg
+            .delta
+            .modules
+            .entry(args.normalized_module_key())
+            .or_default();
+        apply_delta_items(
+            &args.include_source,
+            true,
+            &mut entry.sources.include,
+            &mut entry.sources.exclude,
+        );
+        apply_delta_items(
+            &args.exclude_source,
+            true,
+            &mut entry.sources.exclude,
+            &mut entry.sources.include,
+        );
+        apply_delta_items(
+            &args.include_resource,
+            true,
+            &mut entry.resources.include,
+            &mut entry.resources.exclude,
+        );
+        apply_delta_items(
+            &args.exclude_resource,
+            true,
+            &mut entry.resources.exclude,
+            &mut entry.resources.include,
+        );
+        apply_delta_items(
+            &args.include_dep,
+            false,
+            &mut entry.dependencies.include,
+            &mut entry.dependencies.exclude,
+        );
+        apply_delta_items(
+            &args.exclude_dep,
+            false,
+            &mut entry.dependencies.exclude,
+            &mut entry.dependencies.include,
+        );
     }
 }
 
@@ -1180,41 +1065,156 @@ mod tests {
     }
 
     #[test]
-    fn cli_defaults_to_lsp_and_parses_configure_flags() {
-        let cmd = parse_cli_args(Vec::<String>::new()).unwrap();
-        assert_eq!(cmd, CliCommand::Lsp);
+    fn cli_defaults_to_lsp_and_supports_stdio_and_lsp_subcommand() {
+        let default_cli = Cli::try_parse_from(["java-analyzer"]).unwrap();
+        assert!(!default_cli.stdio);
+        assert_eq!(default_cli.command, None);
 
-        let cmd = parse_cli_args([
+        let stdio_cli = Cli::try_parse_from(["java-analyzer", "--stdio"]).unwrap();
+        assert!(stdio_cli.stdio);
+        assert_eq!(stdio_cli.command, None);
+
+        let lsp_cli = Cli::try_parse_from(["java-analyzer", "lsp"]).unwrap();
+        assert!(!lsp_cli.stdio);
+        assert_eq!(lsp_cli.command, Some(Command::Lsp));
+    }
+
+    #[test]
+    fn cli_parses_configure_flags_and_applies_config() {
+        let cli = Cli::try_parse_from([
+            "java-analyzer",
             "configure",
             "--build",
             "gradle",
             "--release",
             "21",
+            "--preview",
+            "--classpath-cmd",
+            "mvn dependency:build-classpath -Dmdep.outputFile=/dev/stdout",
+            "--include",
+            "./extra-mod/",
+            "--exclude",
+            "./legacy-mod/",
             "--module",
-            "services/core",
+            "./services/core/",
             "--include-source",
-            "src/gen/java",
+            "./src/gen/java/",
+            "--exclude-source",
+            "src/old/java",
+            "--include-resource",
+            "src/extra/resources",
+            "--exclude-resource",
+            "src/legacy/resources",
             "--include-dep",
             "github:google/guava#v33.3.1",
+            "--exclude-dep",
+            "maven:junit:junit",
+            "--reconcile",
             "--print",
+            "-y",
+            "/tmp/ws",
         ])
         .unwrap();
 
-        match cmd {
-            CliCommand::Configure(args) => {
+        match cli.command {
+            Some(Command::Configure(args)) => {
                 assert_eq!(args.build, Some(BuildToolKind::Gradle));
                 assert_eq!(args.release, Some(Release::JAVA_21));
-                assert!(args.print_only);
-                assert_eq!(args.module_deltas.len(), 1);
-                assert_eq!(args.module_deltas[0].module_key, "services/core");
-                assert_eq!(args.module_deltas[0].include_sources, vec!["src/gen/java"]);
+                assert!(args.preview);
+                assert!(!args.no_preview);
+                assert_eq!(args.preview_override(), Some(true));
                 assert_eq!(
-                    args.module_deltas[0].include_deps,
+                    args.classpath_cmd.as_deref(),
+                    Some("mvn dependency:build-classpath -Dmdep.outputFile=/dev/stdout")
+                );
+                assert_eq!(args.module, "./services/core/");
+                assert_eq!(args.normalized_module_key(), "services/core");
+                assert!(args.reconcile);
+                assert!(args.print_only);
+                assert!(args.yes);
+                assert_eq!(args.workspace_dir, Some(PathBuf::from("/tmp/ws")));
+                assert!(args.has_explicit_mutation_flags());
+
+                let mut cfg = ExplicitConfig::default();
+                apply_cli_args_to_config(&args, &mut cfg);
+                assert_eq!(cfg.build, Some(BuildToolKind::Gradle));
+                assert_eq!(cfg.release, Some(Release::JAVA_21));
+                assert_eq!(cfg.preview, Some(true));
+                assert_eq!(
+                    cfg.classpath_command,
+                    vec![
+                        "mvn",
+                        "dependency:build-classpath",
+                        "-Dmdep.outputFile=/dev/stdout"
+                    ]
+                );
+                assert_eq!(cfg.delta.include, vec!["extra-mod"]);
+                assert_eq!(cfg.delta.exclude, vec!["legacy-mod"]);
+                let mod_delta = cfg.delta.modules.get("services/core").unwrap();
+                assert_eq!(mod_delta.sources.include, vec!["src/gen/java"]);
+                assert_eq!(mod_delta.sources.exclude, vec!["src/old/java"]);
+                assert_eq!(mod_delta.resources.include, vec!["src/extra/resources"]);
+                assert_eq!(mod_delta.resources.exclude, vec!["src/legacy/resources"]);
+                assert_eq!(
+                    mod_delta.dependencies.include,
                     vec!["github:google/guava#v33.3.1"]
                 );
+                assert_eq!(mod_delta.dependencies.exclude, vec!["maven:junit:junit"]);
             }
             other => panic!("expected Configure, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cli_supports_dry_run_alias_no_preview_and_module_key_normalization() {
+        let cli = Cli::try_parse_from([
+            "java-analyzer",
+            "configure",
+            "--dry-run",
+            "--no-preview",
+            "--module",
+            "com.example.core",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Some(Command::Configure(args)) => {
+                assert!(args.print_only);
+                assert!(args.no_preview);
+                assert_eq!(args.preview_override(), Some(false));
+                assert_eq!(args.normalized_module_key(), "com.example.core");
+                assert!(args.has_explicit_mutation_flags());
+            }
+            other => panic!("expected Configure, got {other:?}"),
+        }
+
+        let default_args = ConfigureArgs::default();
+        assert_eq!(default_args.normalized_module_key(), ".");
+        assert_eq!(default_args.preview_override(), None);
+        assert!(!default_args.has_explicit_mutation_flags());
+
+        let conflict =
+            Cli::try_parse_from(["java-analyzer", "configure", "--preview", "--no-preview"])
+                .unwrap_err();
+        assert_eq!(conflict.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn cli_rejects_invalid_release_and_build_values() {
+        let bad_release =
+            Cli::try_parse_from(["java-analyzer", "configure", "--release", "99"]).unwrap_err();
+        assert_eq!(bad_release.kind(), clap::error::ErrorKind::ValueValidation);
+
+        let non_num_release =
+            Cli::try_parse_from(["java-analyzer", "configure", "--release", "abc"]).unwrap_err();
+        assert_eq!(
+            non_num_release.kind(),
+            clap::error::ErrorKind::ValueValidation
+        );
+
+        let bad_build =
+            Cli::try_parse_from(["java-analyzer", "configure", "--build", "unknown"]).unwrap_err();
+        assert_eq!(bad_build.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]
@@ -1283,31 +1283,53 @@ mod tests {
 
     #[test]
     fn cli_parses_inspect_flags_and_help() {
-        let cmd = parse_cli_args(["inspect", "--json", "--show-errors", "/tmp/demo"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["java-analyzer", "inspect", "--json", "--show-errors", "/tmp/demo"])
+                .unwrap();
         assert_eq!(
-            cmd,
-            CliCommand::Inspect(InspectArgs {
+            cli.command,
+            Some(Command::Inspect(InspectArgs {
                 workspace_dir: Some(PathBuf::from("/tmp/demo")),
                 json: true,
                 show_errors: true,
-            })
+            }))
         );
 
-        let default_cmd = parse_cli_args(["inspect"]).unwrap();
+        let default_cli = Cli::try_parse_from(["java-analyzer", "inspect"]).unwrap();
         assert_eq!(
-            default_cmd,
-            CliCommand::Inspect(InspectArgs {
+            default_cli.command,
+            Some(Command::Inspect(InspectArgs {
                 workspace_dir: None,
                 json: false,
                 show_errors: false,
-            })
+            }))
         );
 
-        let help_cmd = parse_cli_args(["inspect", "--help"]).unwrap();
-        assert_eq!(help_cmd, CliCommand::Help);
+        let top_help = Cli::try_parse_from(["java-analyzer", "--help"]).unwrap_err();
+        assert_eq!(top_help.kind(), clap::error::ErrorKind::DisplayHelp);
+        let top_help_text = top_help.to_string();
+        assert!(top_help_text.contains("lsp"));
+        assert!(top_help_text.contains("inspect"));
+        assert!(top_help_text.contains("configure"));
+        assert!(!top_help_text.contains("--stdio"));
 
-        assert!(parse_cli_args(["inspect", "--unknown"]).is_err());
-        assert!(help_text().contains("java-analyzer inspect"));
+        let inspect_help =
+            Cli::try_parse_from(["java-analyzer", "inspect", "--help"]).unwrap_err();
+        assert_eq!(inspect_help.kind(), clap::error::ErrorKind::DisplayHelp);
+        let inspect_help_text = inspect_help.to_string();
+        assert!(inspect_help_text.contains("--json"));
+        assert!(inspect_help_text.contains("--show-errors"));
+
+        let configure_help =
+            Cli::try_parse_from(["java-analyzer", "configure", "--help"]).unwrap_err();
+        assert_eq!(configure_help.kind(), clap::error::ErrorKind::DisplayHelp);
+        let configure_help_text = configure_help.to_string();
+        assert!(configure_help_text.contains("--print"));
+        assert!(configure_help_text.contains("--dry-run"));
+        assert!(configure_help_text.contains("--release"));
+
+        let unknown = Cli::try_parse_from(["java-analyzer", "inspect", "--unknown"]).unwrap_err();
+        assert_eq!(unknown.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]

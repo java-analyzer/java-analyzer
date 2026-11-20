@@ -7,7 +7,7 @@ use std::{
 };
 
 use common::{shutdown, start_server, start_server_with_root, URI};
-use lsp_types::Url;
+use java_analyzer::convert::path_to_uri;
 use serde_json::{json, Value};
 
 const PUBLISH: &str = "textDocument/publishDiagnostics";
@@ -37,11 +37,11 @@ impl TempWorkspace {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(&path, content).unwrap();
-        Url::from_file_path(&path).unwrap().to_string()
+        path_to_uri(&path).unwrap().to_string()
     }
 
     fn root_uri(&self) -> String {
-        Url::from_file_path(&self.dir).unwrap().to_string()
+        path_to_uri(&self.dir).unwrap().to_string()
     }
 }
 
