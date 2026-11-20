@@ -266,6 +266,7 @@ pub fn probe_workspace(workspace_dir: &Path) -> WorkspaceProbe {
     scan_workspace_fs(
         workspace_dir,
         workspace_dir,
+        false,
         &mut raw_java_files,
         &mut detected_resource_dirs,
     );
@@ -355,20 +356,28 @@ pub fn probe_workspace(workspace_dir: &Path) -> WorkspaceProbe {
         infer_workspace_layout(&file_refs, &resource_dir_refs, resolved_level, &combined_delta);
 
     // Merge Tier 2 compile-time manifest dependencies into the root module (respecting Tier 1 excludes)
-    let tier1_root_excludes: Vec<String> = explicit_config
-        .as_ref()
-        .and_then(|c| c.delta.modules.get("."))
-        .map(|m| m.dependencies.exclude.clone())
-        .unwrap_or_default();
-
+    // Only attach root manifest dependencies when a `"."` module exists or there is a single module.
     let all_modules_snapshot = layout.modules.clone();
     let root_idx = layout
         .modules
         .iter()
         .position(|m| m.rel_path == ".")
-        .or_else(|| if layout.modules.is_empty() { None } else { Some(0) });
+        .or_else(|| (layout.modules.len() == 1).then_some(0));
     if let Some(idx) = root_idx {
         let root_mod = &mut layout.modules[idx];
+        let tier1_root_excludes: Vec<String> = explicit_config
+            .as_ref()
+            .and_then(|c| {
+                c.delta.modules.get(&root_mod.rel_path).or_else(|| {
+                    root_mod
+                        .module_name
+                        .as_deref()
+                        .and_then(|n| c.delta.modules.get(n))
+                })
+            })
+            .map(|m| m.dependencies.exclude.clone())
+            .unwrap_or_default();
+
         for dep in manifest_meta.dependencies {
             let excluded = tier1_root_excludes
                 .iter()
@@ -376,6 +385,83 @@ pub fn probe_workspace(workspace_dir: &Path) -> WorkspaceProbe {
             if !excluded && !root_mod.dependencies.contains(&dep) {
                 root_mod.dependencies.push(dep);
             }
+        }
+
+        if root_mod.rel_path == "." {
+            if let Some(test_rel) = manifest_meta.maven_test_release {
+                let tier1_preview = explicit_config.as_ref().and_then(|c| {
+                    c.delta
+                        .modules
+                        .get(".")
+                        .and_then(|m| m.preview)
+                        .or(c.preview)
+                });
+                let preview = tier1_preview
+                    .unwrap_or(manifest_meta.maven_preview || root_mod.language_level.preview);
+                root_mod.test_language_level = Some(LanguageLevel::new(test_rel, preview));
+            }
+        }
+    }
+
+    // Introspect submodule `<mod.rel_path>/pom.xml` for non-root modules
+    for module in &mut layout.modules {
+        if module.rel_path == "." {
+            continue;
+        }
+        let mod_delta = explicit_config.as_ref().and_then(|c| {
+            c.delta.modules.get(&module.rel_path).or_else(|| {
+                module
+                    .module_name
+                    .as_deref()
+                    .and_then(|n| c.delta.modules.get(n))
+            })
+        });
+        let tier1_mod_release = mod_delta.and_then(|d| d.release);
+        let tier1_preview = mod_delta
+            .and_then(|d| d.preview)
+            .or_else(|| explicit_config.as_ref().and_then(|c| c.preview));
+
+        let sub_pom_path = workspace_dir.join(&module.rel_path).join("pom.xml");
+        if sub_pom_path.is_file() {
+            if let Ok(content) = fs::read_to_string(&sub_pom_path) {
+                let sub_pom = parse_maven_pom_metadata(
+                    &content,
+                    &manifest_meta.maven_properties,
+                    &manifest_meta.maven_managed_versions,
+                );
+
+                if tier1_release.is_none() && tier1_mod_release.is_none() {
+                    if let Some(sub_rel) = sub_pom.release {
+                        let preview = tier1_preview
+                            .unwrap_or(sub_pom.preview || module.language_level.preview);
+                        module.language_level = LanguageLevel::new(sub_rel, preview);
+                    } else if sub_pom.preview && tier1_preview.is_none() {
+                        module.language_level.preview = true;
+                    }
+                }
+
+                if let Some(test_rel) = sub_pom.test_release.or(manifest_meta.maven_test_release) {
+                    let preview =
+                        tier1_preview.unwrap_or(sub_pom.preview || module.language_level.preview);
+                    module.test_language_level = Some(LanguageLevel::new(test_rel, preview));
+                }
+
+                let tier1_mod_excludes: Vec<String> = mod_delta
+                    .map(|m| m.dependencies.exclude.clone())
+                    .unwrap_or_default();
+                for dep in sub_pom.dependencies {
+                    let excluded = tier1_mod_excludes
+                        .iter()
+                        .any(|f| dep.matches_filter(f, &all_modules_snapshot));
+                    if !excluded && !module.dependencies.contains(&dep) {
+                        module.dependencies.push(dep);
+                    }
+                }
+            }
+        } else if let Some(test_rel) = manifest_meta.maven_test_release {
+            let preview = tier1_preview
+                .unwrap_or(manifest_meta.maven_preview || module.language_level.preview);
+            module.test_language_level = Some(LanguageLevel::new(test_rel, preview));
         }
     }
 
@@ -601,6 +687,21 @@ struct ManifestMetadata {
     extra_source_dirs: Vec<(String, RootScope)>,
     extra_resource_dirs: Vec<String>,
     dependencies: Vec<ModuleDependency>,
+    maven_properties: BTreeMap<String, String>,
+    maven_managed_versions: BTreeMap<(String, String), String>,
+    maven_test_release: Option<Release>,
+    maven_preview: bool,
+}
+
+#[derive(Default)]
+struct MavenPomMetadata {
+    release: Option<Release>,
+    test_release: Option<Release>,
+    preview: bool,
+    extra_source_dirs: Vec<(String, RootScope)>,
+    dependencies: Vec<ModuleDependency>,
+    properties: BTreeMap<String, String>,
+    managed_versions: BTreeMap<(String, String), String>,
 }
 
 fn introspect_manifests(
@@ -658,43 +759,143 @@ fn introspect_maven_pom(
     version_specs: &mut Vec<DetectedVersionSpec>,
     meta: &mut ManifestMetadata,
 ) {
-    let preview = content.contains("<enablePreview>true</enablePreview>")
-        || content.contains("--enable-preview");
+    let empty_props = BTreeMap::new();
+    let empty_managed = BTreeMap::new();
+    let pom = parse_maven_pom_metadata(content, &empty_props, &empty_managed);
 
+    if let Some(release) = pom.release {
+        version_specs.push(DetectedVersionSpec {
+            source: "pom.xml".to_string(),
+            path: path.to_path_buf(),
+            release,
+            preview: pom.preview,
+        });
+    }
+
+    meta.extra_source_dirs.extend(pom.extra_source_dirs);
+    for dep in pom.dependencies {
+        if !meta.dependencies.contains(&dep) {
+            meta.dependencies.push(dep);
+        }
+    }
+    meta.maven_properties = pom.properties;
+    meta.maven_managed_versions = pom.managed_versions;
+    meta.maven_test_release = pom.test_release;
+    meta.maven_preview = pom.preview;
+}
+
+fn parse_maven_pom_metadata(
+    content: &str,
+    inherited_props: &BTreeMap<String, String>,
+    inherited_managed: &BTreeMap<(String, String), String>,
+) -> MavenPomMetadata {
+    let cleaned = strip_xml_comments(content);
+    let mut props = inherited_props.clone();
+    props.extend(parse_maven_properties(&cleaned));
+
+    let (without_profiles, profile_blocks) = remove_xml_blocks(&cleaned, "profiles");
+    let preview = without_profiles.contains("<enablePreview>true</enablePreview>")
+        || without_profiles.contains("--enable-preview");
+
+    let mut release = None;
     for tag in [
         "maven.compiler.release",
         "maven.compiler.source",
         "java.version",
         "release",
     ] {
-        if let Some(val) = extract_xml_tag_text(content, tag) {
-            if let Some(release) = parse_version_string(&val) {
-                version_specs.push(DetectedVersionSpec {
-                    source: "pom.xml".to_string(),
-                    path: path.to_path_buf(),
-                    release,
-                    preview,
-                });
+        if let Some(raw_val) = extract_xml_tag_text(&without_profiles, tag) {
+            let val = expand_props(&raw_val, &props);
+            if let Some(rel) = parse_version_string(&val) {
+                release = Some(rel);
                 break;
             }
         }
     }
 
-    if let Some(src_dir) = extract_xml_tag_text(content, "sourceDirectory") {
-        if !src_dir.contains("${") {
-            meta.extra_source_dirs
-                .push((normalize_rel_path(&src_dir), RootScope::Main));
+    let mut test_release = None;
+    for tag in [
+        "maven.compiler.testRelease",
+        "maven.compiler.testSource",
+        "testRelease",
+    ] {
+        if let Some(raw_val) = extract_xml_tag_text(&without_profiles, tag) {
+            let val = expand_props(&raw_val, &props);
+            if let Some(rel) = parse_version_string(&val) {
+                test_release = Some(rel);
+                break;
+            }
         }
     }
-    if let Some(test_dir) = extract_xml_tag_text(content, "testSourceDirectory") {
-        if !test_dir.contains("${") {
-            meta.extra_source_dirs
-                .push((normalize_rel_path(&test_dir), RootScope::Test));
+    if test_release.is_none() {
+        test_release = extract_test_release_from_executions(&without_profiles, &props);
+    }
+    if test_release.is_none() {
+        for profile_block in &profile_blocks {
+            if let Some(rel) = extract_test_release_from_executions(profile_block, &props) {
+                test_release = Some(test_release.map_or(rel, |cur| cur.max(rel)));
+            }
         }
     }
 
+    // Extract <sourceDirectory> and <testSourceDirectory> from <build> BEFORE stripping <build>.
+    let mut extra_source_dirs = Vec::new();
+    if let Some(raw_src_dir) = extract_xml_tag_text(&without_profiles, "sourceDirectory") {
+        let src_dir = expand_props(&raw_src_dir, &props);
+        if !src_dir.contains("${") {
+            extra_source_dirs.push((normalize_rel_path(&src_dir), RootScope::Main));
+        }
+    }
+    if let Some(raw_test_dir) = extract_xml_tag_text(&without_profiles, "testSourceDirectory") {
+        let test_dir = expand_props(&raw_test_dir, &props);
+        if !test_dir.contains("${") {
+            extra_source_dirs.push((normalize_rel_path(&test_dir), RootScope::Test));
+        }
+    }
+
+    // Strip <build>, <reporting>, <plugins>, and <pluginManagement> before scanning <dependency>
+    // blocks so plugin dependencies never leak into project compile/test dependencies.
+    let mut deps_xml = without_profiles;
+    for container in ["build", "reporting", "plugins", "pluginManagement"] {
+        deps_xml = remove_xml_blocks(&deps_xml, container).0;
+    }
+
+    // Parse <dependencyManagement> separately so managed-only entries are not emitted as direct
+    // dependencies and can provide version fallbacks when direct <dependency> entries omit <version>.
+    let (without_dep_mgmt, dep_mgmt_blocks) = remove_xml_blocks(&deps_xml, "dependencyManagement");
+    let mut own_managed: BTreeMap<(String, String), String> = BTreeMap::new();
+    for mgmt_block in &dep_mgmt_blocks {
+        let mut rest = mgmt_block.as_str();
+        while let Some(start) = rest.find("<dependency>") {
+            let after = &rest[start + "<dependency>".len()..];
+            let Some(end) = after.find("</dependency>") else {
+                break;
+            };
+            let block = &after[..end];
+            rest = &after[end + "</dependency>".len()..];
+            let (block_clean, _) = remove_xml_blocks(block, "exclusions");
+
+            let group = extract_xml_tag_text(&block_clean, "groupId")
+                .map(|s| expand_props(&s, &props).trim().to_string())
+                .filter(|s| !s.is_empty());
+            let artifact = extract_xml_tag_text(&block_clean, "artifactId")
+                .map(|s| expand_props(&s, &props).trim().to_string())
+                .filter(|s| !s.is_empty());
+            let version = extract_xml_tag_text(&block_clean, "version")
+                .map(|s| expand_props(&s, &props).trim().to_string())
+                .filter(|s| !s.is_empty());
+
+            if let (Some(g), Some(a), Some(v)) = (group, artifact, version) {
+                own_managed.entry((g, a)).or_insert(v);
+            }
+        }
+    }
+    let mut managed_versions = inherited_managed.clone();
+    managed_versions.extend(own_managed);
+
     // Extract compile-time <dependency> blocks (Main: default/compile/provided; Test: test; skip runtime)
-    let mut rest = content;
+    let mut dependencies = Vec::new();
+    let mut rest = without_dep_mgmt.as_str();
     while let Some(start) = rest.find("<dependency>") {
         let after = &rest[start + "<dependency>".len()..];
         let Some(end) = after.find("</dependency>") else {
@@ -702,14 +903,26 @@ fn introspect_maven_pom(
         };
         let block = &after[..end];
         rest = &after[end + "</dependency>".len()..];
+        let (block_clean, _) = remove_xml_blocks(block, "exclusions");
 
-        let group = extract_xml_tag_text(block, "groupId");
-        let artifact = extract_xml_tag_text(block, "artifactId");
-        let version = extract_xml_tag_text(block, "version").unwrap_or_else(|| "*".to_string());
-        let classifier = extract_xml_tag_text(block, "classifier");
-        let scope_str = extract_xml_tag_text(block, "scope").unwrap_or_default();
+        let group = extract_xml_tag_text(&block_clean, "groupId")
+            .map(|s| expand_props(&s, &props).trim().to_string())
+            .filter(|s| !s.is_empty());
+        let artifact = extract_xml_tag_text(&block_clean, "artifactId")
+            .map(|s| expand_props(&s, &props).trim().to_string())
+            .filter(|s| !s.is_empty());
+        let explicit_version = extract_xml_tag_text(&block_clean, "version")
+            .map(|s| expand_props(&s, &props).trim().to_string())
+            .filter(|s| !s.is_empty());
+        let classifier = extract_xml_tag_text(&block_clean, "classifier")
+            .map(|s| expand_props(&s, &props).trim().to_string())
+            .filter(|s| !s.is_empty());
+        let scope_str = extract_xml_tag_text(&block_clean, "scope").unwrap_or_default();
 
         if let (Some(g), Some(a)) = (group, artifact) {
+            let version = explicit_version
+                .or_else(|| managed_versions.get(&(g.clone(), a.clone())).cloned())
+                .unwrap_or_else(|| "*".to_string());
             let scope = match scope_str.trim() {
                 "" | "compile" | "provided" => Some(RootScope::Main),
                 "test" => Some(RootScope::Test),
@@ -718,18 +931,202 @@ fn introspect_maven_pom(
             };
             if let Some(scope) = scope {
                 let dep = ModuleDependency::Maven {
-                    group: g.trim().to_string(),
-                    artifact: a.trim().to_string(),
-                    version: version.trim().to_string(),
+                    group: g,
+                    artifact: a,
+                    version,
                     classifier,
                     scope,
                 };
-                if !meta.dependencies.contains(&dep) {
-                    meta.dependencies.push(dep);
+                if !dependencies.contains(&dep) {
+                    dependencies.push(dep);
                 }
             }
         }
     }
+
+    MavenPomMetadata {
+        release,
+        test_release,
+        preview,
+        extra_source_dirs,
+        dependencies,
+        properties: props,
+        managed_versions,
+    }
+}
+
+fn extract_test_release_from_executions(
+    xml: &str,
+    props: &BTreeMap<String, String>,
+) -> Option<Release> {
+    let mut max_release: Option<Release> = None;
+    let (_, exec_blocks) = remove_xml_blocks(xml, "execution");
+    for block in exec_blocks {
+        let lower = block.to_ascii_lowercase();
+        if !lower.contains("testcompile") && !lower.contains("test-compile") {
+            continue;
+        }
+        for tag in ["testRelease", "release"] {
+            if let Some(raw_val) = extract_xml_tag_text(&block, tag) {
+                let val = expand_props(&raw_val, props);
+                if let Some(rel) = parse_version_string(&val) {
+                    max_release = Some(max_release.map_or(rel, |cur| cur.max(rel)));
+                    break;
+                }
+            }
+        }
+    }
+    max_release
+}
+
+fn strip_xml_comments(xml: &str) -> String {
+    let mut out = String::with_capacity(xml.len());
+    let mut rest = xml;
+    while let Some(start) = rest.find("<!--") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + "<!--".len()..];
+        if let Some(end) = after.find("-->") {
+            rest = &after[end + "-->".len()..];
+        } else {
+            rest = "";
+            break;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn remove_xml_blocks(xml: &str, tag: &str) -> (String, Vec<String>) {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let mut kept = String::with_capacity(xml.len());
+    let mut removed = Vec::new();
+    let mut rest = xml;
+    while let Some(start) = rest.find(&open) {
+        kept.push_str(&rest[..start]);
+        let after_open = &rest[start + open.len()..];
+        if let Some(end) = after_open.find(&close) {
+            removed.push(after_open[..end].to_string());
+            rest = &after_open[end + close.len()..];
+        } else {
+            kept.push_str(&rest[start..]);
+            rest = "";
+            break;
+        }
+    }
+    kept.push_str(rest);
+    (kept, removed)
+}
+
+fn extract_maven_project_coords(content: &str) -> (Option<String>, Option<String>, Option<String>) {
+    let (without_parent, parent_blocks) = remove_xml_blocks(content, "parent");
+    let mut top_only = without_parent;
+    for container in [
+        "dependencies",
+        "dependencyManagement",
+        "build",
+        "profiles",
+        "reporting",
+        "properties",
+    ] {
+        top_only = remove_xml_blocks(&top_only, container).0;
+    }
+    let group_id = extract_xml_tag_text(&top_only, "groupId")
+        .or_else(|| {
+            parent_blocks
+                .first()
+                .and_then(|p| extract_xml_tag_text(p, "groupId"))
+        })
+        .filter(|v| !v.is_empty());
+    let artifact_id = extract_xml_tag_text(&top_only, "artifactId").filter(|v| !v.is_empty());
+    let version = extract_xml_tag_text(&top_only, "version")
+        .or_else(|| {
+            parent_blocks
+                .first()
+                .and_then(|p| extract_xml_tag_text(p, "version"))
+        })
+        .filter(|v| !v.is_empty());
+    (group_id, artifact_id, version)
+}
+
+fn parse_maven_properties(content: &str) -> BTreeMap<String, String> {
+    let mut props = BTreeMap::new();
+    let (proj_group, proj_artifact, proj_ver) = extract_maven_project_coords(content);
+    if let Some(g) = proj_group {
+        props.insert("project.groupId".to_string(), g);
+    }
+    if let Some(a) = proj_artifact {
+        props.insert("project.artifactId".to_string(), a);
+    }
+    if let Some(v) = proj_ver {
+        props.insert("project.version".to_string(), v);
+    }
+
+    let (without_profiles, _) = remove_xml_blocks(content, "profiles");
+    if let Some(parent_block) = extract_xml_tag_text(&without_profiles, "parent") {
+        for (xml_tag, prop_key) in [
+            ("groupId", "project.parent.groupId"),
+            ("artifactId", "project.parent.artifactId"),
+            ("version", "project.parent.version"),
+        ] {
+            if let Some(val) = extract_xml_tag_text(&parent_block, xml_tag).filter(|v| !v.is_empty())
+            {
+                props.insert(prop_key.to_string(), val);
+            }
+        }
+    }
+    let props_source = if extract_xml_tag_text(&without_profiles, "properties").is_some() {
+        without_profiles.as_str()
+    } else {
+        content
+    };
+    if let Some(props_block) = extract_xml_tag_text(props_source, "properties") {
+        let mut rest = props_block.as_str();
+        while let Some(open_lt) = rest.find('<') {
+            let after_lt = &rest[open_lt + 1..];
+            if after_lt.starts_with('/') || after_lt.starts_with('!') || after_lt.starts_with('?')
+            {
+                if let Some(gt) = after_lt.find('>') {
+                    rest = &after_lt[gt + 1..];
+                } else {
+                    break;
+                }
+                continue;
+            }
+            let Some(gt) = after_lt.find('>') else {
+                break;
+            };
+            let tag_header = &after_lt[..gt];
+            if tag_header.ends_with('/') {
+                let tag_name = tag_header
+                    .trim_end_matches('/')
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("");
+                if !tag_name.is_empty() {
+                    props.insert(tag_name.to_string(), String::new());
+                }
+                rest = &after_lt[gt + 1..];
+                continue;
+            }
+            let tag_name = tag_header.split_whitespace().next().unwrap_or("");
+            if tag_name.is_empty() {
+                rest = &after_lt[gt + 1..];
+                continue;
+            }
+            let close_tag = format!("</{tag_name}>");
+            let after_open = &after_lt[gt + 1..];
+            if let Some(close_idx) = after_open.find(&close_tag) {
+                let val = after_open[..close_idx].trim().to_string();
+                props.insert(tag_name.to_string(), val);
+                rest = &after_open[close_idx + close_tag.len()..];
+            } else {
+                rest = after_open;
+            }
+        }
+    }
+
+    props
 }
 
 fn introspect_gradle_build(
@@ -858,7 +1255,7 @@ fn introspect_ant_build_xml(
             if let Some(val) =
                 extract_xml_attr(&tag, "value").or_else(|| extract_xml_attr(&tag, "location"))
             {
-                let resolved = expand_ant_props(&val, &props);
+                let resolved = expand_props(&val, &props);
                 props.insert(name, resolved);
             }
         }
@@ -869,7 +1266,7 @@ fn introspect_ant_build_xml(
     for javac_tag in find_xml_start_tags(content, "javac") {
         for attr in ["release", "source", "target"] {
             if let Some(raw_ver) = extract_xml_attr(&javac_tag, attr) {
-                let expanded = expand_ant_props(&raw_ver, &props);
+                let expanded = expand_props(&raw_ver, &props);
                 if let Some(rel) = parse_version_string(&expanded) {
                     found_release = Some(rel);
                     break;
@@ -877,7 +1274,7 @@ fn introspect_ant_build_xml(
             }
         }
         if let Some(srcdir) = extract_xml_attr(&javac_tag, "srcdir") {
-            let expanded = expand_ant_props(&srcdir, &props);
+            let expanded = expand_props(&srcdir, &props);
             for part in expanded.split([':', ';']) {
                 let norm = normalize_rel_path(part.trim());
                 if norm != "." && !norm.contains("${") {
@@ -889,7 +1286,7 @@ fn introspect_ant_build_xml(
             }
         }
         if let Some(cp) = extract_xml_attr(&javac_tag, "classpath") {
-            let expanded = expand_ant_props(&cp, &props);
+            let expanded = expand_props(&cp, &props);
             for part in expanded.split([':', ';']) {
                 let norm = normalize_rel_path(part.trim());
                 if norm != "." && !norm.contains("${") {
@@ -910,7 +1307,7 @@ fn introspect_ant_build_xml(
         if let Some(p) =
             extract_xml_attr(&src_tag, "path").or_else(|| extract_xml_attr(&src_tag, "location"))
         {
-            let expanded = expand_ant_props(&p, &props);
+            let expanded = expand_props(&p, &props);
             let norm = normalize_rel_path(&expanded);
             if norm != "." && !norm.contains("${") {
                 let scope = RootScope::from_path(&norm);
@@ -924,7 +1321,7 @@ fn introspect_ant_build_xml(
     // Inspect <fileset dir="..."/> for compile-time JAR directories
     for fs_tag in find_xml_start_tags(content, "fileset") {
         if let Some(dir) = extract_xml_attr(&fs_tag, "dir") {
-            let expanded = expand_ant_props(&dir, &props);
+            let expanded = expand_props(&dir, &props);
             let norm = normalize_rel_path(&expanded);
             if norm != "." && !norm.contains("${") {
                 let full_dir = workspace_dir.join(&norm);
@@ -1035,7 +1432,7 @@ fn classify_ivy_conf(conf: &str) -> Option<RootScope> {
     None
 }
 
-fn expand_ant_props(input: &str, props: &BTreeMap<String, String>) -> String {
+fn expand_props(input: &str, props: &BTreeMap<String, String>) -> String {
     let mut result = input.to_string();
     for _ in 0..4 {
         let mut changed = false;
@@ -1108,9 +1505,25 @@ fn extract_xml_attr(tag_text: &str, attr: &str) -> Option<String> {
     None
 }
 
+fn is_meta_inf_resource_root(dir: &Path) -> bool {
+    let meta_inf = dir.join("META-INF");
+    meta_inf.is_dir()
+        && (meta_inf.join("MANIFEST.MF").is_file() || meta_inf.join("services").is_dir())
+}
+
+fn is_conventional_resource_dir(rel_norm: &str, parent_dir: &Path) -> bool {
+    rel_norm == "resources"
+        || rel_norm == "src/main/resources"
+        || rel_norm == "src/test/resources"
+        || rel_norm.ends_with("/src/main/resources")
+        || rel_norm.ends_with("/src/test/resources")
+        || (rel_norm.ends_with("/resources") && parent_dir.join("src").is_dir())
+}
+
 fn scan_workspace_fs(
     root: &Path,
     current: &Path,
+    in_resource_root: bool,
     java_files: &mut Vec<(String, String)>,
     resource_dirs: &mut BTreeSet<String>,
 ) {
@@ -1131,7 +1544,20 @@ fn scan_workspace_fs(
             if IGNORED_DIRS.contains(&name_str) {
                 continue;
             }
-            // Strong resource root indicator: META-INF/ directory containing MANIFEST.MF or services/
+            let rel_norm = path
+                .strip_prefix(root)
+                .ok()
+                .map(|p| normalize_rel_path(&p.to_string_lossy()));
+
+            // Skip Maven site directory (`src/site` or `.../src/site`)
+            if rel_norm
+                .as_deref()
+                .is_some_and(|r| r == "src/site" || r.ends_with("/src/site"))
+            {
+                continue;
+            }
+
+            // Strong resource root indicator directly under `current` (handles workspace root `META-INF/`)
             if name_str == "META-INF"
                 && (path.join("MANIFEST.MF").is_file() || path.join("services").is_dir())
             {
@@ -1140,15 +1566,22 @@ fn scan_workspace_fs(
                     resource_dirs.insert(norm);
                 }
             }
-            // Conventional resource directory names
-            if name_str == "resources" {
-                if let Ok(rel_res) = path.strip_prefix(root) {
-                    let norm = normalize_rel_path(&rel_res.to_string_lossy());
+
+            let is_conv_res = name_str == "resources"
+                && rel_norm
+                    .as_deref()
+                    .is_some_and(|r| is_conventional_resource_dir(r, current));
+            let is_meta_inf_res = is_meta_inf_resource_root(&path);
+
+            if is_conv_res || is_meta_inf_res {
+                if let Some(norm) = rel_norm {
                     resource_dirs.insert(norm);
                 }
             }
-            scan_workspace_fs(root, &path, java_files, resource_dirs);
-        } else if path.is_file() && name_str.ends_with(".java") {
+
+            let child_in_resource = in_resource_root || is_conv_res || is_meta_inf_res;
+            scan_workspace_fs(root, &path, child_in_resource, java_files, resource_dirs);
+        } else if !in_resource_root && path.is_file() && name_str.ends_with(".java") {
             if let Ok(rel) = path.strip_prefix(root) {
                 if let Ok(text) = fs::read_to_string(&path) {
                     let norm = normalize_rel_path(&rel.to_string_lossy());
@@ -1697,17 +2130,65 @@ pub fn probe_jdk_release(jdk_home: &Path) -> Option<Release> {
 
 impl WorkspaceProbe {
     pub fn language_level_for_path(&self, file_path: &Path) -> LanguageLevel {
-        if let Ok(rel) = file_path.strip_prefix(&self.workspace_dir) {
+        let rel_path = file_path
+            .strip_prefix(&self.workspace_dir)
+            .ok()
+            .or_else(|| (!file_path.is_absolute()).then_some(file_path));
+
+        if let Some(rel) = rel_path {
             let norm = normalize_rel_path(&rel.to_string_lossy());
-            for module in &self.layout.modules {
-                let in_mod = if module.rel_path == "." {
-                    true
-                } else {
-                    norm.starts_with(&format!("{}/", module.rel_path))
-                };
-                if in_mod {
-                    return module.language_level;
+
+            let best_root = self
+                .layout
+                .modules
+                .iter()
+                .flat_map(|module| module.sources.iter().map(move |src| (module, src)))
+                .filter(|(_, src)| {
+                    src.rel_path == "."
+                        || norm == src.rel_path
+                        || norm.starts_with(&format!("{}/", src.rel_path))
+                })
+                .max_by_key(|(_, src)| {
+                    if src.rel_path == "." {
+                        0
+                    } else {
+                        src.rel_path.len()
+                    }
+                });
+
+            if let Some((module, src)) = best_root {
+                if src.scope == RootScope::Test {
+                    if let Some(test_lvl) = module.test_language_level {
+                        return test_lvl;
+                    }
                 }
+                return module.language_level;
+            }
+
+            let best_module = self
+                .layout
+                .modules
+                .iter()
+                .filter(|module| {
+                    module.rel_path == "."
+                        || norm == module.rel_path
+                        || norm.starts_with(&format!("{}/", module.rel_path))
+                })
+                .max_by_key(|module| {
+                    if module.rel_path == "." {
+                        0
+                    } else {
+                        module.rel_path.len()
+                    }
+                });
+
+            if let Some(module) = best_module {
+                if RootScope::from_path(&norm) == RootScope::Test {
+                    if let Some(test_lvl) = module.test_language_level {
+                        return test_lvl;
+                    }
+                }
+                return module.language_level;
             }
         }
         self.resolved_level
@@ -1929,5 +2410,737 @@ dependencies = { include = ["com.google.guava:guava:33.3.1-jre", "github:google/
             reference: Some("v33.3.1".to_string()),
             scope: RootScope::Main,
         }));
+    }
+
+    #[test]
+    fn maven_pom_strips_comments_expands_properties_and_handles_dependency_management() {
+        let tmp = TempDir::new("maven_props_and_mgmt");
+        tmp.write(
+            "pom.xml",
+            r#"<project>
+                <modelVersion>4.0.0</modelVersion>
+                <parent>
+                    <groupId>com.example</groupId>
+                    <artifactId>parent-pom</artifactId>
+                    <version>9.9.9</version>
+                </parent>
+                <artifactId>demo</artifactId>
+                <version>2.4.0</version>
+                <!--
+                <properties>
+                    <maven.compiler.release>8</maven.compiler.release>
+                </properties>
+                <dependency>
+                    <groupId>com.commented</groupId>
+                    <artifactId>ignored-dep</artifactId>
+                    <version>1.0.0</version>
+                </dependency>
+                -->
+                <properties>
+                    <java.version>21</java.version>
+                    <maven.compiler.release>${java.version}</maven.compiler.release>
+                    <guava.group>com.google.guava</guava.group>
+                    <guava.version>33.4.0-jre</guava.version>
+                    <junit.version>5.10.2</junit.version>
+                    <custom.src>custom/src</custom.src>
+                    <custom.test>custom/test</custom.test>
+                    <native.classifier>linux-x86_64</native.classifier>
+                </properties>
+                <build>
+                    <sourceDirectory>${custom.src}</sourceDirectory>
+                    <testSourceDirectory>${custom.test}</testSourceDirectory>
+                </build>
+                <dependencyManagement>
+                    <dependencies>
+                        <dependency>
+                            <groupId>${guava.group}</groupId>
+                            <artifactId>guava</artifactId>
+                            <version>${guava.version}</version>
+                        </dependency>
+                        <dependency>
+                            <groupId>org.unused</groupId>
+                            <artifactId>managed-only</artifactId>
+                            <version>1.2.3</version>
+                        </dependency>
+                    </dependencies>
+                </dependencyManagement>
+                <dependencies>
+                    <dependency>
+                        <groupId>${guava.group}</groupId>
+                        <artifactId>guava</artifactId>
+                    </dependency>
+                    <dependency>
+                        <groupId>com.example</groupId>
+                        <artifactId>sibling</artifactId>
+                        <version>${project.version}</version>
+                        <classifier>${native.classifier}</classifier>
+                    </dependency>
+                    <dependency>
+                        <groupId>org.junit.jupiter</groupId>
+                        <artifactId>junit-jupiter</artifactId>
+                        <version>${junit.version}</version>
+                        <scope>test</scope>
+                    </dependency>
+                    <dependency>
+                        <groupId>org.unmanaged</groupId>
+                        <artifactId>no-version</artifactId>
+                    </dependency>
+                </dependencies>
+            </project>"#,
+        );
+        tmp.write(
+            "custom/src/com/example/App.java",
+            "package com.example;\nclass App {}\n",
+        );
+        tmp.write(
+            "custom/test/com/example/AppTest.java",
+            "package com.example;\nclass AppTest {}\n",
+        );
+
+        let probe = probe_workspace(&tmp.0);
+        assert_eq!(probe.resolved_build, BuildToolKind::Maven);
+        assert_eq!(
+            probe.resolved_level,
+            LanguageLevel::new(Release::JAVA_21, false)
+        );
+
+        let root_mod = &probe.layout.modules[0];
+        assert!(root_mod.sources.iter().any(|s| s.rel_path == "custom/src"));
+        assert!(root_mod
+            .sources
+            .iter()
+            .any(|s| s.rel_path == "custom/test" && s.scope == RootScope::Test));
+
+        // Managed version fallback & property expansion
+        assert!(root_mod.dependencies.contains(&ModuleDependency::Maven {
+            group: "com.google.guava".to_string(),
+            artifact: "guava".to_string(),
+            version: "33.4.0-jre".to_string(),
+            classifier: None,
+            scope: RootScope::Main,
+        }));
+        // project.version & classifier expansion
+        assert!(root_mod.dependencies.contains(&ModuleDependency::Maven {
+            group: "com.example".to_string(),
+            artifact: "sibling".to_string(),
+            version: "2.4.0".to_string(),
+            classifier: Some("linux-x86_64".to_string()),
+            scope: RootScope::Main,
+        }));
+        // Test dependency expansion
+        assert!(root_mod.dependencies.contains(&ModuleDependency::Maven {
+            group: "org.junit.jupiter".to_string(),
+            artifact: "junit-jupiter".to_string(),
+            version: "5.10.2".to_string(),
+            classifier: None,
+            scope: RootScope::Test,
+        }));
+        // Unmanaged dependency omitting version still falls back to "*"
+        assert!(root_mod.dependencies.contains(&ModuleDependency::Maven {
+            group: "org.unmanaged".to_string(),
+            artifact: "no-version".to_string(),
+            version: "*".to_string(),
+            classifier: None,
+            scope: RootScope::Main,
+        }));
+        // Managed-only and commented dependencies must NOT appear
+        assert!(!root_mod.dependencies.iter().any(|d| match d {
+            ModuleDependency::Maven { artifact, .. } => {
+                artifact == "managed-only" || artifact == "ignored-dep"
+            }
+            _ => false,
+        }));
+    }
+
+    #[test]
+    fn scan_ignores_site_resources_and_skips_java_fixtures_inside_resource_roots() {
+        let tmp = TempDir::new("scan_resources_filter");
+        tmp.write(
+            "src/main/java/com/example/resources/ResourceHelper.java",
+            "package com.example.resources;\npublic class ResourceHelper {}\n",
+        );
+        tmp.write("src/main/resources/app.properties", "k=v\n");
+        tmp.write(
+            "src/test/resources/fixtures/Template.java",
+            "package fixtures;\npublic class Template {}\n",
+        );
+        tmp.write("src/site/resources/images/logo.png", "png");
+        tmp.write("src/site/resources/SiteSample.java", "class SiteSample {}\n");
+        tmp.write("docs/resources/guide.md", "# guide\n");
+        tmp.write(
+            "spi/resources/META-INF/services/com.example.Spi",
+            "com.example.Impl\n",
+        );
+        tmp.write("spi/resources/Fixture.java", "class Fixture {}\n");
+
+        let probe = probe_workspace(&tmp.0);
+        // Only real Java sources are collected; fixtures in resource roots and src/site are skipped.
+        assert!(probe
+            .file_paths
+            .contains_key("src/main/java/com/example/resources/ResourceHelper.java"));
+        assert!(!probe
+            .file_paths
+            .contains_key("src/test/resources/fixtures/Template.java"));
+        assert!(!probe
+            .file_paths
+            .contains_key("src/site/resources/SiteSample.java"));
+        assert!(!probe.file_paths.contains_key("spi/resources/Fixture.java"));
+
+        let root_mod = probe.layout.module_by_path(".").unwrap();
+        let res_paths: Vec<(&str, RootScope)> = root_mod
+            .resources
+            .iter()
+            .map(|r| (r.rel_path.as_str(), r.scope))
+            .collect();
+        assert_eq!(
+            res_paths,
+            vec![
+                ("spi/resources", RootScope::Main),
+                ("src/main/resources", RootScope::Main),
+                ("src/test/resources", RootScope::Test),
+            ]
+        );
+        // Package `com.example.resources` was NOT misclassified as a resource root
+        assert!(root_mod
+            .sources
+            .iter()
+            .any(|s| s.rel_path == "src/main/java" && s.scope == RootScope::Main));
+    }
+
+    #[test]
+    fn maven_pom_ignores_build_reporting_and_profile_plugin_dependencies() {
+        let tmp = TempDir::new("maven_ignore_plugin_deps");
+        tmp.write(
+            "pom.xml",
+            r#"<project>
+                <modelVersion>4.0.0</modelVersion>
+                <groupId>com.example</groupId>
+                <artifactId>demo</artifactId>
+                <version>1.0.0</version>
+                <properties>
+                    <maven.compiler.release>8</maven.compiler.release>
+                    <maven.compiler.testSource>17</maven.compiler.testSource>
+                    <custom.src>custom/src</custom.src>
+                </properties>
+                <build>
+                    <sourceDirectory>${custom.src}</sourceDirectory>
+                    <pluginManagement>
+                        <plugins>
+                            <plugin>
+                                <groupId>org.eclipse.tycho</groupId>
+                                <artifactId>tycho-compiler-plugin</artifactId>
+                                <dependencies>
+                                    <dependency>
+                                        <groupId>org.eclipse.jdt</groupId>
+                                        <artifactId>org.eclipse.jdt.core</artifactId>
+                                        <version>3.33.0</version>
+                                    </dependency>
+                                </dependencies>
+                            </plugin>
+                        </plugins>
+                    </pluginManagement>
+                    <plugins>
+                        <plugin>
+                            <groupId>com.github.siom79.japicmp</groupId>
+                            <artifactId>japicmp-maven-plugin</artifactId>
+                            <dependencies>
+                                <dependency>
+                                    <groupId>${project.groupId}</groupId>
+                                    <artifactId>${project.artifactId}</artifactId>
+                                    <version>0.0.0-OLD</version>
+                                </dependency>
+                            </dependencies>
+                        </plugin>
+                    </plugins>
+                </build>
+                <reporting>
+                    <plugins>
+                        <plugin>
+                            <groupId>org.apache.maven.plugins</groupId>
+                            <artifactId>maven-javadoc-plugin</artifactId>
+                            <dependencies>
+                                <dependency>
+                                    <groupId>com.example</groupId>
+                                    <artifactId>report-doclet</artifactId>
+                                    <version>1.0.0</version>
+                                </dependency>
+                            </dependencies>
+                        </plugin>
+                    </plugins>
+                </reporting>
+                <profiles>
+                    <profile>
+                        <id>extra</id>
+                        <dependencies>
+                            <dependency>
+                                <groupId>com.example</groupId>
+                                <artifactId>profile-only</artifactId>
+                                <version>1.0.0</version>
+                            </dependency>
+                        </dependencies>
+                    </profile>
+                </profiles>
+                <dependencies>
+                    <dependency>
+                        <groupId>com.google.guava</groupId>
+                        <artifactId>guava</artifactId>
+                        <version>33.2.1-jre</version>
+                    </dependency>
+                </dependencies>
+            </project>"#,
+        );
+        tmp.write(
+            "custom/src/com/example/App.java",
+            "package com.example;\nclass App {}\n",
+        );
+        tmp.write(
+            "src/test/java/com/example/AppTest.java",
+            "package com.example;\nclass AppTest {}\n",
+        );
+
+        let probe = probe_workspace(&tmp.0);
+        let root_mod = probe.layout.module_by_path(".").unwrap();
+        assert!(root_mod
+            .sources
+            .iter()
+            .any(|s| s.rel_path == "custom/src" && s.scope == RootScope::Main));
+        assert!(root_mod.dependencies.contains(&ModuleDependency::Maven {
+            group: "com.google.guava".to_string(),
+            artifact: "guava".to_string(),
+            version: "33.2.1-jre".to_string(),
+            classifier: None,
+            scope: RootScope::Main,
+        }));
+        assert_eq!(
+            root_mod.dependencies.len(),
+            1,
+            "plugin/reporting/profile dependencies must not leak: {:?}",
+            root_mod.dependencies
+        );
+        assert_eq!(
+            root_mod.test_language_level,
+            Some(LanguageLevel::new(Release::JAVA_17, false))
+        );
+        assert_eq!(
+            probe.language_level_for_path(&tmp.0.join("custom/src/com/example/App.java")),
+            LanguageLevel::new(Release::JAVA_8, false)
+        );
+        assert_eq!(
+            probe.language_level_for_path(&tmp.0.join("src/test/java/com/example/AppTest.java")),
+            LanguageLevel::new(Release::JAVA_17, false)
+        );
+    }
+
+    #[test]
+    fn maven_multi_module_inherits_props_splits_deps_and_resolves_test_language_level() {
+        let tmp = TempDir::new("maven_multi_module");
+        tmp.write(
+            "pom.xml",
+            r#"<project>
+                <modelVersion>4.0.0</modelVersion>
+                <groupId>com.example</groupId>
+                <artifactId>parent</artifactId>
+                <version>2.0.0</version>
+                <packaging>pom</packaging>
+                <properties>
+                    <maven.compiler.release>8</maven.compiler.release>
+                    <maven.compiler.testRelease>17</maven.compiler.testRelease>
+                    <junit.version>5.10.2</junit.version>
+                </properties>
+                <dependencyManagement>
+                    <dependencies>
+                        <dependency>
+                            <groupId>com.google.errorprone</groupId>
+                            <artifactId>error_prone_annotations</artifactId>
+                            <version>2.28.0</version>
+                        </dependency>
+                        <dependency>
+                            <groupId>com.example</groupId>
+                            <artifactId>overridden-lib</artifactId>
+                            <version>1.0.0</version>
+                        </dependency>
+                    </dependencies>
+                </dependencyManagement>
+                <dependencies>
+                    <dependency>
+                        <groupId>com.example</groupId>
+                        <artifactId>root-only-dep</artifactId>
+                        <version>1.0.0</version>
+                    </dependency>
+                </dependencies>
+            </project>"#,
+        );
+        tmp.write(
+            "core/pom.xml",
+            r#"<project>
+                <parent>
+                    <groupId>com.example</groupId>
+                    <artifactId>parent</artifactId>
+                    <version>2.0.0</version>
+                </parent>
+                <artifactId>core</artifactId>
+                <dependencies>
+                    <dependency>
+                        <groupId>com.google.errorprone</groupId>
+                        <artifactId>error_prone_annotations</artifactId>
+                    </dependency>
+                    <dependency>
+                        <groupId>org.junit.jupiter</groupId>
+                        <artifactId>junit-jupiter</artifactId>
+                        <version>${junit.version}</version>
+                        <scope>test</scope>
+                    </dependency>
+                </dependencies>
+            </project>"#,
+        );
+        tmp.write(
+            "core/src/main/java/com/example/core/Core.java",
+            "package com.example.core;\npublic class Core {}\n",
+        );
+        tmp.write(
+            "core/src/test/java/com/example/core/CoreTest.java",
+            "package com.example.core;\npublic class CoreTest {}\n",
+        );
+        tmp.write(
+            "modern/pom.xml",
+            r#"<project>
+                <parent>
+                    <groupId>com.example</groupId>
+                    <artifactId>parent</artifactId>
+                    <version>2.0.0</version>
+                </parent>
+                <artifactId>modern</artifactId>
+                <properties>
+                    <maven.compiler.release>17</maven.compiler.release>
+                </properties>
+                <dependencyManagement>
+                    <dependencies>
+                        <dependency>
+                            <groupId>com.example</groupId>
+                            <artifactId>overridden-lib</artifactId>
+                            <version>2.0.0</version>
+                        </dependency>
+                    </dependencies>
+                </dependencyManagement>
+                <dependencies>
+                    <dependency>
+                        <groupId>com.example</groupId>
+                        <artifactId>overridden-lib</artifactId>
+                    </dependency>
+                    <dependency>
+                        <groupId>org.slf4j</groupId>
+                        <artifactId>slf4j-api</artifactId>
+                        <version>2.0.12</version>
+                    </dependency>
+                    <dependency>
+                        <groupId>com.example</groupId>
+                        <artifactId>excluded-dep</artifactId>
+                        <version>1.0.0</version>
+                    </dependency>
+                </dependencies>
+            </project>"#,
+        );
+        tmp.write(
+            "modern/src/main/java/com/example/modern/Modern.java",
+            "package com.example.modern;\npublic class Modern {}\n",
+        );
+        tmp.write(
+            "modern/src/test/java/com/example/modern/ModernTest.java",
+            "package com.example.modern;\npublic class ModernTest {}\n",
+        );
+        tmp.write(
+            ".java-analyzer.toml",
+            r#"
+[modules."modern"]
+dependencies = { exclude = ["com.example:excluded-dep"] }
+"#,
+        );
+
+        let probe = probe_workspace(&tmp.0);
+        assert!(probe.conflicts.is_empty(), "conflicts: {:?}", probe.conflicts);
+        assert_eq!(
+            probe.resolved_level,
+            LanguageLevel::new(Release::JAVA_8, false)
+        );
+        assert_eq!(probe.layout.modules.len(), 2);
+
+        let core_mod = probe.layout.module_by_path("core").unwrap();
+        assert_eq!(
+            core_mod.language_level,
+            LanguageLevel::new(Release::JAVA_8, false)
+        );
+        assert_eq!(
+            core_mod.test_language_level,
+            Some(LanguageLevel::new(Release::JAVA_17, false))
+        );
+        assert!(core_mod.dependencies.contains(&ModuleDependency::Maven {
+            group: "com.google.errorprone".to_string(),
+            artifact: "error_prone_annotations".to_string(),
+            version: "2.28.0".to_string(),
+            classifier: None,
+            scope: RootScope::Main,
+        }));
+        assert!(core_mod.dependencies.contains(&ModuleDependency::Maven {
+            group: "org.junit.jupiter".to_string(),
+            artifact: "junit-jupiter".to_string(),
+            version: "5.10.2".to_string(),
+            classifier: None,
+            scope: RootScope::Test,
+        }));
+        assert!(
+            !core_mod.dependencies.iter().any(|d| match d {
+                ModuleDependency::Maven { artifact, .. } => {
+                    artifact == "root-only-dep" || artifact == "slf4j-api"
+                }
+                _ => false,
+            }),
+            "root-only or sibling deps must not leak into core: {:?}",
+            core_mod.dependencies
+        );
+
+        let modern_mod = probe.layout.module_by_path("modern").unwrap();
+        assert_eq!(
+            modern_mod.language_level,
+            LanguageLevel::new(Release::JAVA_17, false)
+        );
+        assert_eq!(
+            modern_mod.test_language_level,
+            Some(LanguageLevel::new(Release::JAVA_17, false))
+        );
+        assert!(modern_mod.dependencies.contains(&ModuleDependency::Maven {
+            group: "com.example".to_string(),
+            artifact: "overridden-lib".to_string(),
+            version: "2.0.0".to_string(),
+            classifier: None,
+            scope: RootScope::Main,
+        }));
+        assert!(modern_mod.dependencies.contains(&ModuleDependency::Maven {
+            group: "org.slf4j".to_string(),
+            artifact: "slf4j-api".to_string(),
+            version: "2.0.12".to_string(),
+            classifier: None,
+            scope: RootScope::Main,
+        }));
+        assert!(
+            !modern_mod.dependencies.iter().any(|d| match d {
+                ModuleDependency::Maven { artifact, .. } => {
+                    artifact == "root-only-dep"
+                        || artifact == "error_prone_annotations"
+                        || artifact == "excluded-dep"
+                }
+                _ => false,
+            }),
+            "excluded or root/sibling deps must not appear in modern: {:?}",
+            modern_mod.dependencies
+        );
+
+        assert_eq!(
+            probe.language_level_for_path(&tmp.0.join("core/src/main/java/com/example/core/Core.java")),
+            LanguageLevel::new(Release::JAVA_8, false)
+        );
+        assert_eq!(
+            probe.language_level_for_path(
+                &tmp.0.join("core/src/test/java/com/example/core/CoreTest.java")
+            ),
+            LanguageLevel::new(Release::JAVA_17, false)
+        );
+        assert_eq!(
+            probe.language_level_for_path(
+                &tmp.0.join("modern/src/main/java/com/example/modern/Modern.java")
+            ),
+            LanguageLevel::new(Release::JAVA_17, false)
+        );
+        assert_eq!(
+            probe.language_level_for_path(
+                &tmp.0.join("modern/src/test/java/com/example/modern/ModernTest.java")
+            ),
+            LanguageLevel::new(Release::JAVA_17, false)
+        );
+    }
+
+    #[test]
+    fn maven_submodule_expands_project_parent_properties_in_dependencies() {
+        let tmp = TempDir::new("maven_parent_props");
+        tmp.write(
+            "pom.xml",
+            r#"<project>
+                <modelVersion>4.0.0</modelVersion>
+                <groupId>com.example.corp</groupId>
+                <artifactId>corp-parent</artifactId>
+                <version>3.4.5</version>
+                <packaging>pom</packaging>
+                <properties>
+                    <maven.compiler.release>17</maven.compiler.release>
+                </properties>
+            </project>"#,
+        );
+        let sub_pom = r#"<project>
+                <parent>
+                    <groupId>com.example.corp</groupId>
+                    <artifactId>corp-parent</artifactId>
+                    <version>3.4.5</version>
+                </parent>
+                <artifactId>service</artifactId>
+                <version>1.0.0-SNAPSHOT</version>
+                <dependencies>
+                    <dependency>
+                        <groupId>${project.parent.groupId}</groupId>
+                        <artifactId>shared-core</artifactId>
+                        <version>${project.parent.version}</version>
+                    </dependency>
+                </dependencies>
+            </project>"#;
+        tmp.write("service/pom.xml", sub_pom);
+        tmp.write(
+            "service/src/main/java/com/example/Service.java",
+            "package com.example;\npublic class Service {}\n",
+        );
+
+        let sub_props = parse_maven_properties(sub_pom);
+        assert_eq!(
+            sub_props.get("project.parent.groupId").map(String::as_str),
+            Some("com.example.corp")
+        );
+        assert_eq!(
+            sub_props.get("project.parent.artifactId").map(String::as_str),
+            Some("corp-parent")
+        );
+        assert_eq!(
+            sub_props.get("project.parent.version").map(String::as_str),
+            Some("3.4.5")
+        );
+
+        let probe = probe_workspace(&tmp.0);
+        let service_mod = probe.layout.module_by_path("service").unwrap();
+        assert!(
+            service_mod.dependencies.contains(&ModuleDependency::Maven {
+                group: "com.example.corp".to_string(),
+                artifact: "shared-core".to_string(),
+                version: "3.4.5".to_string(),
+                classifier: None,
+                scope: RootScope::Main,
+            }),
+            "expected expanded parent groupId and version in deps: {:?}",
+            service_mod.dependencies
+        );
+    }
+
+    #[test]
+    fn maven_test_release_tag_and_profile_test_compile_execution() {
+        // 1. Direct <testRelease>17</testRelease> in maven-compiler-plugin configuration
+        let tmp_tag = TempDir::new("maven_test_release_tag");
+        tmp_tag.write(
+            "pom.xml",
+            r#"<project>
+                <modelVersion>4.0.0</modelVersion>
+                <groupId>com.example</groupId>
+                <artifactId>demo</artifactId>
+                <version>1.0.0</version>
+                <properties>
+                    <maven.compiler.release>8</maven.compiler.release>
+                </properties>
+                <build>
+                    <plugins>
+                        <plugin>
+                            <groupId>org.apache.maven.plugins</groupId>
+                            <artifactId>maven-compiler-plugin</artifactId>
+                            <configuration>
+                                <testRelease>17</testRelease>
+                            </configuration>
+                        </plugin>
+                    </plugins>
+                </build>
+            </project>"#,
+        );
+        tmp_tag.write(
+            "src/main/java/com/example/App.java",
+            "package com.example;\nclass App {}\n",
+        );
+        tmp_tag.write(
+            "src/test/java/com/example/AppTest.java",
+            "package com.example;\nclass AppTest {}\n",
+        );
+
+        let probe_tag = probe_workspace(&tmp_tag.0);
+        let root_tag = probe_tag.layout.module_by_path(".").unwrap();
+        assert_eq!(
+            root_tag.language_level,
+            LanguageLevel::new(Release::JAVA_8, false)
+        );
+        assert_eq!(
+            root_tag.test_language_level,
+            Some(LanguageLevel::new(Release::JAVA_17, false))
+        );
+        assert_eq!(
+            probe_tag.language_level_for_path(&tmp_tag.0.join("src/test/java/com/example/AppTest.java")),
+            LanguageLevel::new(Release::JAVA_17, false)
+        );
+
+        // 2. <profile> containing <execution> with testCompile goal and <configuration><release>17</release></configuration>
+        let tmp_prof = TempDir::new("maven_profile_test_compile");
+        tmp_prof.write(
+            "pom.xml",
+            r#"<project>
+                <modelVersion>4.0.0</modelVersion>
+                <groupId>com.example</groupId>
+                <artifactId>demo</artifactId>
+                <version>1.0.0</version>
+                <properties>
+                    <maven.compiler.release>8</maven.compiler.release>
+                </properties>
+                <profiles>
+                    <profile>
+                        <id>jdk17-tests</id>
+                        <build>
+                            <plugins>
+                                <plugin>
+                                    <groupId>org.apache.maven.plugins</groupId>
+                                    <artifactId>maven-compiler-plugin</artifactId>
+                                    <executions>
+                                        <execution>
+                                            <id>test-compile-11</id>
+                                            <goals><goal>testCompile</goal></goals>
+                                            <configuration>
+                                                <release>11</release>
+                                            </configuration>
+                                        </execution>
+                                        <execution>
+                                            <id>test-compile-17</id>
+                                            <goals><goal>testCompile</goal></goals>
+                                            <configuration>
+                                                <release>17</release>
+                                            </configuration>
+                                        </execution>
+                                    </executions>
+                                </plugin>
+                            </plugins>
+                        </build>
+                    </profile>
+                </profiles>
+            </project>"#,
+        );
+        tmp_prof.write(
+            "src/main/java/com/example/App.java",
+            "package com.example;\nclass App {}\n",
+        );
+        tmp_prof.write(
+            "src/test/java/com/example/AppTest.java",
+            "package com.example;\nclass AppTest {}\n",
+        );
+
+        let probe_prof = probe_workspace(&tmp_prof.0);
+        let root_prof = probe_prof.layout.module_by_path(".").unwrap();
+        assert_eq!(
+            root_prof.language_level,
+            LanguageLevel::new(Release::JAVA_8, false)
+        );
+        assert_eq!(
+            root_prof.test_language_level,
+            Some(LanguageLevel::new(Release::JAVA_17, false))
+        );
+        assert_eq!(
+            probe_prof.language_level_for_path(&tmp_prof.0.join("src/test/java/com/example/AppTest.java")),
+            LanguageLevel::new(Release::JAVA_17, false)
+        );
     }
 }

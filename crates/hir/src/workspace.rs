@@ -36,12 +36,13 @@ impl RootScope {
         let norm = normalize_rel_path(rel_path);
         if norm == "test"
             || norm == "tests"
-            || norm.ends_with("/test")
-            || norm.ends_with("/tests")
-            || norm.ends_with("/src/test/java")
-            || norm.ends_with("/src/test/resources")
+            || norm == "src/test"
             || norm.starts_with("test/")
             || norm.starts_with("tests/")
+            || norm.starts_with("src/test/")
+            || norm.ends_with("/test")
+            || norm.ends_with("/tests")
+            || norm.ends_with("/src/test")
             || norm.contains("/src/test/")
         {
             Self::Test
@@ -271,6 +272,7 @@ pub struct ModuleData {
     /// Declared JPMS module name from `module-info.java`, or `None` for an unnamed module.
     pub module_name: Option<String>,
     pub language_level: LanguageLevel,
+    pub test_language_level: Option<LanguageLevel>,
     pub sources: Vec<SourceRoot>,
     pub resources: Vec<ResourceRoot>,
     pub dependencies: Vec<ModuleDependency>,
@@ -635,11 +637,22 @@ fn strip_package_suffix(dir: &str, package: &str) -> Option<String> {
 /// returns `<mod>` (or `"."` at the workspace root); otherwise returns the root directory itself.
 pub fn module_dir_for_root(root_dir: &str) -> String {
     let norm = normalize_rel_path(root_dir);
+    if norm.starts_with("src/main/")
+        || norm.starts_with("src/test/")
+        || matches!(
+            norm.as_str(),
+            "src/main" | "src/test" | "src" | "test" | "tests" | "resources"
+        )
+    {
+        return ".".to_string();
+    }
+    if let Some((prefix, _)) = norm
+        .split_once("/src/main/")
+        .or_else(|| norm.split_once("/src/test/"))
+    {
+        return normalize_rel_path(prefix);
+    }
     for suffix in [
-        "/src/main/java",
-        "/src/test/java",
-        "/src/main/resources",
-        "/src/test/resources",
         "/src/main",
         "/src/test",
         "/src",
@@ -650,21 +663,6 @@ pub fn module_dir_for_root(root_dir: &str) -> String {
         if let Some(stripped) = norm.strip_suffix(suffix) {
             return normalize_rel_path(stripped);
         }
-    }
-    if matches!(
-        norm.as_str(),
-        "src/main/java"
-            | "src/test/java"
-            | "src/main/resources"
-            | "src/test/resources"
-            | "src/main"
-            | "src/test"
-            | "src"
-            | "test"
-            | "tests"
-            | "resources"
-    ) {
-        return ".".to_string();
     }
     norm
 }
@@ -972,6 +970,7 @@ pub fn infer_workspace_layout(
             rel_path: mod_dir,
             module_name,
             language_level,
+            test_language_level: None,
             sources,
             resources,
             dependencies: Vec::new(),
@@ -1304,5 +1303,73 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn root_scope_and_module_dir_classify_root_and_nested_standard_paths() {
+        // Root-level main paths
+        assert_eq!(RootScope::from_path("src/main/java"), RootScope::Main);
+        assert_eq!(RootScope::from_path("src/main/resources"), RootScope::Main);
+        assert_eq!(RootScope::from_path("src/main"), RootScope::Main);
+        assert_eq!(RootScope::from_path("src"), RootScope::Main);
+        assert_eq!(RootScope::from_path("resources"), RootScope::Main);
+
+        // Root-level test paths
+        assert_eq!(RootScope::from_path("src/test"), RootScope::Test);
+        assert_eq!(RootScope::from_path("src/test/java"), RootScope::Test);
+        assert_eq!(RootScope::from_path("src/test/resources"), RootScope::Test);
+        assert_eq!(RootScope::from_path("test"), RootScope::Test);
+        assert_eq!(RootScope::from_path("tests"), RootScope::Test);
+        assert_eq!(RootScope::from_path("test/java"), RootScope::Test);
+        assert_eq!(RootScope::from_path("tests/integration"), RootScope::Test);
+
+        // Nested module main & test paths
+        assert_eq!(RootScope::from_path("core/src/main/java"), RootScope::Main);
+        assert_eq!(
+            RootScope::from_path("core/src/main/resources"),
+            RootScope::Main
+        );
+        assert_eq!(RootScope::from_path("core/src/test"), RootScope::Test);
+        assert_eq!(RootScope::from_path("core/src/test/java"), RootScope::Test);
+        assert_eq!(
+            RootScope::from_path("core/src/test/resources"),
+            RootScope::Test
+        );
+        assert_eq!(
+            RootScope::from_path("services/core/test"),
+            RootScope::Test
+        );
+        assert_eq!(
+            RootScope::from_path("services/core/tests"),
+            RootScope::Test
+        );
+
+        // Root-level module_dir_for_root must return "." before checking "/resources" etc.
+        assert_eq!(module_dir_for_root("src/main/java"), ".");
+        assert_eq!(module_dir_for_root("src/test/java"), ".");
+        assert_eq!(module_dir_for_root("src/main/resources"), ".");
+        assert_eq!(module_dir_for_root("src/test/resources"), ".");
+        assert_eq!(module_dir_for_root("src/main"), ".");
+        assert_eq!(module_dir_for_root("src/test"), ".");
+        assert_eq!(module_dir_for_root("src"), ".");
+        assert_eq!(module_dir_for_root("test"), ".");
+        assert_eq!(module_dir_for_root("tests"), ".");
+        assert_eq!(module_dir_for_root("resources"), ".");
+
+        // Nested module_dir_for_root
+        assert_eq!(module_dir_for_root("core/src/main/java"), "core");
+        assert_eq!(module_dir_for_root("core/src/test/java"), "core");
+        assert_eq!(module_dir_for_root("core/src/main/resources"), "core");
+        assert_eq!(module_dir_for_root("core/src/test/resources"), "core");
+        assert_eq!(module_dir_for_root("services/core/src/test"), "services/core");
+        assert_eq!(module_dir_for_root("services/core/resources"), "services/core");
+    }
+
+    #[test]
+    fn module_dir_for_root_maps_nonstandard_src_main_and_test_subdirs() {
+        assert_eq!(module_dir_for_root("gson/src/main/java-templates"), "gson");
+        assert_eq!(module_dir_for_root("src/main/java-templates"), ".");
+        assert_eq!(module_dir_for_root("gson/src/test/java-templates"), "gson");
+        assert_eq!(module_dir_for_root("src/test/java-templates"), ".");
     }
 }

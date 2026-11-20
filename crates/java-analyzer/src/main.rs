@@ -1,6 +1,6 @@
 use std::env;
 
-use java_analyzer::cli::{help_text, parse_cli_args, run_configure, CliCommand};
+use java_analyzer::cli::{help_text, parse_cli_args, run_configure, run_inspect, CliCommand};
 use lsp_server::Connection;
 
 fn main() -> Result<(), Box<dyn std::error::Error + Sync + Send>> {
@@ -15,6 +15,10 @@ fn main() -> Result<(), Box<dyn std::error::Error + Sync + Send>> {
     match command {
         CliCommand::Help => {
             print!("{}", help_text());
+            Ok(())
+        }
+        CliCommand::Inspect(args) => {
+            run_inspect(args)?;
             Ok(())
         }
         CliCommand::Configure(args) => {

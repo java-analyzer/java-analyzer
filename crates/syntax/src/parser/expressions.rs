@@ -479,6 +479,7 @@ fn is_cast_ahead(p: &Parser<'_, '_>) -> bool {
     }
     let after = p.nth(n + 1);
     is_primitive_kw(after)
+        || after == VOID_KW
         || matches!(
             after,
             IDENT

@@ -125,3 +125,30 @@ pub fn parse_with_level(text: &str, level: LanguageLevel) -> Parse {
         errors: Arc::new(errors),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cast_to_void_class_parses_as_cast_expr() {
+        let parse = parse("class T { <T> Class<T> f() { return (Class<T>) void.class; } }");
+        assert!(
+            parse.errors().is_empty(),
+            "expected zero syntax errors, got: {:?}",
+            parse.errors()
+        );
+        let root = parse.syntax_node();
+        let cast_expr = root
+            .descendants()
+            .find(|n| n.kind() == SyntaxKind::CAST_EXPR)
+            .expect("expected a CAST_EXPR node");
+        assert!(
+            cast_expr
+                .descendants()
+                .any(|n| n.kind() == SyntaxKind::CLASS_LITERAL),
+            "expected CAST_EXPR to contain a CLASS_LITERAL, tree:\n{}",
+            parse.debug_dump(false)
+        );
+    }
+}
