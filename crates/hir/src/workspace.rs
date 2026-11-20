@@ -34,11 +34,17 @@ impl RootScope {
     /// [`RootScope::Test`].
     pub fn from_path(rel_path: &str) -> Self {
         let norm = normalize_rel_path(rel_path);
-        if norm.split('/').any(|seg| seg == "test" || seg == "tests") {
-            Self::Test
-        } else {
-            Self::Main
+        let mut prev_was_src = false;
+        for seg in norm.split('/') {
+            if seg == "test" || seg == "tests" {
+                return Self::Test;
+            }
+            if prev_was_src && seg.to_ascii_lowercase().contains("test") {
+                return Self::Test;
+            }
+            prev_was_src = seg == "src";
         }
+        Self::Main
     }
 }
 
@@ -623,15 +629,23 @@ fn strip_package_suffix(dir: &str, package: &str) -> Option<String> {
 }
 
 /// Derives the enclosing module directory `rel_path` from a Java source or resource root directory.
-/// For standard layouts (`<mod>/src/main/java`, `<mod>/src/test/java`, `<mod>/src`, `<mod>/test`),
-/// returns `<mod>` (or `"."` at the workspace root); otherwise returns the root directory itself.
+/// For standard layouts (`<mod>/src/main/java`, `<mod>/src/test/java`, `<mod>/src/<sourceSet>/java`,
+/// `<mod>/src/java`, `<mod>/test/java`, `<mod>/src`, `<mod>/test`), returns `<mod>` (or `"."` at
+/// the workspace root); otherwise returns the root directory itself.
 pub fn module_dir_for_root(root_dir: &str) -> String {
     let norm = normalize_rel_path(root_dir);
     if norm.starts_with("src/main/")
         || norm.starts_with("src/test/")
         || matches!(
             norm.as_str(),
-            "src/main" | "src/test" | "src" | "test" | "tests" | "resources"
+            "src/main"
+                | "src/test"
+                | "src/java"
+                | "test/java"
+                | "src"
+                | "test"
+                | "tests"
+                | "resources"
         )
     {
         return ".".to_string();
@@ -642,14 +656,22 @@ pub fn module_dir_for_root(root_dir: &str) -> String {
     {
         return normalize_rel_path(prefix);
     }
-    for suffix in [
-        "/src/main",
-        "/src/test",
-        "/src",
-        "/test",
-        "/tests",
-        "/resources",
-    ] {
+    for suffix in ["/src/main", "/src/test", "/src/java", "/test/java"] {
+        if let Some(stripped) = norm.strip_suffix(suffix) {
+            return normalize_rel_path(stripped);
+        }
+    }
+    let segments: Vec<&str> = norm.split('/').collect();
+    if segments.len() >= 3
+        && segments[segments.len() - 3] == "src"
+        && matches!(segments[segments.len() - 1], "java" | "resources")
+    {
+        if segments.len() == 3 {
+            return ".".to_string();
+        }
+        return normalize_rel_path(&segments[..segments.len() - 3].join("/"));
+    }
+    for suffix in ["/src", "/test", "/tests", "/resources"] {
         if let Some(stripped) = norm.strip_suffix(suffix) {
             return normalize_rel_path(stripped);
         }
@@ -705,7 +727,8 @@ pub fn infer_workspace_layout(
     }
 
     // 1. Collect `module-info.java` roots and `package-info.java` authoritative directory packages.
-    let mut module_headers_by_mod_dir: BTreeMap<String, ModuleHeader> = BTreeMap::new();
+    let mut module_headers_by_mod_dir: BTreeMap<String, (RootScope, ModuleHeader)> =
+        BTreeMap::new();
     let mut known_source_roots: BTreeSet<String> = BTreeSet::new();
     let mut authoritative_dir_pkg: BTreeMap<String, String> = BTreeMap::new();
 
@@ -713,8 +736,17 @@ pub fn infer_workspace_layout(
         if pf.name == "module-info.java" {
             known_source_roots.insert(pf.dir.clone());
             let mod_dir = module_dir_for_root(&pf.dir);
+            let scope = RootScope::from_path(&pf.dir);
             if let Some(mh) = &pf.header.module {
-                module_headers_by_mod_dir.insert(mod_dir, mh.clone());
+                let should_insert = match module_headers_by_mod_dir.get(&mod_dir) {
+                    None => true,
+                    Some((existing_scope, _)) => {
+                        *existing_scope == RootScope::Test && scope == RootScope::Main
+                    }
+                };
+                if should_insert {
+                    module_headers_by_mod_dir.insert(mod_dir, (scope, mh.clone()));
+                }
             }
         } else if pf.name == "package-info.java" {
             if let Some(pkg) = &pf.header.package {
@@ -900,7 +932,7 @@ pub fn infer_workspace_layout(
 
     for (idx, (mod_dir, mut src_map)) in mod_source_roots.into_iter().enumerate() {
         let id = ModuleId(idx as u32);
-        let mh = module_headers_by_mod_dir.get(&mod_dir);
+        let mh = module_headers_by_mod_dir.get(&mod_dir).map(|(_, h)| h);
         let module_name = mh.map(|h| h.name.clone());
 
         let mod_delta = delta
@@ -983,7 +1015,7 @@ pub fn infer_workspace_layout(
         let mod_name = modules[i].module_name.clone();
         let mut deps = Vec::new();
 
-        if let Some(mh) = module_headers_by_mod_dir.get(&mod_dir) {
+        if let Some((_, mh)) = module_headers_by_mod_dir.get(&mod_dir) {
             for req in &mh.requires {
                 let target = lookup_slice
                     .iter()
@@ -1370,5 +1402,121 @@ mod tests {
         assert_eq!(module_dir_for_root("src/main/java-templates"), ".");
         assert_eq!(module_dir_for_root("gson/src/test/java-templates"), "gson");
         assert_eq!(module_dir_for_root("src/test/java-templates"), ".");
+    }
+
+    #[test]
+    fn main_module_info_takes_precedence_over_test_module_info() {
+        let main_mod = parse_tree("module tools.jackson.core { requires java.logging; }");
+        let test_mod =
+            parse_tree("module tools.jackson.core.unittest { requires org.junit.jupiter.api; }");
+        let main_cls = parse_tree("package tools.jackson.core;\npublic class JsonFactory {}");
+        let test_cls = parse_tree("package tools.jackson.core;\npublic class JsonFactoryTest {}");
+
+        // Main before Test
+        let files_main_first = [
+            (FileId(1), "src/main/java/module-info.java", &main_mod),
+            (
+                FileId(2),
+                "src/main/java/tools/jackson/core/JsonFactory.java",
+                &main_cls,
+            ),
+            (FileId(3), "src/test/java/module-info.java", &test_mod),
+            (
+                FileId(4),
+                "src/test/java/tools/jackson/core/JsonFactoryTest.java",
+                &test_cls,
+            ),
+        ];
+        let layout_main_first = infer_workspace_layout(
+            &files_main_first,
+            &[],
+            LanguageLevel::latest(),
+            &WorkspaceDelta::default(),
+        );
+        assert_eq!(layout_main_first.modules.len(), 1);
+        let m1 = layout_main_first.module_by_path(".").unwrap();
+        assert_eq!(m1.module_name.as_deref(), Some("tools.jackson.core"));
+        assert_eq!(
+            m1.dependencies,
+            vec![ModuleDependency::Module {
+                target: ModuleTarget::External("java.logging".to_string()),
+                scope: RootScope::Main,
+                exported: false,
+            }]
+        );
+
+        // Test before Main
+        let files_test_first = [
+            (FileId(1), "src/test/java/module-info.java", &test_mod),
+            (FileId(2), "src/main/java/module-info.java", &main_mod),
+        ];
+        let layout_test_first = infer_workspace_layout(
+            &files_test_first,
+            &[],
+            LanguageLevel::latest(),
+            &WorkspaceDelta::default(),
+        );
+        assert_eq!(layout_test_first.modules.len(), 1);
+        let m2 = layout_test_first.module_by_path(".").unwrap();
+        assert_eq!(m2.module_name.as_deref(), Some("tools.jackson.core"));
+    }
+
+    #[test]
+    fn module_dir_and_root_scope_handle_ant_and_gradle_custom_source_sets() {
+        // Classic Ant roots
+        assert_eq!(module_dir_for_root("src/java"), ".");
+        assert_eq!(module_dir_for_root("test/java"), ".");
+        assert_eq!(module_dir_for_root("core/src/java"), "core");
+        assert_eq!(module_dir_for_root("core/test/java"), "core");
+
+        // Gradle custom source sets
+        assert_eq!(
+            module_dir_for_root("junit-jupiter-api/src/testFixtures/java"),
+            "junit-jupiter-api"
+        );
+        assert_eq!(
+            module_dir_for_root("junit-jupiter-api/src/testFixtures/resources"),
+            "junit-jupiter-api"
+        );
+        assert_eq!(
+            module_dir_for_root("junit-jupiter-params/src/jmh/java"),
+            "junit-jupiter-params"
+        );
+        assert_eq!(
+            module_dir_for_root("platform-tests/src/graalVmTest/java"),
+            "platform-tests"
+        );
+        assert_eq!(module_dir_for_root("src/testFixtures/java"), ".");
+        assert_eq!(module_dir_for_root("src/jmh/resources"), ".");
+
+        // RootScope classification for custom source sets vs module names
+        assert_eq!(
+            RootScope::from_path("junit-jupiter-api/src/testFixtures/java"),
+            RootScope::Test
+        );
+        assert_eq!(
+            RootScope::from_path("platform-tests/src/graalVmTest/java"),
+            RootScope::Test
+        );
+        assert_eq!(
+            RootScope::from_path("junit-jupiter-params/src/jmh/java"),
+            RootScope::Main
+        );
+        assert_eq!(
+            RootScope::from_path("test-jpms/src/main/java"),
+            RootScope::Main
+        );
+        assert_eq!(
+            RootScope::from_path("platform-tests/src/main/java"),
+            RootScope::Main
+        );
+        assert_eq!(
+            RootScope::from_path("src/integrationTest/java"),
+            RootScope::Test
+        );
+        assert_eq!(
+            RootScope::from_path("src/functionalTest/resources"),
+            RootScope::Test
+        );
     }
 }

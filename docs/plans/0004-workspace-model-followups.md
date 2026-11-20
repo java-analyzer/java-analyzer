@@ -27,16 +27,10 @@ Upgrade the interactive session in `crates/java-analyzer/src/cli.rs` from number
 - Readline input with Tab autocompletion for filesystem paths (`--jdk`, `sources`, `resources`, local `.jar`s), discovered workspace module names, and installed JDK versions.
 
 ## 4. Real-World Project Inference Gaps
-Discovered by running `java-analyzer inspect` against public repositories (`apache/commons-lang`, `google/gson`, `junit-team/junit-framework`, `apache/ant-ivy`):
+Remaining deferred items discovered via `mise run workspace-corpus` across 12 public repositories:
 
-### Gradle (`junit-framework`)
-- **Custom Gradle source sets**: Generalize `module_dir_for_root` so `<mod>/src/<sourceSet>/{java,resources}` (e.g. `src/testFixtures/java`, `src/jmh/java`, `src/tools/java`, `src/archUnit/java`, `src/graalVmTest/java`, `src/processStarter/java`) attaches to `<mod>` instead of becoming separate unnamed modules, and classify `*Test*` / `testFixtures` source sets as `RootScope::Test`.
-
-### Ant + Ivy (`apache/ant-ivy`)
-- **Classic Ant `src/java` and `test/java` roots**: Recognize `src/java` (`Main`) and `test/java` (`Test`) as source roots of the enclosing module (`.` at workspace root) so they inherit the module's Ivy dependencies instead of splitting into separate modules.
-- **Ant `<property file="..."/>` & shared Ivy properties**: Load `.properties` files referenced via `<property file="..."/>` in `build.xml` and share the resolved Ant property map with `introspect_ivy_xml` so `${...}` versions (e.g. `${apache-ant.version}`, `${junit.version}`) and `<javac source="${...}"/>` release properties expand cleanly.
-- **Scope `<fileset>` scanning to `<path>` / `<classpath>`**: Only treat `<fileset dir="..."/>` inside `<path>` / `<classpath>` blocks (or explicitly matching `*.jar`) as compile-time `Path` dependencies so non-classpath copy/test filesets (e.g. `test/repositories`) are not added as dependencies.
-- **Deduplicate manifest-declared vs. inferred source roots**: When `build.xml` declares `<javac srcdir="test/custom-classpath"/>`, attach the inferred files to `.`'s source root rather than creating a duplicate standalone module.
+### Ant + Ivy (`apache/ant-ivy`, `apache/ant`, `apache/tomcat`)
+- **Deduplicate manifest-declared vs. inferred source roots**: When `build.xml` declares `<javac srcdir="test/custom-classpath"/>` or `<javac srcdir="java"/>`, attach inferred files to `.`'s source root rather than also creating a duplicate standalone module.
 
 ### Maven (`commons-lang`, `google/gson`)
 - **External parent POM & BOM resolution**: Resolve parent POMs (e.g. `org.apache.commons:commons-parent`) and `<scope>import</scope>` BOMs from `~/.m2/repository` so inherited properties (`${commons.jmh.version}`) and managed dependency versions (`*`) expand fully *(tracked with Spec 0015)*.

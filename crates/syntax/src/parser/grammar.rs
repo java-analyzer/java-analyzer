@@ -507,11 +507,13 @@ pub(super) fn class_body(p: &mut Parser<'_, '_>) {
         return;
     }
     p.nested((), |p| {
-        let m = p.start();
-        p.bump(L_CURLY);
-        members(p);
-        p.expect(R_CURLY, "expected '}'");
-        m.complete(p, CLASS_BODY);
+        p.with_no_lambda(false, |p| {
+            let m = p.start();
+            p.bump(L_CURLY);
+            members(p);
+            p.expect(R_CURLY, "expected '}'");
+            m.complete(p, CLASS_BODY);
+        })
     })
 }
 

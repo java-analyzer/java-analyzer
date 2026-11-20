@@ -710,6 +710,8 @@ fn introspect_manifests(
     version_specs: &mut Vec<DetectedVersionSpec>,
 ) -> ManifestMetadata {
     let mut meta = ManifestMetadata::default();
+    let mut ant_props: BTreeMap<String, String> = BTreeMap::new();
+    let mut ivy_contents: Vec<String> = Vec::new();
 
     for spec in build_specs {
         let file_name = spec
@@ -735,19 +737,27 @@ fn introspect_manifests(
                 );
             }
             "build.xml" => {
-                introspect_ant_build_xml(
+                let props = introspect_ant_build_xml(
                     workspace_dir,
                     &content,
                     &spec.manifest_path,
                     version_specs,
                     &mut meta,
                 );
+                for (k, v) in props {
+                    ant_props.entry(k).or_insert(v);
+                }
             }
             "ivy.xml" => {
-                introspect_ivy_xml(&content, &mut meta);
+                ivy_contents.push(content);
             }
             _ => {}
         }
+    }
+
+    // Process ivy.xml after build.xml so Ant properties (including <property file="..."/>) are shared.
+    for ivy_content in ivy_contents {
+        introspect_ivy_xml(&ivy_content, &ant_props, &mut meta);
     }
 
     meta
@@ -1240,30 +1250,59 @@ fn extract_first_quoted(s: &str) -> Option<String> {
     None
 }
 
+fn load_ant_properties_file(content: &str, props: &mut BTreeMap<String, String>) {
+    for raw_line in content.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('!') {
+            continue;
+        }
+        let Some(sep_idx) = trimmed.find(['=', ':']) else {
+            continue;
+        };
+        let key = trimmed[..sep_idx].trim();
+        let val = trimmed[sep_idx + 1..].trim();
+        if !key.is_empty() && !props.contains_key(key) {
+            props.insert(key.to_string(), val.to_string());
+        }
+    }
+}
+
 fn introspect_ant_build_xml(
     workspace_dir: &Path,
     content: &str,
     path: &Path,
     version_specs: &mut Vec<DetectedVersionSpec>,
     meta: &mut ManifestMetadata,
-) {
-    // 1. Collect <property name="..." value="..." / location="..."/>
+) -> BTreeMap<String, String> {
+    let cleaned = strip_xml_comments(content);
+
+    // 1. Collect <property name="..." value="..." / location="..."/> and <property file="..."/>
     let mut props: BTreeMap<String, String> = BTreeMap::new();
     props.insert("basedir".to_string(), ".".to_string());
-    for tag in find_xml_start_tags(content, "property") {
+    for tag in find_xml_start_tags(&cleaned, "property") {
         if let Some(name) = extract_xml_attr(&tag, "name") {
             if let Some(val) =
                 extract_xml_attr(&tag, "value").or_else(|| extract_xml_attr(&tag, "location"))
             {
-                let resolved = expand_props(&val, &props);
-                props.insert(name, resolved);
+                if !props.contains_key(&name) {
+                    let resolved = expand_props(&val, &props);
+                    props.insert(name, resolved);
+                }
+            }
+        } else if let Some(file_attr) = extract_xml_attr(&tag, "file") {
+            let expanded_path = expand_props(&file_attr, &props);
+            if !expanded_path.contains("${") {
+                let prop_path = workspace_dir.join(expanded_path.trim());
+                if let Ok(prop_text) = fs::read_to_string(&prop_path) {
+                    load_ant_properties_file(&prop_text, &mut props);
+                }
             }
         }
     }
 
     // 2. Inspect <javac ...> tags for srcdir, release/source/target, classpath
     let mut found_release = None;
-    for javac_tag in find_xml_start_tags(content, "javac") {
+    for javac_tag in find_xml_start_tags(&cleaned, "javac") {
         for attr in ["release", "source", "target"] {
             if let Some(raw_ver) = extract_xml_attr(&javac_tag, attr) {
                 let expanded = expand_props(&raw_ver, &props);
@@ -1277,7 +1316,7 @@ fn introspect_ant_build_xml(
             let expanded = expand_props(&srcdir, &props);
             for part in expanded.split([':', ';']) {
                 let norm = normalize_rel_path(part.trim());
-                if norm != "." && !norm.contains("${") {
+                if norm != "." && !norm.contains("${") && !norm.contains("@{") {
                     let scope = RootScope::from_path(&norm);
                     if !meta.extra_source_dirs.iter().any(|(p, _)| p == &norm) {
                         meta.extra_source_dirs.push((norm, scope));
@@ -1289,7 +1328,7 @@ fn introspect_ant_build_xml(
             let expanded = expand_props(&cp, &props);
             for part in expanded.split([':', ';']) {
                 let norm = normalize_rel_path(part.trim());
-                if norm != "." && !norm.contains("${") {
+                if norm != "." && !norm.contains("${") && !norm.contains("@{") {
                     let dep = ModuleDependency::Path {
                         path: norm,
                         scope: RootScope::Main,
@@ -1303,13 +1342,13 @@ fn introspect_ant_build_xml(
     }
 
     // Also inspect <src path="..."/>
-    for src_tag in find_xml_start_tags(content, "src") {
+    for src_tag in find_xml_start_tags(&cleaned, "src") {
         if let Some(p) =
             extract_xml_attr(&src_tag, "path").or_else(|| extract_xml_attr(&src_tag, "location"))
         {
             let expanded = expand_props(&p, &props);
             let norm = normalize_rel_path(&expanded);
-            if norm != "." && !norm.contains("${") {
+            if norm != "." && !norm.contains("${") && !norm.contains("@{") {
                 let scope = RootScope::from_path(&norm);
                 if !meta.extra_source_dirs.iter().any(|(d, _)| d == &norm) {
                     meta.extra_source_dirs.push((norm, scope));
@@ -1318,46 +1357,50 @@ fn introspect_ant_build_xml(
         }
     }
 
-    // Inspect <fileset dir="..."/> for compile-time JAR directories
-    for fs_tag in find_xml_start_tags(content, "fileset") {
-        if let Some(dir) = extract_xml_attr(&fs_tag, "dir") {
-            let expanded = expand_props(&dir, &props);
-            let norm = normalize_rel_path(&expanded);
-            if norm != "." && !norm.contains("${") {
-                let full_dir = workspace_dir.join(&norm);
-                let mut added_jars = false;
-                if let Ok(entries) = fs::read_dir(&full_dir) {
-                    let mut jar_paths: Vec<String> = entries
-                        .flatten()
-                        .filter_map(|e| {
-                            let p = e.path();
-                            if p.extension().and_then(|x| x.to_str()) == Some("jar") {
-                                let name = p.file_name()?.to_str()?;
-                                Some(normalize_rel_path(&format!("{norm}/{name}")))
-                            } else {
-                                None
+    // Inspect <fileset dir="..."/> inside <path> and <classpath> blocks for compile-time JARs
+    let mut cp_blocks = extract_xml_blocks_with_attrs(&cleaned, "path");
+    cp_blocks.extend(extract_xml_blocks_with_attrs(&cleaned, "classpath"));
+    for block in cp_blocks {
+        for fs_tag in find_xml_start_tags(&block, "fileset") {
+            if let Some(dir) = extract_xml_attr(&fs_tag, "dir") {
+                let expanded = expand_props(&dir, &props);
+                let norm = normalize_rel_path(&expanded);
+                if norm != "." && !norm.contains("${") && !norm.contains("@{") {
+                    let full_dir = workspace_dir.join(&norm);
+                    let mut added_jars = false;
+                    if let Ok(entries) = fs::read_dir(&full_dir) {
+                        let mut jar_paths: Vec<String> = entries
+                            .flatten()
+                            .filter_map(|e| {
+                                let p = e.path();
+                                if p.extension().and_then(|x| x.to_str()) == Some("jar") {
+                                    let name = p.file_name()?.to_str()?;
+                                    Some(normalize_rel_path(&format!("{norm}/{name}")))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        jar_paths.sort();
+                        for jp in jar_paths {
+                            added_jars = true;
+                            let dep = ModuleDependency::Path {
+                                path: jp,
+                                scope: RootScope::Main,
+                            };
+                            if !meta.dependencies.contains(&dep) {
+                                meta.dependencies.push(dep);
                             }
-                        })
-                        .collect();
-                    jar_paths.sort();
-                    for jp in jar_paths {
-                        added_jars = true;
+                        }
+                    }
+                    if !added_jars {
                         let dep = ModuleDependency::Path {
-                            path: jp,
+                            path: norm,
                             scope: RootScope::Main,
                         };
                         if !meta.dependencies.contains(&dep) {
                             meta.dependencies.push(dep);
                         }
-                    }
-                }
-                if !added_jars {
-                    let dep = ModuleDependency::Path {
-                        path: norm,
-                        scope: RootScope::Main,
-                    };
-                    if !meta.dependencies.contains(&dep) {
-                        meta.dependencies.push(dep);
                     }
                 }
             }
@@ -1369,24 +1412,38 @@ fn introspect_ant_build_xml(
             source: "build.xml".to_string(),
             path: path.to_path_buf(),
             release,
-            preview: content.contains("--enable-preview"),
+            preview: cleaned.contains("--enable-preview"),
         });
     }
+
+    props
 }
 
-fn introspect_ivy_xml(content: &str, meta: &mut ManifestMetadata) {
-    for dep_tag in find_xml_start_tags(content, "dependency") {
-        let org = extract_xml_attr(&dep_tag, "org");
-        let name = extract_xml_attr(&dep_tag, "name");
-        let rev = extract_xml_attr(&dep_tag, "rev").unwrap_or_else(|| "*".to_string());
+fn introspect_ivy_xml(
+    content: &str,
+    ant_props: &BTreeMap<String, String>,
+    meta: &mut ManifestMetadata,
+) {
+    let cleaned = strip_xml_comments(content);
+    for dep_tag in find_xml_start_tags(&cleaned, "dependency") {
+        let org = extract_xml_attr(&dep_tag, "org")
+            .map(|s| expand_props(&s, ant_props).trim().to_string())
+            .filter(|s| !s.is_empty());
+        let name = extract_xml_attr(&dep_tag, "name")
+            .map(|s| expand_props(&s, ant_props).trim().to_string())
+            .filter(|s| !s.is_empty());
+        let rev = extract_xml_attr(&dep_tag, "rev")
+            .map(|s| expand_props(&s, ant_props).trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "*".to_string());
         let conf = extract_xml_attr(&dep_tag, "conf").unwrap_or_default();
 
         if let (Some(org), Some(name)) = (org, name) {
             if let Some(scope) = classify_ivy_conf(&conf) {
                 let dep = ModuleDependency::Maven {
-                    group: org.trim().to_string(),
-                    artifact: name.trim().to_string(),
-                    version: rev.trim().to_string(),
+                    group: org,
+                    artifact: name,
+                    version: rev,
                     classifier: None,
                     scope,
                 };
@@ -1458,6 +1515,20 @@ fn extract_xml_tag_text(xml: &str, tag: &str) -> Option<String> {
     Some(xml[start..start + end].trim().to_string())
 }
 
+fn find_xml_tag_end(slice: &str) -> Option<usize> {
+    let mut in_quote: Option<char> = None;
+    for (offset, ch) in slice.char_indices() {
+        match in_quote {
+            Some(q) if ch == q => in_quote = None,
+            Some(_) => {}
+            None if ch == '"' || ch == '\'' => in_quote = Some(ch),
+            None if ch == '>' => return Some(offset),
+            None => {}
+        }
+    }
+    None
+}
+
 fn find_xml_start_tags(xml: &str, tag: &str) -> Vec<String> {
     let mut results = Vec::new();
     let needle = format!("<{tag}");
@@ -1467,21 +1538,7 @@ fn find_xml_start_tags(xml: &str, tag: &str) -> Vec<String> {
         let next_ch = after_name.chars().next().unwrap_or(' ');
         if next_ch.is_whitespace() || next_ch == '>' || next_ch == '/' {
             let slice = &rest[idx..];
-            let mut in_quote: Option<char> = None;
-            let mut end_pos = None;
-            for (offset, ch) in slice.char_indices() {
-                match in_quote {
-                    Some(q) if ch == q => in_quote = None,
-                    Some(_) => {}
-                    None if ch == '"' || ch == '\'' => in_quote = Some(ch),
-                    None if ch == '>' => {
-                        end_pos = Some(offset);
-                        break;
-                    }
-                    None => {}
-                }
-            }
-            if let Some(end) = end_pos {
+            if let Some(end) = find_xml_tag_end(slice) {
                 results.push(slice[..=end].to_string());
                 rest = &slice[end + 1..];
                 continue;
@@ -1490,6 +1547,78 @@ fn find_xml_start_tags(xml: &str, tag: &str) -> Vec<String> {
         rest = &rest[idx + needle.len()..];
     }
     results
+}
+
+fn extract_xml_blocks_with_attrs(xml: &str, tag: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let open_prefix = format!("<{tag}");
+    let close_tag = format!("</{tag}>");
+    let mut rest = xml;
+
+    while let Some(idx) = rest.find(&open_prefix) {
+        let after_name = &rest[idx + open_prefix.len()..];
+        let next_ch = after_name.chars().next().unwrap_or(' ');
+        if !(next_ch.is_whitespace() || next_ch == '>' || next_ch == '/') {
+            rest = after_name;
+            continue;
+        }
+        let slice = &rest[idx..];
+        let Some(tag_end) = find_xml_tag_end(slice) else {
+            break;
+        };
+        let is_self_closing = slice[..tag_end].trim_end().ends_with('/');
+        let after_open = &slice[tag_end + 1..];
+        if is_self_closing {
+            rest = after_open;
+            continue;
+        }
+
+        let mut depth = 1usize;
+        let mut cursor = after_open;
+        let mut block_end = None;
+        while depth > 0 {
+            let next_open = cursor.find(&open_prefix);
+            let next_close = cursor.find(&close_tag);
+            match (next_open, next_close) {
+                (_, None) => break,
+                (Some(o), Some(c)) if o < c => {
+                    let after_nested = &cursor[o + open_prefix.len()..];
+                    let nested_ch = after_nested.chars().next().unwrap_or(' ');
+                    if nested_ch.is_whitespace() || nested_ch == '>' || nested_ch == '/' {
+                        let nested_slice = &cursor[o..];
+                        let Some(nested_end) = find_xml_tag_end(nested_slice) else {
+                            break;
+                        };
+                        let nested_self_closing =
+                            nested_slice[..nested_end].trim_end().ends_with('/');
+                        if !nested_self_closing {
+                            depth += 1;
+                        }
+                        cursor = &nested_slice[nested_end + 1..];
+                    } else {
+                        cursor = after_nested;
+                    }
+                }
+                (_, Some(c)) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let matched_len = after_open.len() - cursor.len() + c;
+                        block_end = Some(matched_len);
+                    }
+                    cursor = &cursor[c + close_tag.len()..];
+                }
+            }
+        }
+
+        if let Some(end) = block_end {
+            blocks.push(after_open[..end].to_string());
+            rest = &after_open[end + close_tag.len()..];
+        } else {
+            rest = after_open;
+        }
+    }
+
+    blocks
 }
 
 fn extract_xml_attr(tag_text: &str, attr: &str) -> Option<String> {
@@ -1518,6 +1647,11 @@ fn is_conventional_resource_dir(rel_norm: &str, parent_dir: &Path) -> bool {
         || rel_norm.ends_with("/src/main/resources")
         || rel_norm.ends_with("/src/test/resources")
         || (rel_norm.ends_with("/resources") && parent_dir.join("src").is_dir())
+}
+
+fn is_noncompilable_resource_dir(norm: &str) -> bool {
+    let last_seg = norm.rsplit('/').next().unwrap_or(norm);
+    last_seg.starts_with("resources-") && (norm.starts_with("src/") || norm.contains("/src/"))
 }
 
 fn scan_workspace_fs(
@@ -1558,7 +1692,8 @@ fn scan_workspace_fs(
             }
 
             // Strong resource root indicator directly under `current` (handles workspace root `META-INF/`)
-            if name_str == "META-INF"
+            if !in_resource_root
+                && name_str == "META-INF"
                 && (path.join("MANIFEST.MF").is_file() || path.join("services").is_dir())
             {
                 if let Ok(rel_parent) = current.strip_prefix(root) {
@@ -1571,7 +1706,11 @@ fn scan_workspace_fs(
                 && rel_norm
                     .as_deref()
                     .is_some_and(|r| is_conventional_resource_dir(r, current));
-            let is_meta_inf_res = is_meta_inf_resource_root(&path);
+            let is_noncompilable_res = rel_norm
+                .as_deref()
+                .is_some_and(is_noncompilable_resource_dir);
+            let is_meta_inf_res =
+                !in_resource_root && !is_noncompilable_res && is_meta_inf_resource_root(&path);
 
             if is_conv_res || is_meta_inf_res {
                 if let Some(norm) = rel_norm {
@@ -1579,7 +1718,9 @@ fn scan_workspace_fs(
                 }
             }
 
-            let child_in_resource = in_resource_root || is_conv_res || is_meta_inf_res;
+            // Conventional resource dirs and `src/*/resources-*` skip `.java` fixtures; directories
+            // that merely contain `META-INF/` (e.g. Tomcat's `test/` or workspace root) still scan `.java`.
+            let child_in_resource = in_resource_root || is_conv_res || is_noncompilable_res;
             scan_workspace_fs(root, &path, child_in_resource, java_files, resource_dirs);
         } else if !in_resource_root && path.is_file() && name_str.ends_with(".java") {
             if let Ok(rel) = path.strip_prefix(root) {
@@ -2571,10 +2712,9 @@ dependencies = { include = ["com.google.guava:guava:33.3.1-jre", "github:google/
             "spi/resources/META-INF/services/com.example.Spi",
             "com.example.Impl\n",
         );
-        tmp.write("spi/resources/Fixture.java", "class Fixture {}\n");
 
         let probe = probe_workspace(&tmp.0);
-        // Only real Java sources are collected; fixtures in resource roots and src/site are skipped.
+        // Only real Java sources are collected; fixtures in conventional resource roots and src/site are skipped.
         assert!(probe
             .file_paths
             .contains_key("src/main/java/com/example/resources/ResourceHelper.java"));
@@ -2584,7 +2724,6 @@ dependencies = { include = ["com.google.guava:guava:33.3.1-jre", "github:google/
         assert!(!probe
             .file_paths
             .contains_key("src/site/resources/SiteSample.java"));
-        assert!(!probe.file_paths.contains_key("spi/resources/Fixture.java"));
 
         let root_mod = probe.layout.module_by_path(".").unwrap();
         let res_paths: Vec<(&str, RootScope)> = root_mod
@@ -2605,6 +2744,83 @@ dependencies = { include = ["com.google.guava:guava:33.3.1-jre", "github:google/
             .sources
             .iter()
             .any(|s| s.rel_path == "src/main/java" && s.scope == RootScope::Main));
+    }
+
+    #[test]
+    fn meta_inf_dir_allows_java_sources_while_conventional_resources_skip_them() {
+        let tmp = TempDir::new("meta_inf_with_java_sources");
+        tmp.write("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n");
+        tmp.write(
+            "src/main/java/com/example/App.java",
+            "package com.example;\npublic class App {}\n",
+        );
+        tmp.write(
+            "test/META-INF/services/com.example.Spi",
+            "com.example.SpiImpl\n",
+        );
+        tmp.write(
+            "test/com/example/FooTest.java",
+            "package com.example;\npublic class FooTest {}\n",
+        );
+        tmp.write(
+            "src/test/resources/Fixture.java",
+            "package fixtures;\npublic class Fixture {}\n",
+        );
+
+        let probe = probe_workspace(&tmp.0);
+
+        let foo_test_id = probe
+            .file_paths
+            .get("test/com/example/FooTest.java")
+            .copied()
+            .expect("FooTest.java under test/ with META-INF/ must be scanned");
+        assert!(
+            probe
+                .file_paths
+                .contains_key("src/main/java/com/example/App.java"),
+            "root META-INF/ must not skip workspace .java sources"
+        );
+        assert!(
+            !probe.file_paths.contains_key("src/test/resources/Fixture.java"),
+            "conventional src/test/resources/ must continue skipping .java fixtures"
+        );
+
+        let root_mod = probe.layout.module_by_path(".").unwrap();
+        assert!(
+            root_mod
+                .resources
+                .iter()
+                .any(|r| r.rel_path == "test" && r.scope == RootScope::Test),
+            "test/ should be inferred as a Test ResourceRoot: {:?}",
+            root_mod.resources
+        );
+        assert!(
+            root_mod
+                .resources
+                .iter()
+                .any(|r| r.rel_path == "." && r.scope == RootScope::Main),
+            "workspace root with META-INF/ should be inferred as a Main ResourceRoot: {:?}",
+            root_mod.resources
+        );
+        assert!(
+            root_mod
+                .resources
+                .iter()
+                .any(|r| r.rel_path == "src/test/resources" && r.scope == RootScope::Test),
+            "src/test/resources should be inferred as a Test ResourceRoot: {:?}",
+            root_mod.resources
+        );
+
+        let test_src = root_mod
+            .sources
+            .iter()
+            .find(|s| s.rel_path == "test" && s.scope == RootScope::Test)
+            .expect("test/ should also be inferred as a Test SourceRoot");
+        assert!(
+            test_src.files.contains(&foo_test_id),
+            "test SourceRoot should contain FooTest.java: {:?}",
+            test_src.files
+        );
     }
 
     #[test]
@@ -3141,6 +3357,238 @@ dependencies = { exclude = ["com.example:excluded-dep"] }
         assert_eq!(
             probe_prof.language_level_for_path(&tmp_prof.0.join("src/test/java/com/example/AppTest.java")),
             LanguageLevel::new(Release::JAVA_17, false)
+        );
+    }
+
+    #[test]
+    fn skips_java_fixtures_inside_noncompilable_resource_dirs() {
+        let tmp_only = TempDir::new("noncompilable_resources_only");
+        tmp_only.write(
+            "src/test/resources-noncompilable/Broken.java",
+            "package broken;\nclass Broken { @@@ invalid syntax }\n",
+        );
+        tmp_only.write(
+            "src/it/resources-noncompilable/module-info.java",
+            "module bogus.fixture.mod { requires foo.bar; }\n",
+        );
+
+        let probe_only = probe_workspace(&tmp_only.0);
+        assert!(
+            probe_only.file_paths.is_empty(),
+            "noncompilable resource fixtures must be skipped completely: {:?}",
+            probe_only.file_paths
+        );
+        assert!(
+            probe_only
+                .layout
+                .modules
+                .iter()
+                .all(|m| m.module_name.is_none()),
+            "skipped module-info.java fixture must not produce a JPMS module name: {:?}",
+            probe_only.layout.modules
+        );
+        assert!(
+            probe_only
+                .layout
+                .modules
+                .iter()
+                .all(|m| m.resources.is_empty()),
+            "resources-noncompilable must not be added as a ResourceRoot: {:?}",
+            probe_only.layout.modules
+        );
+
+        // Also ensure real sources are still scanned alongside skipped resources-* subtrees
+        let tmp_mixed = TempDir::new("noncompilable_resources_mixed");
+        tmp_mixed.write(
+            "src/main/java/com/example/App.java",
+            "package com.example;\npublic class App {}\n",
+        );
+        tmp_mixed.write(
+            "src/test/resources-noncompilable/Broken.java",
+            "class Broken { @@@ }\n",
+        );
+        tmp_mixed.write(
+            "src/test/resources-noncompilable/META-INF/MANIFEST.MF",
+            "Manifest-Version: 1.0\n",
+        );
+        tmp_mixed.write(
+            "src/it/resources-noncompilable/module-info.java",
+            "module bogus.fixture.mod {}\n",
+        );
+        tmp_mixed.write(
+            "sub/src/main/resources-filtered/Filtered.java",
+            "class Filtered {}\n",
+        );
+
+        let probe_mixed = probe_workspace(&tmp_mixed.0);
+        assert_eq!(probe_mixed.file_paths.len(), 1);
+        assert!(probe_mixed
+            .file_paths
+            .contains_key("src/main/java/com/example/App.java"));
+        assert!(probe_mixed
+            .layout
+            .modules
+            .iter()
+            .all(|m| m.module_name.is_none()));
+        assert!(probe_mixed
+            .layout
+            .modules
+            .iter()
+            .all(|m| m.resources.is_empty()));
+    }
+
+    #[test]
+    fn ant_property_file_expands_javac_release_and_ivy_dependencies() {
+        let tmp = TempDir::new("ant_prop_file_ivy");
+        tmp.write(
+            "version.properties",
+            r#"
+# Line comment with hash
+! Line comment with bang
+
+java.ver=17
+junit.org: org.junit.jupiter
+junit.version = 5.10.2
+already.set=99
+"#,
+        );
+        tmp.write(
+            "build.xml",
+            r#"<project name="demo" default="compile" basedir=".">
+                <property name="already.set" value="21"/>
+                <property name="props.file" value="version.properties"/>
+                <property file="${props.file}"/>
+                <property name="java.ver" value="8"/>
+                <target name="compile">
+                    <javac srcdir="src" destdir="build/classes" release="${java.ver}"/>
+                </target>
+            </project>"#,
+        );
+        tmp.write(
+            "ivy.xml",
+            r#"<ivy-module version="2.0">
+                <info organisation="com.example" module="demo"/>
+                <dependencies>
+                    <dependency org="${junit.org}" name="junit-jupiter" rev="${junit.version}" conf="test->default"/>
+                    <dependency org="com.example" name="pinned" rev="${already.set}" conf="compile->default"/>
+                </dependencies>
+            </ivy-module>"#,
+        );
+        tmp.write(
+            "src/com/example/App.java",
+            "package com.example;\npublic class App {}\n",
+        );
+
+        let probe = probe_workspace(&tmp.0);
+        assert!(probe.conflicts.is_empty(), "conflicts: {:?}", probe.conflicts);
+        assert_eq!(probe.resolved_build, BuildToolKind::Ant);
+        assert_eq!(
+            probe.resolved_level,
+            LanguageLevel::new(Release::JAVA_17, false)
+        );
+
+        let root_mod = &probe.layout.modules[0];
+        assert!(
+            root_mod.dependencies.contains(&ModuleDependency::Maven {
+                group: "org.junit.jupiter".to_string(),
+                artifact: "junit-jupiter".to_string(),
+                version: "5.10.2".to_string(),
+                classifier: None,
+                scope: RootScope::Test,
+            }),
+            "expected expanded ivy dependency from version.properties: {:?}",
+            root_mod.dependencies
+        );
+        assert!(
+            root_mod.dependencies.contains(&ModuleDependency::Maven {
+                group: "com.example".to_string(),
+                artifact: "pinned".to_string(),
+                version: "21".to_string(),
+                classifier: None,
+                scope: RootScope::Main,
+            }),
+            "expected existing Ant property not to be overwritten by property file: {:?}",
+            root_mod.dependencies
+        );
+    }
+
+    #[test]
+    fn ant_fileset_scoped_to_path_and_classpath_and_ignores_macrodef_placeholders() {
+        let tmp = TempDir::new("ant_fileset_scope");
+        tmp.write(
+            "build.xml",
+            r#"<project name="demo" default="compile" basedir=".">
+                <path id="cp">
+                    <fileset dir="lib" includes="*.jar"/>
+                </path>
+                <macrodef name="compile-macro">
+                    <attribute name="filesDir"/>
+                    <attribute name="cpDir"/>
+                    <sequential>
+                        <javac srcdir="@{filesDir}" classpath="@{cpDir}">
+                            <classpath>
+                                <fileset dir="@{filesDir}"/>
+                            </classpath>
+                        </javac>
+                    </sequential>
+                </macrodef>
+                <target name="dist">
+                    <fileset dir="manual"/>
+                </target>
+                <target name="compile">
+                    <javac srcdir="src" destdir="build/classes" release="17">
+                        <classpath refid="cp"/>
+                        <classpath>
+                            <fileset dir="ext-lib" includes="*.jar"/>
+                        </classpath>
+                    </javac>
+                </target>
+            </project>"#,
+        );
+        tmp.write("lib/dep.jar", "");
+        tmp.write("ext-lib/extra.jar", "");
+        tmp.write("manual/doc.jar", "");
+        tmp.write(
+            "src/com/example/App.java",
+            "package com.example;\npublic class App {}\n",
+        );
+
+        let probe = probe_workspace(&tmp.0);
+        let root_mod = &probe.layout.modules[0];
+
+        assert!(
+            root_mod.dependencies.contains(&ModuleDependency::Path {
+                path: "lib/dep.jar".to_string(),
+                scope: RootScope::Main,
+            }),
+            "expected <path><fileset dir='lib'/></path> to be extracted: {:?}",
+            root_mod.dependencies
+        );
+        assert!(
+            root_mod.dependencies.contains(&ModuleDependency::Path {
+                path: "ext-lib/extra.jar".to_string(),
+                scope: RootScope::Main,
+            }),
+            "expected <classpath><fileset dir='ext-lib'/></classpath> to be extracted: {:?}",
+            root_mod.dependencies
+        );
+        assert!(
+            !root_mod.dependencies.iter().any(|d| match d {
+                ModuleDependency::Path { path, .. } => {
+                    path.contains("manual") || path.contains("@{")
+                }
+                _ => false,
+            }),
+            "outside-classpath <fileset> and @{{...}} placeholders must be ignored: {:?}",
+            root_mod.dependencies
+        );
+        assert!(
+            !root_mod
+                .sources
+                .iter()
+                .any(|s| s.rel_path.contains("@{")),
+            "macrodef @{{...}} srcdir must be ignored: {:?}",
+            root_mod.sources
         );
     }
 }

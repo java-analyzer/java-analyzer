@@ -59,20 +59,22 @@ pub(super) fn initializer(p: &mut Parser<'_, '_>) {
 pub(super) fn arg_list(p: &mut Parser<'_, '_>) {
     let m = p.start();
     p.bump(L_PAREN);
-    while !p.at_eof()
-        && !matches!(
-            p.current(),
-            R_PAREN | SEMICOLON | R_CURLY | PUBLIC_KW | PRIVATE_KW | PROTECTED_KW
-        )
-    {
-        expr(p);
-        if !p.eat(COMMA) {
-            break;
+    p.with_no_lambda(false, |p| {
+        while !p.at_eof()
+            && !matches!(
+                p.current(),
+                R_PAREN | SEMICOLON | R_CURLY | PUBLIC_KW | PRIVATE_KW | PROTECTED_KW
+            )
+        {
+            expr(p);
+            if !p.eat(COMMA) {
+                break;
+            }
+            if p.at(R_PAREN) {
+                p.error_missing("expected an expression");
+            }
         }
-        if p.at(R_PAREN) {
-            p.error_missing("expected an expression");
-        }
-    }
+    });
     p.expect(R_PAREN, "expected ')'");
     m.complete(p, ARG_LIST);
 }
@@ -80,21 +82,23 @@ pub(super) fn arg_list(p: &mut Parser<'_, '_>) {
 /// `{ element, element, ... }` where an element is an expression or a nested array initializer.
 pub(super) fn array_init(p: &mut Parser<'_, '_>) {
     p.nested((), |p| {
-        let m = p.start();
-        p.bump(L_CURLY);
-        while !p.at_eof()
-            && !matches!(
-                p.current(),
-                R_CURLY | R_PAREN | SEMICOLON | PUBLIC_KW | PRIVATE_KW | PROTECTED_KW
-            )
-        {
-            initializer(p);
-            if !p.eat(COMMA) {
-                break;
+        p.with_no_lambda(false, |p| {
+            let m = p.start();
+            p.bump(L_CURLY);
+            while !p.at_eof()
+                && !matches!(
+                    p.current(),
+                    R_CURLY | R_PAREN | SEMICOLON | PUBLIC_KW | PRIVATE_KW | PROTECTED_KW
+                )
+            {
+                initializer(p);
+                if !p.eat(COMMA) {
+                    break;
+                }
             }
-        }
-        p.expect(R_CURLY, "expected '}'");
-        m.complete(p, ARRAY_INIT);
+            p.expect(R_CURLY, "expected '}'");
+            m.complete(p, ARRAY_INIT);
+        })
     })
 }
 
@@ -254,7 +258,7 @@ fn postfix(p: &mut Parser<'_, '_>) -> Option<CompletedMarker> {
             L_BRACK => {
                 let m = lhs.precede(p);
                 p.bump(L_BRACK);
-                expr(p);
+                p.with_no_lambda(false, expr);
                 p.expect(R_BRACK, "expected ']'");
                 m.complete(p, ARRAY_ACCESS_EXPR)
             }
@@ -440,7 +444,7 @@ fn paren_primary(p: &mut Parser<'_, '_>) -> CompletedMarker {
         if p.at(R_PAREN) {
             p.error_missing("expected an expression");
         } else {
-            expr(p);
+            p.with_no_lambda(false, expr);
         }
         p.expect(R_PAREN, "expected ')'");
         m.complete(p, PAREN_EXPR)
@@ -483,6 +487,7 @@ fn is_cast_ahead(p: &Parser<'_, '_>) -> bool {
         || matches!(
             after,
             IDENT
+                | UNDERSCORE_KW
                 | INT_NUMBER
                 | LONG_NUMBER
                 | FLOAT_NUMBER
@@ -578,7 +583,7 @@ fn new_expr_rest(p: &mut Parser<'_, '_>) {
                 annotations(p);
                 p.bump(L_BRACK);
                 if !p.at(R_BRACK) {
-                    expr(p);
+                    p.with_no_lambda(false, expr);
                 }
                 p.expect(R_BRACK, "expected ']'");
             }

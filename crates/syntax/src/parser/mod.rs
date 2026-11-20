@@ -264,6 +264,15 @@ impl<'a, 't> Parser<'a, 't> {
         self.depth -= 1;
         result
     }
+
+    /// Runs `f` with [`Self::no_lambda`] set to `no_lambda`, restoring the previous value on return.
+    fn with_no_lambda<T>(&mut self, no_lambda: bool, f: impl FnOnce(&mut Self) -> T) -> T {
+        let outer = self.no_lambda;
+        self.no_lambda = no_lambda;
+        let result = f(self);
+        self.no_lambda = outer;
+        result
+    }
 }
 
 /// A started, not yet completed node. Must be completed or abandoned.

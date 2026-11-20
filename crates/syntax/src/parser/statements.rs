@@ -21,11 +21,13 @@ use crate::{
 /// missing `}` does not swallow the rest of the class. Every enclosing block that is still open
 /// reports its own missing `}`.
 pub(super) fn block(p: &mut Parser<'_, '_>) {
-    let m = p.start();
-    p.bump(L_CURLY);
-    statements(p, |_| false);
-    p.expect(R_CURLY, "expected '}'");
-    m.complete(p, BLOCK);
+    p.with_no_lambda(false, |p| {
+        let m = p.start();
+        p.bump(L_CURLY);
+        statements(p, |_| false);
+        p.expect(R_CURLY, "expected '}'");
+        m.complete(p, BLOCK);
+    });
 }
 
 /// Parses statements until `}`, end of input, a member-only modifier, or whatever `stop` says.
@@ -277,7 +279,7 @@ fn paren_cond(p: &mut Parser<'_, '_>) {
     if p.at(R_PAREN) {
         p.error_missing("expected an expression");
     } else {
-        expr(p);
+        p.with_no_lambda(false, expr);
     }
     p.expect(R_PAREN, "expected ')'");
 }
@@ -516,19 +518,21 @@ fn at_switch_label(p: &Parser<'_, '_>) -> bool {
 }
 
 fn switch_body(p: &mut Parser<'_, '_>) {
-    let m = p.start();
-    p.bump(L_CURLY);
-    while !p.at_eof() && !p.at(R_CURLY) && !at_member_only_modifier(p) {
-        if at_switch_label(p) {
-            switch_case(p);
-        } else {
-            // A statement before the first label (or after a block that ended a case).
-            p.error_unexpected("expected 'case' or 'default'");
-            statements(p, at_switch_label);
+    p.with_no_lambda(false, |p| {
+        let m = p.start();
+        p.bump(L_CURLY);
+        while !p.at_eof() && !p.at(R_CURLY) && !at_member_only_modifier(p) {
+            if at_switch_label(p) {
+                switch_case(p);
+            } else {
+                // A statement before the first label (or after a block that ended a case).
+                p.error_unexpected("expected 'case' or 'default'");
+                statements(p, at_switch_label);
+            }
         }
-    }
-    p.expect(R_CURLY, "expected '}'");
-    m.complete(p, SWITCH_BODY);
+        p.expect(R_CURLY, "expected '}'");
+        m.complete(p, SWITCH_BODY);
+    });
 }
 
 /// `case a, b:` / `default:` followed by statements, or `case a ->` / `default ->` followed by
@@ -574,25 +578,24 @@ fn switch_case(p: &mut Parser<'_, '_>) {
 /// `item (',' item)* guard?` after `case`, where an item is a pattern, an expression or
 /// `default`. Lambdas are disabled so that `case FOO ->` is a rule and not a lambda.
 fn case_items(p: &mut Parser<'_, '_>) {
-    let outer = p.no_lambda;
-    p.no_lambda = true;
-    loop {
-        if p.at(DEFAULT_KW) {
-            p.bump_any();
-        } else if is_pattern_ahead(p) {
-            pattern(p);
-        } else {
+    p.with_no_lambda(true, |p| {
+        loop {
+            if p.at(DEFAULT_KW) {
+                p.bump_any();
+            } else if is_pattern_ahead(p) {
+                pattern(p);
+            } else {
+                expr(p);
+            }
+            if !p.eat(COMMA) {
+                break;
+            }
+        }
+        if p.at_contextual_kw("when") {
+            let g = p.start();
+            p.bump(IDENT);
             expr(p);
+            g.complete(p, GUARD);
         }
-        if !p.eat(COMMA) {
-            break;
-        }
-    }
-    if p.at_contextual_kw("when") {
-        let g = p.start();
-        p.bump(IDENT);
-        expr(p);
-        g.complete(p, GUARD);
-    }
-    p.no_lambda = outer;
+    });
 }

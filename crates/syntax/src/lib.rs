@@ -151,4 +151,120 @@ mod tests {
             parse.debug_dump(false)
         );
     }
+
+    #[test]
+    fn cast_onto_unnamed_lambda_parses_as_cast_expr() {
+        let parse =
+            parse("class T { void f() { list.add((InvalidationListener) _ -> list.remove(x)); } }");
+        assert!(
+            parse.errors().is_empty(),
+            "expected zero syntax errors, got: {:?}",
+            parse.errors()
+        );
+        let root = parse.syntax_node();
+        let cast_expr = root
+            .descendants()
+            .find(|n| n.kind() == SyntaxKind::CAST_EXPR)
+            .expect("expected a CAST_EXPR node");
+        assert!(
+            cast_expr
+                .descendants()
+                .any(|n| n.kind() == SyntaxKind::LAMBDA_EXPR),
+            "expected CAST_EXPR to contain a LAMBDA_EXPR, tree:\n{}",
+            parse.debug_dump(false)
+        );
+    }
+
+    #[test]
+    fn lambda_inside_switch_when_guard_parses_without_errors() {
+        let parse = parse(
+            "class T { void f(Object o) { switch (o) { case String s when s.chars().noneMatch(c -> ok(c)) && (s.isEmpty() || ok(s)) -> {} default -> {} } } }",
+        );
+        assert!(
+            parse.errors().is_empty(),
+            "expected zero syntax errors, got: {:?}",
+            parse.errors()
+        );
+        let root = parse.syntax_node();
+        let guard = root
+            .descendants()
+            .find(|n| n.kind() == SyntaxKind::GUARD)
+            .expect("expected a GUARD node");
+        assert!(
+            guard
+                .descendants()
+                .any(|n| n.kind() == SyntaxKind::LAMBDA_EXPR),
+            "expected GUARD to contain a LAMBDA_EXPR, tree:\n{}",
+            parse.debug_dump(false)
+        );
+    }
+
+    #[test]
+    fn switch_when_guard_identifier_before_arrow_is_not_lambda() {
+        let parse = parse(
+            "class T { void f(Object o) { switch (o) { case String s when ok -> {} default -> {} } } }",
+        );
+        assert!(
+            parse.errors().is_empty(),
+            "expected zero syntax errors, got: {:?}",
+            parse.errors()
+        );
+        let root = parse.syntax_node();
+        let guard = root
+            .descendants()
+            .find(|n| n.kind() == SyntaxKind::GUARD)
+            .expect("expected a GUARD node");
+        assert!(
+            guard
+                .descendants()
+                .any(|n| n.kind() == SyntaxKind::NAME_REF_EXPR),
+            "expected GUARD to contain a NAME_REF_EXPR, tree:\n{}",
+            parse.debug_dump(false)
+        );
+        assert!(
+            !guard
+                .descendants()
+                .any(|n| n.kind() == SyntaxKind::LAMBDA_EXPR),
+            "expected GUARD not to contain a LAMBDA_EXPR, tree:\n{}",
+            parse.debug_dump(false)
+        );
+    }
+
+    #[test]
+    fn switch_when_guard_nested_delimiters_and_parenthesized_guard() {
+        let parse = parse(
+            "class T { void f(Object o) { switch (o) { case String s when (ok) -> {} case Integer i when (int) i -> {} case Double d when arr[idx(x -> x)] && ((Predicate<Double>) x -> ok(x)).test(d) -> {} default -> {} } } }",
+        );
+        assert!(
+            parse.errors().is_empty(),
+            "expected zero syntax errors, got: {:?}",
+            parse.errors()
+        );
+        let root = parse.syntax_node();
+        let guards: Vec<_> = root
+            .descendants()
+            .filter(|n| n.kind() == SyntaxKind::GUARD)
+            .collect();
+        assert_eq!(guards.len(), 3, "expected 3 GUARD nodes");
+        assert!(
+            !guards[0]
+                .descendants()
+                .any(|n| n.kind() == SyntaxKind::LAMBDA_EXPR),
+            "parenthesized guard before -> must not be parsed as lambda"
+        );
+        assert!(
+            !guards[1]
+                .descendants()
+                .any(|n| n.kind() == SyntaxKind::LAMBDA_EXPR),
+            "cast guard before -> must not consume -> as lambda"
+        );
+        assert_eq!(
+            guards[2]
+                .descendants()
+                .filter(|n| n.kind() == SyntaxKind::LAMBDA_EXPR)
+                .count(),
+            2,
+            "expected 2 LAMBDA_EXPR nodes inside nested delimiters of guard"
+        );
+    }
 }

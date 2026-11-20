@@ -185,3 +185,95 @@ args+=(--valid "$jdk_path")
 
 cargo xtask conformance "${args[@]}" --out target/conformance
 '''
+
+[tasks.workspace-corpus]
+description = "Sequentially fetch, inspect, and clean up real-world Java repos (optional filter args)"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+cargo build --release -p java-analyzer
+
+bin="target/release/java-analyzer"
+out_dir="target/workspace-corpus"
+mkdir -p "$out_dir"
+
+tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/java-workspace-corpus.XXXXXX")"
+trap 'rm -rf "$tmp_root"' EXIT
+
+repos=(
+  "commons-lang|apache/commons-lang"
+  "gson|google/gson"
+  "junit-framework|junit-team/junit-framework"
+  "ant-ivy|apache/ant-ivy"
+  "ant|apache/ant"
+  "tomcat|apache/tomcat"
+  "bach|sormuras/bach"
+  "jbang-catalog|jbangdev/jbang-catalog"
+  "checkstyle|checkstyle/checkstyle"
+  "jackson-core|FasterXML/jackson-core"
+  "error-prone|google/error-prone"
+  "jfx|openjdk/jfx"
+)
+
+should_run() {
+  local id="$1"
+  if [ "$#" -lt 2 ]; then
+    return 0
+  fi
+  shift
+  for f in "$@"; do
+    if [ "$f" = "$id" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+timing_file="$out_dir/timings.tsv"
+: > "$timing_file"
+
+for entry in "${repos[@]}"; do
+  id="${entry%%|*}"
+  slug="${entry#*|}"
+  if ! should_run "$id" "$@"; then
+    continue
+  fi
+
+  stage="$tmp_root/$id"
+  archive="$tmp_root/$id.tar.gz"
+  mkdir -p "$stage"
+
+  url="https://github.com/${slug}/archive/HEAD.tar.gz"
+  echo "==> [$id] downloading $url" >&2
+  xh --download --follow --check-status --output "$archive" "$url" Accept-Encoding:gzip
+
+  tar -xzf "$archive" -C "$stage"
+  rm -f "$archive"
+
+  repo_dir="$(fd --type d --max-depth 1 . "$stage" | head -n 1)"
+  if [ -z "$repo_dir" ] || [ ! -d "$repo_dir" ]; then
+    echo "error: failed to locate unpacked directory for $id" >&2
+    rm -rf "$stage"
+    exit 1
+  fi
+
+  start_ms="$(python3 -c 'import time; print(int(time.time() * 1000))')"
+  "$bin" inspect --json --show-errors "$repo_dir" > "$out_dir/$id.json"
+  end_ms="$(python3 -c 'import time; print(int(time.time() * 1000))')"
+  elapsed_ms="$((end_ms - start_ms))"
+  printf '%s\t%s\n' "$id" "$elapsed_ms" >> "$timing_file"
+
+  rm -rf "$stage"
+  echo "    [$id] done in ${elapsed_ms}ms (cleaned up)" >&2
+done
+
+echo ""
+echo "| Repo | Build | Release | Modules | Files | Types | Parse Errors | Pkg Mismatches | Conflicts | Time (ms) |"
+echo "|------|-------|---------|---------|-------|-------|--------------|----------------|-----------|-----------|"
+while IFS=$'\t' read -r id ms; do
+  jq -r --arg id "$id" --arg ms "$ms" '
+    "| \($id) | \(.active_build_tool) | Java \(.active_language_level.release) | \(.modules | length) | \(.health.total_java_files) | \(.health.indexed_types) | \(.health.files_with_parse_errors) | \(.package_mismatches | length) | \(.conflicts | length) | \($ms) |"
+  ' "$out_dir/$id.json"
+done < "$timing_file"
+'''
