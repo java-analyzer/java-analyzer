@@ -1,5 +1,5 @@
 use clap::Parser;
-use java_analyzer::cli::{run_configure, run_inspect, Cli, Command};
+use java_analyzer::cli::{Cli, Command};
 use lsp_server::Connection;
 
 fn main() -> Result<(), Box<dyn std::error::Error + Sync + Send>> {
@@ -15,11 +15,11 @@ fn main() -> Result<(), Box<dyn std::error::Error + Sync + Send>> {
             Ok(())
         }
         Some(Command::Inspect(args)) => {
-            run_inspect(args)?;
+            java_analyzer::inspect::run(args)?;
             Ok(())
         }
         Some(Command::Configure(args)) => {
-            run_configure(args)?;
+            java_analyzer::configure::run(args)?;
             Ok(())
         }
     }
