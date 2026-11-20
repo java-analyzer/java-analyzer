@@ -49,6 +49,8 @@ flowchart LR
 
 - **Spec 0004 Workspace Auto-Detection Test Suite** *(Done in `crates/java-analyzer/tests/workspace_fixtures.rs`)*
   - Checked-in fixture suite of representative test Java projects (Maven single- and multi-module, Gradle, Ant+Ivy, JPMS multi-module, zero-config/flat, JBang/compact scripts, and intentional build-tool / release / package-mismatch conflict cases) verifying that `probe_workspace` infers the exact expected modules, `main`/`test` `sources` & `resources` roots, `META-INF/` indicators, `requires` edges, and conflicts.
+- **Release Binaries & Nightly Real-World Corpus Job** *(Planned in [nightly-corpus-and-release-binaries.md](plans/nightly-corpus-and-release-binaries.md))*
+  - Publish prebuilt `java-analyzer` binaries (releases + nightly) and run a scheduled nightly CI job executing `java-analyzer inspect --json` against a prescribed corpus of real-world Java repositories to guard against structure-detection and parse-health regressions.
 
 ---
 
