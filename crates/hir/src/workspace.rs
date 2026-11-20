@@ -34,17 +34,7 @@ impl RootScope {
     /// [`RootScope::Test`].
     pub fn from_path(rel_path: &str) -> Self {
         let norm = normalize_rel_path(rel_path);
-        if norm == "test"
-            || norm == "tests"
-            || norm == "src/test"
-            || norm.starts_with("test/")
-            || norm.starts_with("tests/")
-            || norm.starts_with("src/test/")
-            || norm.ends_with("/test")
-            || norm.ends_with("/tests")
-            || norm.ends_with("/src/test")
-            || norm.contains("/src/test/")
-        {
+        if norm.split('/').any(|seg| seg == "test" || seg == "tests") {
             Self::Test
         } else {
             Self::Main
@@ -1342,6 +1332,15 @@ mod tests {
         assert_eq!(
             RootScope::from_path("services/core/tests"),
             RootScope::Test
+        );
+        assert_eq!(
+            RootScope::from_path("src/test.bach/test/java"),
+            RootScope::Test
+        );
+        assert_eq!(RootScope::from_path("src/tests/junit"), RootScope::Test);
+        assert_eq!(
+            RootScope::from_path("test-jpms/src/main/java"),
+            RootScope::Main
         );
 
         // Root-level module_dir_for_root must return "." before checking "/resources" etc.

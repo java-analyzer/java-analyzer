@@ -25,3 +25,26 @@ Currently `pom.xml`, `build.gradle[.kts]`, `build.xml`, and `ivy.xml` are intros
 Upgrade the interactive session in `crates/java-analyzer/src/cli.rs` from numbered line prompts to an inline, scrollback-preserving readline/widget TUI:
 - Arrow-key / `j`/`k` / spacebar single-select and multi-select widgets with live fuzzy filtering (for JDK selection, conflict resolution, and module/source toggles).
 - Readline input with Tab autocompletion for filesystem paths (`--jdk`, `sources`, `resources`, local `.jar`s), discovered workspace module names, and installed JDK versions.
+
+## 4. Real-World Project Inference Gaps
+Discovered by running `java-analyzer inspect` against public repositories (`apache/commons-lang`, `google/gson`, `junit-team/junit-framework`, `apache/ant-ivy`):
+
+### Gradle (`junit-framework`)
+- **Custom Gradle source sets**: Generalize `module_dir_for_root` so `<mod>/src/<sourceSet>/{java,resources}` (e.g. `src/testFixtures/java`, `src/jmh/java`, `src/tools/java`, `src/archUnit/java`, `src/graalVmTest/java`, `src/processStarter/java`) attaches to `<mod>` instead of becoming separate unnamed modules, and classify `*Test*` / `testFixtures` source sets as `RootScope::Test`.
+
+### Ant + Ivy (`apache/ant-ivy`)
+- **Classic Ant `src/java` and `test/java` roots**: Recognize `src/java` (`Main`) and `test/java` (`Test`) as source roots of the enclosing module (`.` at workspace root) so they inherit the module's Ivy dependencies instead of splitting into separate modules.
+- **Ant `<property file="..."/>` & shared Ivy properties**: Load `.properties` files referenced via `<property file="..."/>` in `build.xml` and share the resolved Ant property map with `introspect_ivy_xml` so `${...}` versions (e.g. `${apache-ant.version}`, `${junit.version}`) and `<javac source="${...}"/>` release properties expand cleanly.
+- **Scope `<fileset>` scanning to `<path>` / `<classpath>`**: Only treat `<fileset dir="..."/>` inside `<path>` / `<classpath>` blocks (or explicitly matching `*.jar`) as compile-time `Path` dependencies so non-classpath copy/test filesets (e.g. `test/repositories`) are not added as dependencies.
+- **Deduplicate manifest-declared vs. inferred source roots**: When `build.xml` declares `<javac srcdir="test/custom-classpath"/>`, attach the inferred files to `.`'s source root rather than creating a duplicate standalone module.
+
+### Maven (`commons-lang`, `google/gson`)
+- **External parent POM & BOM resolution**: Resolve parent POMs (e.g. `org.apache.commons:commons-parent`) and `<scope>import</scope>` BOMs from `~/.m2/repository` so inherited properties (`${commons.jmh.version}`) and managed dependency versions (`*`) expand fully *(tracked with Spec 0015)*.
+- **JDK-activated `<profile>` properties**: Evaluate `<profile><activation><jdk>...</jdk></activation>` blocks in `pom.xml` (e.g. Gson's JDK 17 profile setting `<maven.compiler.testRelease>17</maven.compiler.testRelease>` for `Java17RecordTest.java`).
+- **Workspace sibling resolution for Maven dependencies**: Match submodule `<dependency>` coordinates whose `groupId`/`artifactId` match another module's `pom.xml` in the same workspace into `ModuleDependency::Module { target: ModuleTarget::Workspace(id), ... }` instead of `ModuleDependency::Maven`.
+
+### JBang (`jbangdev/jbang-catalog`)
+- **Versionless BOM-managed `//DEPS` coordinates**: Parse 2-part coordinates (`group:artifact`, e.g. `io.quarkus:quarkus-picocli`) as `ModuleDependency::Maven` with version `"*"` instead of falling through to `ModuleTarget::External`.
+- **Brace-aware GAV splitting**: Avoid splitting on `:` inside `${prop:default}` fallback expressions (e.g. `io.quarkus:quarkus-bom:${quarkus.version:3.5.0}@pom`).
+
+
