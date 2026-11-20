@@ -2,6 +2,60 @@
 
 A Java Language Server Protocol (LSP) implementation written in Rust, heavily inspired by the architecture of `rust-analyzer`.
 
+> [!NOTE]
+> **:robot: This is an unapologetically AI generated project.** 
+> 
+> First and foremost, lets acknowledge that, this project stands on the sholders of Titans.
+> None of it could be achieved without prior work and inspiration from the [`rust-analyzer`][1] team.
+> 
+> That said, My primary focus is to be able to develop Java software using a modern, efficient tooling.
+> Which means, I have neither funding nor inclination to drop everything I know that allows me to 
+> feed my family and lifestyle and spend next who knows how many years just working on a tooling 
+> project probably nobody else  needs.
+> 
+> At the same time, I really love the idea of a more efficient tooling for Java developers, that I have
+> at least some control over. So, this project was born. Out of frustration with existing options out there,
+> I decided to create my own. With a LOT of help from AI agents.
+
+As a Java developer, the developer tooling story is not all that bad.
+We are spoiled by the excellent tooling available in the Java ecosystem -- Intellij IDEA is the Golden Standard for Java development all across the board.
+There is also Eclipse, and while it was the de facto standard for Java development about a decade and a half ago, setting expectations for developer tooling for a decade, it has been now overshaddowed by Intellij IDEA.
+Getting back to Eclipse now, feels like a major step back.
+NetBeans lives on (barely), but stepping into NetBeans land feels like stepping into an abandoned town in the bad western movie.
+And all of those IDE's are so heavyweight and opinionated.
+
+We need a faster and more lightweight option for all of those small pet projects where pulling out your IDE feels like killing a fly with a sledgehammer.
+Sometimes you just need a smart enough coding editor that knows enough of your code to help you write code better, faster, and generally gets out of your way.
+Here's where [VSCode], [Zed], [Helix], [Vim]/[NeoVim], and [Emacs] come in -- you open up an editor, write few lines- or files of code and hit _run_ to see what happens.
+
+There is [JDTLS][2] -- Java Development Tooling Server, which is a language server for Java based on Eclipse JDT.
+Oracle has its own official (?) [Java Platform Extension](https://github.com/oracle/javavscode#readme) for Visual Studio Code.
+Now, Intellij has entered the fray and they are bringing their own [JetBrains IntelliJ Server][3].
+
+But they all are limited in some ways.
+All of them are heavyweight, spinning up an entire Java runtime just to provide language server functionality.
+JDTLS and Oracle's extension are extremely opinionateds and make it difficult to set up projects that are neither Gradle nor Maven ptojects.
+Intellijs's extension simply brings Intellij's own IDE core to your project settings and is only available for paying Jintellij Ultimate subscribers.
+
+I wanted an LSP that had lightning fast startup for most small- to medium-sized projects and that was not opinionated about project structure or general setup.
+in the ideal case, you just need to open the project with your favorite editor and start coding.
+LSP should not get in your way by requiring you to lay out your project in a specific way.
+
+[Rust Analyzer][1] has been a great success in the Rust community and I have always been facinated by their architectue.
+This project has been born from the quriosity and a wish to offer a similar developer experience for Java developers.
+
+
+[1]: https://rust-analyzer.github.io/
+[2]: https://github.com/eclipse-jdtls/eclipse.jdt.ls
+[3]: https://www.jetbrains.com/idea/extension/?extension=vscode#how-to-install
+
+[VSCode]: https://code.visualstudio.com/
+[Zed]: https://zed.dev/
+[Helix]: https://helix-editor.com/
+[Vim]: https://www.vim.org/
+[NeoVim]: https://neovim.io/
+[Emacs]: https://www.gnu.org/software/emacs/
+
 ## Architecture
 
 This project is split into several pure, decoupled crates to ensure fast, incremental analysis:
