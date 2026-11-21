@@ -122,6 +122,39 @@ impl Default for LanguageLevel {
     }
 }
 
+/// Extracts a [`LanguageLevel`] from a leading `#!` shebang line (e.g., `#!/usr/bin/env java --source 25`).
+pub fn parse_shebang_level(text: &str) -> Option<LanguageLevel> {
+    if !text.starts_with("#!") {
+        return None;
+    }
+    let first_line = text.lines().next()?;
+    let words: Vec<&str> = first_line.split_whitespace().collect();
+    let mut release = None;
+    let mut preview = false;
+    let mut i = 0;
+    while i < words.len() {
+        match words[i] {
+            "--enable-preview" => preview = true,
+            "--source" | "--release" => {
+                if let Some(ver) = words.get(i + 1) {
+                    release = ver.parse::<Release>().ok();
+                    i += 1;
+                }
+            }
+            arg => {
+                if let Some(ver) = arg
+                    .strip_prefix("--source=")
+                    .or_else(|| arg.strip_prefix("--release="))
+                {
+                    release = ver.parse::<Release>().ok();
+                }
+            }
+        }
+        i += 1;
+    }
+    release.map(|r| LanguageLevel::new(r, preview))
+}
+
 /// One language feature introduced after [`Release::FLOOR`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Feature {
@@ -529,5 +562,25 @@ mod tests {
             assert!(f.is_available(at_stable));
             assert_eq!(f.diagnostic(at_stable), None);
         }
+    }
+
+    #[test]
+    fn parse_shebang_level_extracts_first_line_only() {
+        assert_eq!(
+            parse_shebang_level("#!/usr/bin/env java --source 25\nvoid main() {}\n"),
+            Some(LanguageLevel::new(Release::JAVA_25, false))
+        );
+        assert_eq!(
+            parse_shebang_level("#!/usr/bin/java --release=21 --enable-preview\nclass Main {}\n"),
+            Some(LanguageLevel::new(Release::JAVA_21, true))
+        );
+        assert_eq!(
+            parse_shebang_level("// --source 25\nclass Main {}\n"),
+            None
+        );
+        assert_eq!(
+            parse_shebang_level("#!/usr/bin/env java\n// --source 25\nvoid main() {}\n"),
+            None
+        );
     }
 }

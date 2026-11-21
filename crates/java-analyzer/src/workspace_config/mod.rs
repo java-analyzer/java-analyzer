@@ -19,11 +19,12 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use hir::{
-    extract_file_header, infer_workspace_layout, normalize_rel_path, FileId, LanguageLevel,
-    ModuleDelta, ModuleDependency, Release, RootScope, WorkspaceDelta, WorkspaceLayout,
+    infer_workspace_layout, normalize_rel_path, FileId, LanguageLevel, ModuleDelta,
+    ModuleDependency, Release, RootScope, WorkspaceDelta, WorkspaceLayout,
 };
 
 pub use jdk::{discover_jdks, is_valid_jdk_home, probe_jdk_release};
@@ -163,6 +164,8 @@ pub struct WorkspaceProbe {
     pub layout: WorkspaceLayout,
     /// Mapping from normalized workspace-relative file path to its assigned `FileId`.
     pub file_paths: BTreeMap<String, FileId>,
+    /// Retained file contents from the workspace scan, keyed by normalized relative path.
+    pub file_contents: BTreeMap<String, Arc<String>>,
 }
 
 pub fn build_tool_name(kind: BuildToolKind) -> &'static str {
@@ -196,11 +199,7 @@ pub fn parse_build_tool_kind(s: &str) -> Option<BuildToolKind> {
     }
 }
 
-/// Extracts the language level from a `#!` shebang line if present.
-pub fn parse_shebang_level(text: &str) -> Option<LanguageLevel> {
-    let parse = syntax::parse_with_level(text, LanguageLevel::latest());
-    extract_file_header(&parse.syntax_node()).shebang_level
-}
+pub use syntax::parse_shebang_level;
 
 /// Probes `workspace_dir` strictly read-only following the 3-tier precedence rules.
 pub fn probe_workspace(workspace_dir: &Path) -> WorkspaceProbe {
@@ -351,6 +350,11 @@ pub fn probe_workspace(workspace_dir: &Path) -> WorkspaceProbe {
     let mut layout =
         infer_workspace_layout(&file_refs, &resource_dir_refs, resolved_level, &combined_delta);
 
+    let file_contents: BTreeMap<String, Arc<String>> = raw_java_files
+        .into_iter()
+        .map(|(rel_path, text)| (rel_path, Arc::new(text)))
+        .collect();
+
     // Merge Tier 2 compile-time manifest dependencies into the root module (respecting Tier 1 excludes)
     // Only attach root manifest dependencies when a `"."` module exists or there is a single module.
     let all_modules_snapshot = layout.modules.clone();
@@ -485,6 +489,7 @@ pub fn probe_workspace(workspace_dir: &Path) -> WorkspaceProbe {
         resolved_jdk,
         layout,
         file_paths,
+        file_contents,
     }
 }
 

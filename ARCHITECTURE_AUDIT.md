@@ -175,10 +175,10 @@ Each step is small, independent, behavior-preserving, and leaves `cargo test` gr
 - [x] Replace the hand-rolled `TempDir`/`TempWorkspace`/`FixtureDir` structs in `crates/java-analyzer/` with `tempfile::TempDir`.
 - [x] Deduplicate `db_with`, `db_with_files`, `cursor`, and `slice` test helpers between `hir` and `ide`.
 
-### Step 2: Eliminate Redundant Parsing (`parse_shebang_level` & `probe_workspace` File Retention)
-- Promote a line-1-only `parse_shebang_level(text: &str) -> Option<LanguageLevel>` into `syntax::language_level` (reused by `hir::workspace` and `java-analyzer::workspace_config`).
-- Return or retain scanned `(rel_path, String)` texts from `probe_workspace()` so `GlobalState::set_workspace_root` and `inspect::run_with_io` do not re-read and re-parse every `.java` file from disk.
-- Remove the full-file parse on every `didChange` inside `GlobalState::language_level_for`.
+### Step 2: Eliminate Redundant Parsing (`parse_shebang_level` & `probe_workspace` File Retention) *(Completed)*
+- [x] Promote a line-1-only `parse_shebang_level(text: &str) -> Option<LanguageLevel>` into `syntax::language_level` (reused by `hir::workspace` and `java-analyzer::workspace_config`).
+- [x] Return or retain scanned `(rel_path, String)` texts from `probe_workspace()` so `GlobalState::set_workspace_root` and `inspect::run_with_io` do not re-read and re-parse every `.java` file from disk.
+- [x] Remove the full-file parse on every `didChange` inside `GlobalState::language_level_for`.
 
 ### Step 3: Replace O(N) Offset Math and Hand-Rolled URI Encoding in `convert.rs` **[New Dependency]**
 - Add `line-index` and `url` to `[workspace.dependencies]`.

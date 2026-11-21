@@ -276,6 +276,7 @@ mod tests {
                 authoritative_packages: BTreeMap::new(),
             },
             file_paths: BTreeMap::new(),
+            file_contents: BTreeMap::new(),
         }
     }
 

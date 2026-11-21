@@ -448,7 +448,7 @@ pub fn extract_file_header(root: &SyntaxNode) -> FileHeader {
     {
         match token.kind() {
             SHEBANG => {
-                shebang_level = parse_shebang_level(token.text());
+                shebang_level = syntax::parse_shebang_level(token.text());
             }
             LINE_COMMENT => {
                 let body = token.text().trim_start_matches('/').trim();
@@ -547,34 +547,6 @@ fn parse_module_decl(node: &SyntaxNode) -> Option<ModuleHeader> {
         requires,
         exports,
     })
-}
-
-fn parse_shebang_level(line: &str) -> Option<LanguageLevel> {
-    let words: Vec<&str> = line.split_whitespace().collect();
-    let mut release = None;
-    let mut preview = false;
-    let mut i = 0;
-    while i < words.len() {
-        match words[i] {
-            "--enable-preview" => preview = true,
-            "--source" | "--release" => {
-                if let Some(ver) = words.get(i + 1) {
-                    release = ver.parse::<Release>().ok();
-                    i += 1;
-                }
-            }
-            arg => {
-                if let Some(ver) = arg
-                    .strip_prefix("--source=")
-                    .or_else(|| arg.strip_prefix("--release="))
-                {
-                    release = ver.parse::<Release>().ok();
-                }
-            }
-        }
-        i += 1;
-    }
-    release.map(|r| LanguageLevel::new(r, preview))
 }
 
 // ---- Path normalization & zero-config layout inference ----

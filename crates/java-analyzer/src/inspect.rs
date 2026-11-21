@@ -31,10 +31,13 @@ pub fn run_with_io<W: Write>(args: InspectArgs, out: &mut W) -> io::Result<()> {
     let mut file_ids: Vec<FileId> = Vec::with_capacity(probe.file_paths.len());
     for (rel_path, &file_id) in &probe.file_paths {
         let abs_path = probe.workspace_dir.join(rel_path);
-        let text = fs::read_to_string(&abs_path)?;
+        let text = match probe.file_contents.get(rel_path) {
+            Some(cached) => Arc::clone(cached),
+            None => Arc::new(fs::read_to_string(&abs_path)?),
+        };
         let level = probe.language_level_for_path(&abs_path);
         db.set_file_language_level(file_id, level);
-        db.set_file_text(file_id, Arc::new(text));
+        db.set_file_text(file_id, text);
         file_ids.push(file_id);
     }
     db.set_workspace_files(Arc::new(file_ids));

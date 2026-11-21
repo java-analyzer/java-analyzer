@@ -70,12 +70,17 @@ impl GlobalState {
                 continue;
             };
             if !self.open_files.contains(&uri) {
-                if let Ok(text) = fs::read_to_string(&abs_path) {
+                let text = probe
+                    .file_contents
+                    .get(rel_path)
+                    .map(Arc::clone)
+                    .or_else(|| fs::read_to_string(&abs_path).ok().map(Arc::new));
+                if let Some(text) = text {
                     let (file_id, _) = self.ensure_file_id(&uri);
                     let level = parse_shebang_level(&text)
                         .unwrap_or_else(|| probe.language_level_for_path(&abs_path));
                     self.db.set_file_language_level(file_id, level);
-                    self.db.set_file_text(file_id, Arc::new(text));
+                    self.db.set_file_text(file_id, text);
                 }
             }
         }
