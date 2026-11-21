@@ -12,4 +12,5 @@ test-utils = []
 [dependencies]
 rustc-hash.workspace = true
 salsa.workspace = true
+smol_str.workspace = true
 syntax.workspace = true

@@ -1,6 +1,7 @@
 //! Pure, IO-free Java name resolution at a source offset.
 //! See `docs/specs/0005-symbol-indexing-and-name-resolution.md`.
 
+use smol_str::SmolStr;
 use syntax::{
     ext::{
         collapsed_text, has_direct_token, has_modifier, is_type_node, path_segments,
@@ -12,8 +13,8 @@ use syntax::{
 
 use crate::{
     symbols::{
-        extract_field_decl, extract_local_type_symbol, extract_method_or_ctor, FileSymbols,
-        ImportKind, MemberKind, MemberSymbol, TypeKind, TypeSymbol, WorkspaceIndex,
+        extract_field_decl, extract_local_type_symbol, extract_method_or_ctor, node_ident_text,
+        FileSymbols, ImportKind, MemberKind, MemberSymbol, TypeKind, TypeSymbol, WorkspaceIndex,
     },
     DefDatabase, FileId,
 };
@@ -95,7 +96,7 @@ impl From<LocalKind> for ResolvedSymbolKind {
 /// Structured metadata carried by a [`ResolvedSymbol`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SymbolDetail {
-    TypeParams(Vec<String>),
+    TypeParams(Vec<SmolStr>),
     TypeRef(String),
     Method {
         return_type: Option<String>,
@@ -113,7 +114,7 @@ pub struct ResolvedSymbol {
     pub file_id: Option<FileId>,
     pub full_range: Option<TextRange>,
     pub focus_range: Option<TextRange>,
-    pub name: String,
+    pub name: SmolStr,
     pub qualified_name: String,
     pub detail: Option<SymbolDetail>,
     pub kind: ResolvedSymbolKind,
@@ -134,7 +135,7 @@ impl ResolvedSymbol {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LocalSymbol {
     file_id: FileId,
-    name: String,
+    name: SmolStr,
     kind: LocalKind,
     type_ref: Option<String>,
     full_range: TextRange,
@@ -144,7 +145,7 @@ struct LocalSymbol {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TypeParamSymbol {
     file_id: FileId,
-    name: String,
+    name: SmolStr,
     bounds: Vec<String>,
     full_range: TextRange,
     selection_range: TextRange,
@@ -178,7 +179,7 @@ impl ResolvedTarget {
             Self::Member(m) => {
                 let qualified_name = match &m.owner_type {
                     Some(owner) => format!("{owner}.{}", m.name),
-                    None => m.name.clone(),
+                    None => m.name.to_string(),
                 };
                 let detail = match m.kind {
                     MemberKind::Field | MemberKind::RecordComponent => {
@@ -203,29 +204,33 @@ impl ResolvedTarget {
                     kind: m.kind.into(),
                 }
             }
-            Self::Local(l) => ResolvedSymbol {
-                file_id: Some(l.file_id),
-                full_range: Some(l.full_range),
-                focus_range: Some(l.selection_range),
-                name: l.name.clone(),
-                qualified_name: l.name,
-                detail: l.type_ref.map(SymbolDetail::TypeRef),
-                kind: l.kind.into(),
-            },
+            Self::Local(l) => {
+                let qualified_name = l.name.to_string();
+                ResolvedSymbol {
+                    file_id: Some(l.file_id),
+                    full_range: Some(l.full_range),
+                    focus_range: Some(l.selection_range),
+                    name: l.name,
+                    qualified_name,
+                    detail: l.type_ref.map(SymbolDetail::TypeRef),
+                    kind: l.kind.into(),
+                }
+            }
             Self::TypeParam(tp) => {
                 let detail = (!tp.bounds.is_empty()).then_some(SymbolDetail::Bounds(tp.bounds));
+                let qualified_name = tp.name.to_string();
                 ResolvedSymbol {
                     file_id: Some(tp.file_id),
                     full_range: Some(tp.full_range),
                     focus_range: Some(tp.selection_range),
-                    name: tp.name.clone(),
-                    qualified_name: tp.name,
+                    name: tp.name,
+                    qualified_name,
                     detail,
                     kind: ResolvedSymbolKind::TypeParam,
                 }
             }
             Self::Package(name) => {
-                let short = name.rsplit('.').next().unwrap_or(&name).to_string();
+                let short = SmolStr::new(name.rsplit('.').next().unwrap_or(&name));
                 ResolvedSymbol {
                     file_id: None,
                     full_range: None,
@@ -270,6 +275,49 @@ pub fn resolve_at_offset(
     Some(target.into_resolved_symbol())
 }
 
+fn local_symbol_from_node(
+    file_id: FileId,
+    decl_node: &SyntaxNode,
+    name_node: &SyntaxNode,
+    kind: LocalKind,
+    include_dims: bool,
+) -> LocalSymbol {
+    let type_node = decl_node.children().find(|n| is_type_node(n.kind()));
+    local_symbol_with_type(
+        file_id,
+        decl_node,
+        name_node,
+        kind,
+        type_node.as_ref(),
+        include_dims,
+    )
+}
+
+fn local_symbol_with_type(
+    file_id: FileId,
+    decl_node: &SyntaxNode,
+    name_node: &SyntaxNode,
+    kind: LocalKind,
+    type_node: Option<&SyntaxNode>,
+    include_dims: bool,
+) -> LocalSymbol {
+    let type_ref = type_node.map(|t| {
+        if include_dims {
+            type_text_with_dims(t, decl_node)
+        } else {
+            collapsed_text(t)
+        }
+    });
+    LocalSymbol {
+        file_id,
+        name: node_ident_text(name_node),
+        kind,
+        type_ref,
+        full_range: decl_node.text_range(),
+        selection_range: name_node.text_range(),
+    }
+}
+
 fn resolve_declaration_site(
     _db: &dyn DefDatabase,
     file_id: FileId,
@@ -295,18 +343,15 @@ fn resolve_declaration_site(
                         .map(ResolvedTarget::Member)
                 }
                 LOCAL_VAR_DECL => {
-                    let type_ref = decl_parent
-                        .children()
-                        .find(|n| is_type_node(n.kind()))
-                        .map(|t| type_text_with_dims(&t, &decl));
-                    Some(ResolvedTarget::Local(LocalSymbol {
+                    let base_type = decl_parent.children().find(|n| is_type_node(n.kind()));
+                    Some(ResolvedTarget::Local(local_symbol_with_type(
                         file_id,
-                        name: name_node.text().to_string(),
-                        kind: LocalKind::LocalVar,
-                        type_ref,
-                        full_range: decl.text_range(),
-                        selection_range: range,
-                    }))
+                        &decl,
+                        name_node,
+                        LocalKind::LocalVar,
+                        base_type.as_ref(),
+                        true,
+                    )))
                 }
                 _ => None,
             }
@@ -324,75 +369,42 @@ fn resolve_declaration_site(
             } else {
                 LocalKind::Param
             };
-            let type_ref = decl
-                .children()
-                .find(|n| is_type_node(n.kind()))
-                .map(|t| type_text_with_dims(&t, &decl));
-            Some(ResolvedTarget::Local(LocalSymbol {
+            Some(ResolvedTarget::Local(local_symbol_from_node(
                 file_id,
-                name: name_node.text().to_string(),
+                &decl,
+                name_node,
                 kind,
-                type_ref,
-                full_range: decl.text_range(),
-                selection_range: range,
-            }))
+                true,
+            )))
         }
-        FOREACH_STMT => {
-            let type_ref = decl
-                .children()
-                .find(|n| is_type_node(n.kind()))
-                .map(|t| collapsed_text(&t));
-            Some(ResolvedTarget::Local(LocalSymbol {
-                file_id,
-                name: name_node.text().to_string(),
-                kind: LocalKind::ForEachVar,
-                type_ref,
-                full_range: decl.text_range(),
-                selection_range: range,
-            }))
-        }
-        CATCH_CLAUSE => {
-            let type_ref = decl
-                .children()
-                .find(|n| is_type_node(n.kind()))
-                .map(|t| collapsed_text(&t));
-            Some(ResolvedTarget::Local(LocalSymbol {
-                file_id,
-                name: name_node.text().to_string(),
-                kind: LocalKind::CatchParam,
-                type_ref,
-                full_range: decl.text_range(),
-                selection_range: range,
-            }))
-        }
-        RESOURCE => {
-            let type_ref = decl
-                .children()
-                .find(|n| is_type_node(n.kind()))
-                .map(|t| collapsed_text(&t));
-            Some(ResolvedTarget::Local(LocalSymbol {
-                file_id,
-                name: name_node.text().to_string(),
-                kind: LocalKind::ResourceVar,
-                type_ref,
-                full_range: decl.text_range(),
-                selection_range: range,
-            }))
-        }
-        TYPE_PATTERN => {
-            let type_ref = decl
-                .children()
-                .find(|n| is_type_node(n.kind()))
-                .map(|t| collapsed_text(&t));
-            Some(ResolvedTarget::Local(LocalSymbol {
-                file_id,
-                name: name_node.text().to_string(),
-                kind: LocalKind::PatternVar,
-                type_ref,
-                full_range: decl.text_range(),
-                selection_range: range,
-            }))
-        }
+        FOREACH_STMT => Some(ResolvedTarget::Local(local_symbol_from_node(
+            file_id,
+            &decl,
+            name_node,
+            LocalKind::ForEachVar,
+            false,
+        ))),
+        CATCH_CLAUSE => Some(ResolvedTarget::Local(local_symbol_from_node(
+            file_id,
+            &decl,
+            name_node,
+            LocalKind::CatchParam,
+            false,
+        ))),
+        RESOURCE => Some(ResolvedTarget::Local(local_symbol_from_node(
+            file_id,
+            &decl,
+            name_node,
+            LocalKind::ResourceVar,
+            false,
+        ))),
+        TYPE_PATTERN => Some(ResolvedTarget::Local(local_symbol_from_node(
+            file_id,
+            &decl,
+            name_node,
+            LocalKind::PatternVar,
+            false,
+        ))),
         TYPE_PARAM => {
             let bounds = decl
                 .children()
@@ -401,7 +413,7 @@ fn resolve_declaration_site(
                 .collect();
             Some(ResolvedTarget::TypeParam(TypeParamSymbol {
                 file_id,
-                name: name_node.text().to_string(),
+                name: node_ident_text(name_node),
                 bounds,
                 full_range: decl.text_range(),
                 selection_range: range,
@@ -417,7 +429,7 @@ fn resolve_declaration_site(
             else {
                 return None;
             };
-            let target_name = name_node.text().to_string();
+            let target_name = node_ident_text(name_node);
             anno_ty
                 .members
                 .into_iter()
@@ -471,7 +483,7 @@ fn resolve_member_declaration(
         ENUM_CONSTANT => Some(MemberSymbol {
             file_id,
             owner_type: None,
-            name: name_node.text().to_string(),
+            name: node_ident_text(name_node),
             kind: MemberKind::EnumConstant,
             is_static: true,
             type_ref: None,
@@ -522,12 +534,12 @@ fn resolve_reference_site(
     }
 }
 
-fn prefix_segments_up_to(container: &SyntaxNode, target_ref: &SyntaxNode) -> Vec<String> {
+fn prefix_segments_up_to(container: &SyntaxNode, target_ref: &SyntaxNode) -> Vec<SmolStr> {
     let target_end = target_ref.text_range().end();
     container
         .children()
         .filter(|n| n.kind() == NAME_REF && n.text_range().end() <= target_end)
-        .map(|n| n.text().to_string())
+        .map(|n| node_ident_text(&n))
         .collect()
 }
 
@@ -565,7 +577,7 @@ fn resolve_path_ref(
                 return lookup_static_member_or_nested(
                     file_syms,
                     index,
-                    &owner_ty,
+                    owner_ty,
                     member_name,
                     None,
                 );
@@ -573,7 +585,7 @@ fn resolve_path_ref(
 
             let prefix_fqn = prefix.join(".");
             if let Some(ty) = lookup_type_by_fqn(file_syms, index, &prefix_fqn) {
-                return Some(ResolvedTarget::Type(ty));
+                return Some(ResolvedTarget::Type(ty.clone()));
             }
             if index.has_package_prefix(&prefix_fqn) {
                 return Some(ResolvedTarget::Package(prefix_fqn));
@@ -581,7 +593,7 @@ fn resolve_path_ref(
             None
         }
         ANNOTATION => {
-            let seg_refs: Vec<&str> = prefix.iter().map(String::as_str).collect();
+            let seg_refs: Vec<&str> = prefix.iter().map(SmolStr::as_str).collect();
             resolve_type_segments(file_id, file_syms, index, path_node, &seg_refs)
         }
         _ => None,
@@ -606,17 +618,17 @@ fn resolve_path_type_ref(
         if has_direct_token(&new_expr, DOT) {
             if let Some(outer_expr) = new_expr.children().next() {
                 let outer_ty = resolve_expr_type(db, file_id, file_syms, index, &outer_expr, 0)?;
-                let mut current = outer_ty;
+                let mut current: &TypeSymbol = &outer_ty;
                 for seg in &prefix {
                     let next_fqn = format!("{}.{}", current.qualified_name, seg);
                     current = lookup_type_by_fqn(file_syms, index, &next_fqn)?;
                 }
-                return Some(ResolvedTarget::Type(current));
+                return Some(ResolvedTarget::Type(current.clone()));
             }
         }
     }
 
-    let seg_refs: Vec<&str> = prefix.iter().map(String::as_str).collect();
+    let seg_refs: Vec<&str> = prefix.iter().map(SmolStr::as_str).collect();
     resolve_type_segments(file_id, file_syms, index, path_type, &seg_refs)
 }
 
@@ -632,14 +644,14 @@ fn resolve_field_access_ref(
     if let Some(chain) = extract_dotted_name_chain(field_access) {
         let fqn = chain.join(".");
         if let Some(ty) = lookup_type_by_fqn(file_syms, index, &fqn) {
-            return Some(ResolvedTarget::Type(ty));
+            return Some(ResolvedTarget::Type(ty.clone()));
         }
     }
 
     // 2. Resolve receiver expression's type and look up member/nested type on it.
     let receiver = field_access.children().next()?;
     let recv_ty = resolve_expr_type(db, file_id, file_syms, index, &receiver, 0)?;
-    let member_name = ref_node.text().to_string();
+    let member_name = node_ident_text(ref_node);
     lookup_member_on_type(file_syms, index, &recv_ty, &member_name, None, false)
 }
 
@@ -653,7 +665,7 @@ fn resolve_method_call_ref(
 ) -> Option<ResolvedTarget> {
     let receiver = method_call.children().next()?;
     let recv_ty = resolve_expr_type(db, file_id, file_syms, index, &receiver, 0)?;
-    let member_name = ref_node.text().to_string();
+    let member_name = node_ident_text(ref_node);
     let arg_count = method_call
         .children()
         .find(|n| n.kind() == ARG_LIST)
@@ -681,7 +693,7 @@ fn resolve_method_ref(
         resolve_expr_type(db, file_id, file_syms, index, &qualifier, 0)?
     };
 
-    let member_name = ref_node.text().to_string();
+    let member_name = node_ident_text(ref_node);
     lookup_method_or_member(&target_ty, &member_name, file_syms, index)
 }
 
@@ -692,7 +704,7 @@ fn resolve_name_ref_expr(
     expr_node: &SyntaxNode,
     ref_node: &SyntaxNode,
 ) -> Option<ResolvedTarget> {
-    let name = ref_node.text().to_string();
+    let name = node_ident_text(ref_node);
 
     // Check if `expr_node` is the callee of a `CALL_EXPR` (`foo(args)`).
     if let Some(call_expr) = expr_node.parent().filter(|p| {
@@ -708,14 +720,20 @@ fn resolve_name_ref_expr(
 
         // 1. Enclosing types' methods (innermost to outermost).
         for ty in enclosing_type_symbols(file_id, file_syms, expr_node) {
-            if let Some(m) = select_method(&ty.members, &name, arg_count, ty.kind == TypeKind::Record)
-            {
-                return Some(ResolvedTarget::Member(m));
+            if let Some(m) = select_method(
+                &ty.members,
+                &name,
+                arg_count,
+                ty.kind == TypeKind::Record,
+                false,
+            ) {
+                return Some(ResolvedTarget::Member(m.clone()));
             }
         }
         // Compact-source top-level methods.
-        if let Some(m) = select_method(&file_syms.top_level_members, &name, arg_count, false) {
-            return Some(ResolvedTarget::Member(m));
+        if let Some(m) = select_method(&file_syms.top_level_members, &name, arg_count, false, false)
+        {
+            return Some(ResolvedTarget::Member(m.clone()));
         }
 
         // 2. Static imports (Single first, then OnDemand).
@@ -787,18 +805,13 @@ fn resolve_local_scope(
                 if after_paren.is_some_and(|end| ref_range.start() >= end) {
                     if let Some(name_node) = ancestor.children().find(|n| n.kind() == NAME) {
                         if name_node.text() == name {
-                            let type_ref = ancestor
-                                .children()
-                                .find(|n| is_type_node(n.kind()))
-                                .map(|t| collapsed_text(&t));
-                            return Some(LocalSymbol {
+                            return Some(local_symbol_from_node(
                                 file_id,
-                                name: name.to_string(),
-                                kind: LocalKind::ForEachVar,
-                                type_ref,
-                                full_range: ancestor.text_range(),
-                                selection_range: name_node.text_range(),
-                            });
+                                &ancestor,
+                                &name_node,
+                                LocalKind::ForEachVar,
+                                false,
+                            ));
                         }
                     }
                 }
@@ -806,18 +819,13 @@ fn resolve_local_scope(
             CATCH_CLAUSE if child_on_path.kind() == BLOCK => {
                 if let Some(name_node) = ancestor.children().find(|n| n.kind() == NAME) {
                     if name_node.text() == name {
-                        let type_ref = ancestor
-                            .children()
-                            .find(|n| is_type_node(n.kind()))
-                            .map(|t| collapsed_text(&t));
-                        return Some(LocalSymbol {
+                        return Some(local_symbol_from_node(
                             file_id,
-                            name: name.to_string(),
-                            kind: LocalKind::CatchParam,
-                            type_ref,
-                            full_range: ancestor.text_range(),
-                            selection_range: name_node.text_range(),
-                        });
+                            &ancestor,
+                            &name_node,
+                            LocalKind::CatchParam,
+                            false,
+                        ));
                     }
                 }
             }
@@ -838,18 +846,13 @@ fn resolve_local_scope(
                             if res.text_range().end() <= ref_range.start() {
                                 if let Some(name_node) = res.children().find(|n| n.kind() == NAME) {
                                     if name_node.text() == name {
-                                        let type_ref = res
-                                            .children()
-                                            .find(|n| is_type_node(n.kind()))
-                                            .map(|t| collapsed_text(&t));
-                                        return Some(LocalSymbol {
+                                        return Some(local_symbol_from_node(
                                             file_id,
-                                            name: name.to_string(),
-                                            kind: LocalKind::ResourceVar,
-                                            type_ref,
-                                            full_range: res.text_range(),
-                                            selection_range: name_node.text_range(),
-                                        });
+                                            &res,
+                                            &name_node,
+                                            LocalKind::ResourceVar,
+                                            false,
+                                        ));
                                     }
                                 }
                             }
@@ -868,18 +871,13 @@ fn resolve_local_scope(
                         for param in params.into_iter().rev() {
                             if let Some(name_node) = param.children().find(|n| n.kind() == NAME) {
                                 if name_node.text() == name {
-                                    let type_ref = param
-                                        .children()
-                                        .find(|n| is_type_node(n.kind()))
-                                        .map(|t| type_text_with_dims(&t, &param));
-                                    return Some(LocalSymbol {
+                                    return Some(local_symbol_from_node(
                                         file_id,
-                                        name: name.to_string(),
-                                        kind: LocalKind::LambdaParam,
-                                        type_ref,
-                                        full_range: param.text_range(),
-                                        selection_range: name_node.text_range(),
-                                    });
+                                        &param,
+                                        &name_node,
+                                        LocalKind::LambdaParam,
+                                        true,
+                                    ));
                                 }
                             }
                         }
@@ -951,18 +949,13 @@ fn resolve_local_scope(
                         for param in params.into_iter().rev() {
                             if let Some(name_node) = param.children().find(|n| n.kind() == NAME) {
                                 if name_node.text() == name {
-                                    let type_ref = param
-                                        .children()
-                                        .find(|n| is_type_node(n.kind()))
-                                        .map(|t| type_text_with_dims(&t, &param));
-                                    return Some(LocalSymbol {
+                                    return Some(local_symbol_from_node(
                                         file_id,
-                                        name: name.to_string(),
-                                        kind: LocalKind::Param,
-                                        type_ref,
-                                        full_range: param.text_range(),
-                                        selection_range: name_node.text_range(),
-                                    });
+                                        &param,
+                                        &name_node,
+                                        LocalKind::Param,
+                                        true,
+                                    ));
                                 }
                             }
                         }
@@ -1016,17 +1009,14 @@ fn find_declarator_before(
         }
         if let Some(name_node) = declarator.children().find(|n| n.kind() == NAME) {
             if name_node.text() == name {
-                let type_ref = base_type
-                    .as_ref()
-                    .map(|t| type_text_with_dims(t, &declarator));
-                return Some(LocalSymbol {
+                return Some(local_symbol_with_type(
                     file_id,
-                    name: name.to_string(),
-                    kind: LocalKind::LocalVar,
-                    type_ref,
-                    full_range: declarator.text_range(),
-                    selection_range: name_node.text_range(),
-                });
+                    &declarator,
+                    &name_node,
+                    LocalKind::LocalVar,
+                    base_type.as_ref(),
+                    true,
+                ));
             }
         }
     }
@@ -1074,18 +1064,13 @@ fn collect_record_pattern(file_id: FileId, node: &SyntaxNode, out: &mut Vec<Loca
 
 fn collect_type_pattern(file_id: FileId, node: &SyntaxNode, out: &mut Vec<LocalSymbol>) {
     if let Some(name_node) = node.children().find(|n| n.kind() == NAME) {
-        let type_ref = node
-            .children()
-            .find(|n| is_type_node(n.kind()))
-            .map(|t| collapsed_text(&t));
-        out.push(LocalSymbol {
+        out.push(local_symbol_from_node(
             file_id,
-            name: name_node.text().to_string(),
-            kind: LocalKind::PatternVar,
-            type_ref,
-            full_range: node.text_range(),
-            selection_range: name_node.text_range(),
-        });
+            node,
+            &name_node,
+            LocalKind::PatternVar,
+            false,
+        ));
     }
 }
 
@@ -1121,7 +1106,7 @@ fn resolve_type_segments(
             {
                 let fqn = imp.path.join(".");
                 if let Some(ty) = lookup_type_by_fqn(file_syms, index, &fqn) {
-                    return Some(ResolvedTarget::Type(ty));
+                    return Some(ResolvedTarget::Type(ty.clone()));
                 }
             }
         }
@@ -1133,7 +1118,7 @@ fn resolve_type_segments(
             {
                 let fqn = imp.path.join(".");
                 if let Some(ty) = lookup_type_by_fqn(file_syms, index, &fqn) {
-                    return Some(ResolvedTarget::Type(ty));
+                    return Some(ResolvedTarget::Type(ty.clone()));
                 }
             }
         }
@@ -1158,7 +1143,7 @@ fn resolve_type_segments(
             if imp.kind == ImportKind::TypeOnDemand {
                 let fqn = format!("{}.{name}", imp.path.join("."));
                 if let Some(ty) = lookup_type_by_fqn(file_syms, index, &fqn) {
-                    return Some(ResolvedTarget::Type(ty));
+                    return Some(ResolvedTarget::Type(ty.clone()));
                 }
             }
         }
@@ -1168,7 +1153,7 @@ fn resolve_type_segments(
             if imp.kind == ImportKind::StaticOnDemand {
                 let fqn = format!("{}.{name}", imp.path.join("."));
                 if let Some(ty) = lookup_type_by_fqn(file_syms, index, &fqn) {
-                    return Some(ResolvedTarget::Type(ty));
+                    return Some(ResolvedTarget::Type(ty.clone()));
                 }
             }
         }
@@ -1180,20 +1165,21 @@ fn resolve_type_segments(
     // 1. Direct FQN match (`com.example.Foo`, `com.example.Outer.Inner`).
     let joined = segs.join(".");
     if let Some(ty) = lookup_type_by_fqn(file_syms, index, &joined) {
-        return Some(ResolvedTarget::Type(ty));
+        return Some(ResolvedTarget::Type(ty.clone()));
     }
 
     // 2. Resolve `s0` as a single-segment type, then walk nested types `s1..=sk`.
-    let ResolvedTarget::Type(mut current) =
+    let ResolvedTarget::Type(first) =
         resolve_type_segments(file_id, file_syms, index, site_node, &segs[..1])?
     else {
         return None;
     };
+    let mut current: &TypeSymbol = &first;
     for seg in &segs[1..] {
         let next_fqn = format!("{}.{}", current.qualified_name, seg);
         current = lookup_type_by_fqn(file_syms, index, &next_fqn)?;
     }
-    Some(ResolvedTarget::Type(current))
+    Some(ResolvedTarget::Type(current.clone()))
 }
 
 fn resolve_enclosing_type_or_param(
@@ -1246,12 +1232,13 @@ fn resolve_enclosing_type_or_param(
                 }
 
                 let range = ancestor.text_range();
-                let ty = file_syms
-                    .types
-                    .iter()
-                    .find(|t| t.full_range == range)
-                    .cloned()
-                    .or_else(|| extract_local_type_symbol(file_id, &ancestor));
+                let local_ty;
+                let ty = if let Some(ty) = file_syms.types.iter().find(|t| t.full_range == range) {
+                    Some(ty)
+                } else {
+                    local_ty = extract_local_type_symbol(file_id, &ancestor);
+                    local_ty.as_ref()
+                };
 
                 let mut is_static_boundary = has_modifier(&ancestor, STATIC_KW);
                 if let Some(ty) = ty {
@@ -1264,12 +1251,12 @@ fn resolve_enclosing_type_or_param(
                                 | TypeKind::Annotation
                         );
                     if ty.name == name {
-                        return Some(ResolvedTarget::Type(ty));
+                        return Some(ResolvedTarget::Type(ty.clone()));
                     }
                     if ty.nested_types.iter().any(|n| n == name) {
                         let nested_fqn = format!("{}.{}", ty.qualified_name, name);
                         if let Some(nested) = lookup_type_by_fqn(file_syms, index, &nested_fqn) {
-                            return Some(ResolvedTarget::Type(nested));
+                            return Some(ResolvedTarget::Type(nested.clone()));
                         }
                     }
                 }
@@ -1301,7 +1288,7 @@ fn find_type_param_on_node(
                     .collect();
                 return Some(TypeParamSymbol {
                     file_id,
-                    name: name.to_string(),
+                    name: node_ident_text(&name_node),
                     bounds,
                     full_range: tp.text_range(),
                     selection_range: name_node.text_range(),
@@ -1331,16 +1318,15 @@ fn enclosing_type_symbols(
     out
 }
 
-fn lookup_type_by_fqn(
-    file_syms: &FileSymbols,
-    index: &WorkspaceIndex,
+fn lookup_type_by_fqn<'a>(
+    file_syms: &'a FileSymbols,
+    index: &'a WorkspaceIndex,
     fqn: &str,
-) -> Option<TypeSymbol> {
+) -> Option<&'a TypeSymbol> {
     index
         .types_by_fqn
         .get(fqn)
-        .cloned()
-        .or_else(|| file_syms.types.iter().find(|t| t.qualified_name == fqn).cloned())
+        .or_else(|| file_syms.types.iter().find(|t| t.qualified_name == fqn))
 }
 
 // ---- Member lookup & static imports ----
@@ -1363,7 +1349,7 @@ fn resolve_via_static_imports(
                 if let Some(found) = lookup_static_member_or_nested(
                     file_syms,
                     index,
-                    &owner_ty,
+                    owner_ty,
                     name,
                     if prefer_callable { Some(call_arity) } else { None },
                 ) {
@@ -1381,7 +1367,7 @@ fn resolve_via_static_imports(
                 if let Some(found) = lookup_static_member_or_nested(
                     file_syms,
                     index,
-                    &owner_ty,
+                    owner_ty,
                     name,
                     if prefer_callable { Some(call_arity) } else { None },
                 ) {
@@ -1402,13 +1388,9 @@ fn lookup_static_member_or_nested(
     callable_arity: Option<Option<usize>>,
 ) -> Option<ResolvedTarget> {
     if let Some(arity) = callable_arity {
-        let static_methods: Vec<MemberSymbol> = owner_ty
-            .members
-            .iter()
-            .filter(|m| m.is_static && m.kind == MemberKind::Method)
+        return select_method(&owner_ty.members, name, arity, false, true)
             .cloned()
-            .collect();
-        return select_method(&static_methods, name, arity, false).map(ResolvedTarget::Member);
+            .map(ResolvedTarget::Member);
     }
 
     if let Some(m) = owner_ty
@@ -1422,7 +1404,7 @@ fn lookup_static_member_or_nested(
     if owner_ty.nested_types.iter().any(|n| n == name) {
         let nested_fqn = format!("{}.{}", owner_ty.qualified_name, name);
         if let Some(nested) = lookup_type_by_fqn(file_syms, index, &nested_fqn) {
-            return Some(ResolvedTarget::Type(nested));
+            return Some(ResolvedTarget::Type(nested.clone()));
         }
     }
 
@@ -1447,17 +1429,24 @@ fn lookup_member_on_type(
     prefer_callable: bool,
 ) -> Option<ResolvedTarget> {
     if prefer_callable {
-        if let Some(m) = select_method(&ty.members, name, call_arity, ty.kind == TypeKind::Record) {
-            return Some(ResolvedTarget::Member(m));
-        }
-        return None;
+        return select_method(
+            &ty.members,
+            name,
+            call_arity,
+            ty.kind == TypeKind::Record,
+            false,
+        )
+        .cloned()
+        .map(ResolvedTarget::Member);
     }
 
     if let Some(found) = lookup_non_method_member_or_nested(file_syms, index, ty, name) {
         return Some(found);
     }
 
-    select_method(&ty.members, name, call_arity, false).map(ResolvedTarget::Member)
+    select_method(&ty.members, name, call_arity, false, false)
+        .cloned()
+        .map(ResolvedTarget::Member)
 }
 
 fn lookup_non_method_member_or_nested(
@@ -1477,7 +1466,7 @@ fn lookup_non_method_member_or_nested(
     if ty.nested_types.iter().any(|n| n == name) {
         let nested_fqn = format!("{}.{}", ty.qualified_name, name);
         if let Some(nested) = lookup_type_by_fqn(file_syms, index, &nested_fqn) {
-            return Some(ResolvedTarget::Type(nested));
+            return Some(ResolvedTarget::Type(nested.clone()));
         }
     }
 
@@ -1490,50 +1479,53 @@ fn lookup_method_or_member(
     file_syms: &FileSymbols,
     index: &WorkspaceIndex,
 ) -> Option<ResolvedTarget> {
-    if let Some(m) = select_method(&ty.members, name, None, ty.kind == TypeKind::Record) {
-        return Some(ResolvedTarget::Member(m));
+    if let Some(m) = select_method(&ty.members, name, None, ty.kind == TypeKind::Record, false) {
+        return Some(ResolvedTarget::Member(m.clone()));
     }
     lookup_non_method_member_or_nested(file_syms, index, ty, name)
 }
 
-fn select_method(
-    members: &[MemberSymbol],
+fn select_method<'a>(
+    members: &'a [MemberSymbol],
     name: &str,
     call_arity: Option<usize>,
     include_record_components: bool,
-) -> Option<MemberSymbol> {
-    let candidates: Vec<&MemberSymbol> = members
-        .iter()
-        .filter(|m| m.kind == MemberKind::Method && m.name == name)
-        .collect();
+    only_static: bool,
+) -> Option<&'a MemberSymbol> {
+    let mut first_match: Option<&'a MemberSymbol> = None;
+    let mut varargs_match: Option<&'a MemberSymbol> = None;
 
-    if !candidates.is_empty() {
+    for m in members {
+        if m.kind != MemberKind::Method || m.name != name || (only_static && !m.is_static) {
+            continue;
+        }
+        if first_match.is_none() {
+            first_match = Some(m);
+        }
         if let Some(arity) = call_arity {
+            let is_varargs = m.params.last().is_some_and(|p| p.is_varargs);
             // 1. Exact fixed-arity match.
-            if let Some(exact) = candidates.iter().find(|m| {
-                !m.params.last().is_some_and(|p| p.is_varargs) && m.params.len() == arity
-            }) {
-                return Some((*exact).clone());
+            if !is_varargs && m.params.len() == arity {
+                return Some(m);
             }
             // 2. Varargs arity match.
-            if let Some(varargs) = candidates.iter().find(|m| {
-                m.params.last().is_some_and(|p| p.is_varargs)
-                    && arity + 1 >= m.params.len()
-            }) {
-                return Some((*varargs).clone());
+            if is_varargs && varargs_match.is_none() && arity + 1 >= m.params.len() {
+                varargs_match = Some(m);
             }
+        } else {
+            return Some(m);
         }
-        // 3. Fallback to first matching method.
-        return Some(candidates[0].clone());
     }
 
-    if include_record_components && call_arity.is_none_or(|a| a == 0) {
-        if let Some(rc) = members
+    // 3. Fallback to first varargs match or first matching method.
+    if let Some(m) = varargs_match.or(first_match) {
+        return Some(m);
+    }
+
+    if !only_static && include_record_components && call_arity.is_none_or(|a| a == 0) {
+        return members
             .iter()
-            .find(|m| m.kind == MemberKind::RecordComponent && m.name == name)
-        {
-            return Some(rc.clone());
-        }
+            .find(|m| m.kind == MemberKind::RecordComponent && m.name == name);
     }
 
     None
@@ -1572,17 +1564,18 @@ fn resolve_expr_type(
         FIELD_ACCESS_EXPR => {
             if let Some(chain) = extract_dotted_name_chain(expr) {
                 if let Some(ty) = lookup_type_by_fqn(file_syms, index, &chain.join(".")) {
-                    return Some(ty);
+                    return Some(ty.clone());
                 }
             }
             let ref_node = expr.children().find(|n| n.kind() == NAME_REF)?;
             let receiver = expr.children().next()?;
             let recv_ty = resolve_expr_type(db, file_id, file_syms, index, &receiver, depth + 1)?;
+            let member_name = node_ident_text(&ref_node);
             let target = lookup_member_on_type(
                 file_syms,
                 index,
                 &recv_ty,
-                ref_node.text().to_string().as_str(),
+                &member_name,
                 None,
                 false,
             )?;
@@ -1596,11 +1589,12 @@ fn resolve_expr_type(
                 .children()
                 .find(|n| n.kind() == ARG_LIST)
                 .map(|al| count_args(&al));
+            let member_name = node_ident_text(&ref_node);
             let target = lookup_member_on_type(
                 file_syms,
                 index,
                 &recv_ty,
-                ref_node.text().to_string().as_str(),
+                &member_name,
                 arg_count,
                 true,
             )?;
@@ -1620,13 +1614,14 @@ fn resolve_expr_type(
             let segs = path_segments(&path_type);
             if has_direct_token(expr, DOT) {
                 let outer_expr = expr.children().next()?;
-                let mut current =
+                let outer_ty =
                     resolve_expr_type(db, file_id, file_syms, index, &outer_expr, depth + 1)?;
+                let mut current: &TypeSymbol = &outer_ty;
                 for seg in &segs {
                     let next_fqn = format!("{}.{}", current.qualified_name, seg);
                     current = lookup_type_by_fqn(file_syms, index, &next_fqn)?;
                 }
-                return Some(current);
+                return Some(current.clone());
             }
             let seg_refs: Vec<&str> = segs.iter().map(String::as_str).collect();
             match resolve_type_segments(file_id, file_syms, index, &path_type, &seg_refs)? {
@@ -1674,7 +1669,7 @@ fn target_to_type_symbol(
             MemberKind::EnumConstant => {
                 let owner_fqn = m.owner_type.as_deref()?;
                 let decl_syms = db.file_symbols(m.file_id);
-                lookup_type_by_fqn(&decl_syms, index, owner_fqn)
+                lookup_type_by_fqn(&decl_syms, index, owner_fqn).cloned()
             }
             MemberKind::Constructor => None,
         },
@@ -1774,16 +1769,16 @@ fn parse_type_ref_segments(type_ref: &str) -> Option<Vec<String>> {
     Some(segs)
 }
 
-fn extract_dotted_name_chain(node: &SyntaxNode) -> Option<Vec<String>> {
+fn extract_dotted_name_chain(node: &SyntaxNode) -> Option<Vec<SmolStr>> {
     let mut out = Vec::new();
     collect_dotted_chain(node, &mut out).then_some(out)
 }
 
-fn collect_dotted_chain(node: &SyntaxNode, out: &mut Vec<String>) -> bool {
+fn collect_dotted_chain(node: &SyntaxNode, out: &mut Vec<SmolStr>) -> bool {
     match node.kind() {
         NAME_REF_EXPR => {
             if let Some(nr) = node.children().find(|n| n.kind() == NAME_REF) {
-                out.push(nr.text().to_string());
+                out.push(node_ident_text(&nr));
                 true
             } else {
                 false
@@ -1797,7 +1792,7 @@ fn collect_dotted_chain(node: &SyntaxNode, out: &mut Vec<String>) -> bool {
                 return false;
             };
             if collect_dotted_chain(&recv, out) {
-                out.push(nr.text().to_string());
+                out.push(node_ident_text(&nr));
                 true
             } else {
                 false

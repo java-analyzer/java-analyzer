@@ -22,8 +22,8 @@ use std::{
 };
 
 use hir::{
-    infer_workspace_layout_from_sources, normalize_rel_path, FileId, LanguageLevel, ModuleDelta,
-    ModuleDependency, Release, RootScope, WorkspaceDelta, WorkspaceLayout,
+    infer_workspace_layout_from_sources, is_path_within, normalize_rel_path, FileId, LanguageLevel,
+    ModuleDelta, ModuleDependency, Release, RootScope, WorkspaceDelta, WorkspaceLayout,
 };
 
 pub use jdk::{discover_jdks, is_valid_jdk_home, probe_jdk_release};
@@ -624,25 +624,7 @@ impl WorkspaceProbe {
         if let Some(rel) = rel_path {
             let norm = normalize_rel_path(&rel.to_string_lossy());
 
-            let best_root = self
-                .layout
-                .modules
-                .iter()
-                .flat_map(|module| module.sources.iter().map(move |src| (module, src)))
-                .filter(|(_, src)| {
-                    src.rel_path == "."
-                        || norm == src.rel_path
-                        || norm.starts_with(&format!("{}/", src.rel_path))
-                })
-                .max_by_key(|(_, src)| {
-                    if src.rel_path == "." {
-                        0
-                    } else {
-                        src.rel_path.len()
-                    }
-                });
-
-            if let Some((module, src)) = best_root {
+            if let Some((module, src)) = self.layout.enclosing_source_root(&norm) {
                 if src.scope == RootScope::Test {
                     if let Some(test_lvl) = module.test_language_level {
                         return test_lvl;
@@ -655,11 +637,7 @@ impl WorkspaceProbe {
                 .layout
                 .modules
                 .iter()
-                .filter(|module| {
-                    module.rel_path == "."
-                        || norm == module.rel_path
-                        || norm.starts_with(&format!("{}/", module.rel_path))
-                })
+                .filter(|module| is_path_within(&norm, &module.rel_path))
                 .max_by_key(|module| {
                     if module.rel_path == "." {
                         0

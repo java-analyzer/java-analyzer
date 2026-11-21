@@ -327,6 +327,21 @@ impl WorkspaceLayout {
             .find(|m| m.module_name.as_deref() == Some(name) || m.rel_path == norm)
     }
 
+    /// Returns the most specific `(ModuleData, SourceRoot)` enclosing normalized path `norm_path`.
+    pub fn enclosing_source_root(&self, norm_path: &str) -> Option<(&ModuleData, &SourceRoot)> {
+        self.modules
+            .iter()
+            .flat_map(|module| module.sources.iter().map(move |src| (module, src)))
+            .filter(|(_, src)| is_path_within(norm_path, &src.rel_path))
+            .max_by_key(|(_, src)| {
+                if src.rel_path == "." {
+                    0
+                } else {
+                    src.rel_path.len()
+                }
+            })
+    }
+
     /// Checks a live parsed file's `package` declaration against this layout's authoritative
     /// `package-info.java` entries and enclosing [`SourceRoot`]s without re-scanning the workspace.
     pub fn check_file_package(
@@ -358,21 +373,15 @@ impl WorkspaceLayout {
             return None;
         }
 
-        let enclosing_root = self
-            .modules
-            .iter()
-            .flat_map(|m| m.sources.iter())
-            .map(|s| s.rel_path.as_str())
-            .filter(|r| *r == "." || dir == *r || dir.starts_with(&format!("{r}/")))
-            .max_by_key(|r| if *r == "." { 0 } else { r.len() });
-
-        if let Some(src_root) = enclosing_root {
+        if let Some((_, src)) = self.enclosing_source_root(&dir) {
+            let src_root = src.rel_path.as_str();
             let expected_pkg = if dir == src_root {
                 String::new()
             } else if src_root == "." {
                 dir.replace('/', ".")
             } else {
-                dir.strip_prefix(&format!("{src_root}/"))
+                dir.strip_prefix(src_root)
+                    .and_then(|rest| rest.strip_prefix('/'))
                     .unwrap_or(&dir)
                     .replace('/', ".")
             };
@@ -542,6 +551,15 @@ fn parse_module_decl(node: &SyntaxNode) -> Option<ModuleHeader> {
 }
 
 // ---- Path normalization & zero-config layout inference ----
+
+/// Returns `true` if normalized path `path` is equal to or nested beneath normalized `root`.
+pub fn is_path_within(path: &str, root: &str) -> bool {
+    root == "."
+        || path == root
+        || path
+            .strip_prefix(root)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
 
 pub fn normalize_rel_path(path: &str) -> String {
     let normalized = path.replace('\\', "/");
@@ -776,9 +794,7 @@ pub fn infer_workspace_layout(
     let find_enclosing_root = |dir: &str, roots: &BTreeSet<String>| -> Option<String> {
         roots
             .iter()
-            .filter(|r| {
-                *r == "." || dir == r.as_str() || dir.starts_with(&format!("{r}/"))
-            })
+            .filter(|r| is_path_within(dir, r))
             .max_by_key(|r| if *r == "." { 0 } else { r.len() })
             .cloned()
     };
@@ -898,9 +914,7 @@ pub fn infer_workspace_layout(
         } else {
             mod_source_roots
                 .keys()
-                .filter(|m| {
-                    *m == "." || res_dir == m.as_str() || res_dir.starts_with(&format!("{m}/"))
-                })
+                .filter(|m| is_path_within(&res_dir, m))
                 .max_by_key(|m| if *m == "." { 0 } else { m.len() })
                 .cloned()
                 .unwrap_or(derived)

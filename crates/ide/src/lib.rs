@@ -453,7 +453,7 @@ class C {
             file_id: None,
             full_range: None,
             focus_range: None,
-            name: "baz".to_string(),
+            name: "baz".into(),
             qualified_name: "C.baz".to_string(),
             detail: Some(SymbolDetail::Method {
                 return_type: Some("@Anno(\")\") String".to_string()),

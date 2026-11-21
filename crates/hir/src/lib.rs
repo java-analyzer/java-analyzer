@@ -10,6 +10,7 @@ use rustc_hash::FxHashMap;
 use salsa::Setter as _;
 
 pub use resolve::{resolve_at_offset, LocalKind, ResolvedSymbol, ResolvedSymbolKind, SymbolDetail};
+pub use smol_str::SmolStr;
 pub use symbols::{
     build_workspace_index, extract_file_symbols, FileSymbols, ImportDecl, ImportKind, MemberKind,
     MemberSymbol, ParamSummary, TypeKind, TypeSymbol, WorkspaceIndex,
@@ -20,9 +21,9 @@ pub use syntax::{
 };
 pub use workspace::{
     extract_file_header, infer_workspace_layout, infer_workspace_layout_from_sources,
-    normalize_rel_path, DeltaSet, FileHeader, ModuleData, ModuleDelta, ModuleDependency,
-    ModuleHeader, ModuleId, ModuleTarget, PackageMismatch, ResourceRoot, ResourceRootId, RootScope,
-    SourceRoot, SourceRootId, WorkspaceDelta, WorkspaceLayout,
+    is_path_within, normalize_rel_path, DeltaSet, FileHeader, ModuleData, ModuleDelta,
+    ModuleDependency, ModuleHeader, ModuleId, ModuleTarget, PackageMismatch, ResourceRoot,
+    ResourceRootId, RootScope, SourceRoot, SourceRootId, WorkspaceDelta, WorkspaceLayout,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

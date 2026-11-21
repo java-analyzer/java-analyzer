@@ -3,6 +3,7 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
+use smol_str::SmolStr;
 use syntax::{
     ext::{
         has_direct_token, has_modifier, name_child, path_segments, type_child,
@@ -13,6 +14,19 @@ use syntax::{
 };
 
 use crate::FileId;
+
+/// Extracts the identifier text of a `NAME` or `NAME_REF` node without heap allocation for short
+/// names.
+pub(crate) fn node_ident_text(node: &SyntaxNode) -> SmolStr {
+    if let Some(tok) = node
+        .children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .find(|t| !t.kind().is_trivia())
+    {
+        return SmolStr::new(tok.text());
+    }
+    smol_str::format_smolstr!("{}", node.text())
+}
 
 /// Classification of a Java `import` declaration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -66,18 +80,18 @@ impl TypeKind {
 pub struct TypeSymbol {
     pub file_id: FileId,
     /// Simple name (e.g. `"Inner"`).
-    pub name: String,
+    pub name: SmolStr,
     /// Canonical dot-separated FQN (e.g. `"com.example.Outer.Inner"`, or `"Outer.Inner"` in unnamed package).
     pub qualified_name: String,
     /// Enclosing type's `qualified_name`, if nested.
     pub enclosing_type: Option<String>,
     pub kind: TypeKind,
     pub is_static: bool,
-    pub type_params: Vec<String>,
+    pub type_params: Vec<SmolStr>,
     /// Direct members of this type (fields, methods, constructors, enum constants, record components).
     pub members: Vec<MemberSymbol>,
     /// Simple names of directly nested types (resolved via `"{self.qualified_name}.{nested}"`).
-    pub nested_types: Vec<String>,
+    pub nested_types: Vec<SmolStr>,
     pub full_range: TextRange,
     pub selection_range: TextRange,
 }
@@ -95,7 +109,7 @@ pub enum MemberKind {
 /// Summary of a single method or constructor parameter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParamSummary {
-    pub name: Option<String>,
+    pub name: Option<SmolStr>,
     pub type_ref: String,
     pub is_varargs: bool,
 }
@@ -120,7 +134,7 @@ pub struct MemberSymbol {
     pub file_id: FileId,
     /// Enclosing type's `qualified_name` (`None` only for JEP 512 compact-source top-level members).
     pub owner_type: Option<String>,
-    pub name: String,
+    pub name: SmolStr,
     pub kind: MemberKind,
     pub is_static: bool,
     /// Collapsed source text of the declared type (`None` for constructors and enum constants).
@@ -161,7 +175,7 @@ pub struct WorkspaceIndex {
     /// Package name (`""` for unnamed package, `"com.example"` otherwise) -> top-level type FQNs.
     pub(crate) types_by_package: BTreeMap<String, Vec<String>>,
     /// Package name -> simple name -> top-level type FQN for fast same-package & wildcard lookup.
-    pub(crate) package_type_map: BTreeMap<String, BTreeMap<String, String>>,
+    pub(crate) package_type_map: BTreeMap<String, BTreeMap<SmolStr, String>>,
 }
 
 impl WorkspaceIndex {
@@ -355,16 +369,16 @@ fn extract_type_decl(
     enclosing_fqn: Option<&str>,
     enclosing_kind: Option<TypeKind>,
     out: &mut Vec<TypeSymbol>,
-) -> Option<String> {
+) -> Option<SmolStr> {
     let kind = TypeKind::from_syntax(node.kind())?;
     let name_node = name_child(node)?;
-    let name = name_node.text().to_string();
+    let name = node_ident_text(&name_node);
 
     let qualified_name = match enclosing_fqn {
         Some(parent) => format!("{parent}.{name}"),
         None => match package {
             Some(pkg) => format!("{pkg}.{name}"),
-            None => name.clone(),
+            None => name.to_string(),
         },
     };
 
@@ -392,7 +406,7 @@ fn extract_type_decl(
                         members.push(MemberSymbol {
                             file_id,
                             owner_type: Some(qualified_name.clone()),
-                            name: comp_name.text().to_string(),
+                            name: node_ident_text(&comp_name),
                             kind: MemberKind::RecordComponent,
                             is_static: false,
                             type_ref,
@@ -411,7 +425,7 @@ fn extract_type_decl(
                                 members.push(MemberSymbol {
                                     file_id,
                                     owner_type: Some(qualified_name.clone()),
-                                    name: const_name.text().to_string(),
+                                    name: node_ident_text(&const_name),
                                     kind: MemberKind::EnumConstant,
                                     is_static: true,
                                     type_ref: None,
@@ -512,7 +526,7 @@ pub(crate) fn extract_field_decl(
         out.push(MemberSymbol {
             file_id,
             owner_type: owner_fqn.map(str::to_string),
-            name: name_node.text().to_string(),
+            name: node_ident_text(&name_node),
             kind: MemberKind::Field,
             is_static,
             type_ref,
@@ -546,7 +560,7 @@ pub(crate) fn extract_method_or_ctor(
     Some(MemberSymbol {
         file_id,
         owner_type: owner_fqn.map(str::to_string),
-        name: name_node.text().to_string(),
+        name: node_ident_text(&name_node),
         kind,
         is_static,
         type_ref,
@@ -564,7 +578,7 @@ fn extract_params(param_list: &SyntaxNode) -> Vec<ParamSummary> {
             let type_node = type_child(&param)?;
             let type_ref = type_text_with_dims(&type_node, &param);
             let is_varargs = has_direct_token(&param, DOT3);
-            let name = name_child(&param).map(|n| n.text().to_string());
+            let name = name_child(&param).map(|n| node_ident_text(&n));
             Some(ParamSummary {
                 name,
                 type_ref,
@@ -574,13 +588,13 @@ fn extract_params(param_list: &SyntaxNode) -> Vec<ParamSummary> {
         .collect()
 }
 
-fn extract_type_param_names(node: &SyntaxNode) -> Vec<String> {
+fn extract_type_param_names(node: &SyntaxNode) -> Vec<SmolStr> {
     node.children()
         .find(|n| n.kind() == TYPE_PARAMS)
         .map(|tps| {
             tps.children()
                 .filter(|n| n.kind() == TYPE_PARAM)
-                .filter_map(|tp| name_child(&tp).map(|n| n.text().to_string()))
+                .filter_map(|tp| name_child(&tp).map(|n| node_ident_text(&n)))
                 .collect()
         })
         .unwrap_or_default()

@@ -200,10 +200,10 @@ Each step is small, independent, behavior-preserving, and leaves `cargo test` gr
 - [x] Route `ide::document_symbols` through `hir::FileSymbols` (or shared `syntax::ast` helpers) and move `check_file_package` diagnostics into `ide::diagnostics()` so `java-analyzer` no longer touches `syntax` directly.
 - [x] Tighten `pub` visibility on `hir::{SourceFile, WorkspaceFiles}`, `WorkspaceIndex` internals, and remove the unused `ImportItem` alias.
 
-### Step 7: Reduce `hir::resolve` Cloning & Adopt `smol_str` **[New Dependency]**
-- Switch identifier/name fields in `hir::symbols` and `hir::resolve` from `String` to `SmolStr`.
-- Refactor `lookup_type_by_fqn` and `select_method` to borrow `&TypeSymbol` / `&MemberSymbol` instead of cloning whole structs and temporary `Vec`s.
-- Extract `local_symbol_from_node` in `hir::resolve` and `WorkspaceLayout::enclosing_source_root` in `hir::workspace`.
+### Step 7: Reduce `hir::resolve` Cloning & Adopt `smol_str` **[New Dependency]** *(Completed)*
+- [x] Switch identifier/name fields in `hir::symbols` and `hir::resolve` from `String` to `SmolStr`.
+- [x] Refactor `lookup_type_by_fqn` and `select_method` to borrow `&TypeSymbol` / `&MemberSymbol` instead of cloning whole structs and temporary `Vec`s.
+- [x] Extract `local_symbol_from_node` in `hir::resolve` and `WorkspaceLayout::enclosing_source_root` in `hir::workspace`.
 
 ### Step 8: Introduce `AnalysisHost` / `Analysis` Facade & Background Request Execution **[Crate Boundary Change]**
 - Add `ide::AnalysisHost` (wrapping `RootDatabase`) and `ide::Analysis` (holding a Salsa snapshot) so `java-analyzer` depends only on `ide` (no direct `hir` or `syntax` dependency).
