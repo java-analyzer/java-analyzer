@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
     error::Error,
     fs,
@@ -7,6 +8,7 @@ use std::{
 };
 
 use hir::{normalize_rel_path, FileId, RootDatabase, SourceDatabase};
+use line_index::LineIndex;
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::{
     notification::{
@@ -22,7 +24,9 @@ use lsp_types::{
 };
 
 use crate::{
-    convert::{path_to_uri, position_to_offset, text_range_to_range, uri_to_path},
+    convert::{
+        path_to_uri, position_to_offset_with_index, text_range_to_range_with_index, uri_to_path,
+    },
     workspace_config::{parse_shebang_level, probe_workspace, WorkspaceProbe},
 };
 
@@ -33,6 +37,7 @@ pub struct GlobalState {
     db: RootDatabase,
     files: HashMap<Uri, FileId>,
     file_urls: HashMap<FileId, Uri>,
+    line_indexes: HashMap<FileId, LineIndex>,
     open_files: HashSet<Uri>,
     next_file_id: u32,
     workspace_probe: Option<WorkspaceProbe>,
@@ -50,6 +55,7 @@ impl GlobalState {
             db: RootDatabase::default(),
             files: HashMap::new(),
             file_urls: HashMap::new(),
+            line_indexes: HashMap::new(),
             open_files: HashSet::new(),
             next_file_id: 0,
             workspace_probe: None,
@@ -80,7 +86,7 @@ impl GlobalState {
                     let level = parse_shebang_level(&text)
                         .unwrap_or_else(|| probe.language_level_for_path(&abs_path));
                     self.db.set_file_language_level(file_id, level);
-                    self.db.set_file_text(file_id, text);
+                    self.set_file_text(file_id, text);
                 }
             }
         }
@@ -90,6 +96,18 @@ impl GlobalState {
 
     pub fn workspace_probe(&self) -> Option<&WorkspaceProbe> {
         self.workspace_probe.as_ref()
+    }
+
+    fn set_file_text(&mut self, file_id: FileId, text: Arc<String>) {
+        self.line_indexes.insert(file_id, LineIndex::new(&text));
+        self.db.set_file_text(file_id, text);
+    }
+
+    fn line_index(&self, file_id: FileId, text: &str) -> Cow<'_, LineIndex> {
+        match self.line_indexes.get(&file_id) {
+            Some(index) => Cow::Borrowed(index),
+            None => Cow::Owned(LineIndex::new(text)),
+        }
     }
 
     fn ensure_file_id(&mut self, uri: &Uri) -> (FileId, bool) {
@@ -124,7 +142,7 @@ impl GlobalState {
         let (file_id, is_new) = self.ensure_file_id(uri);
         self.open_files.insert(uri.clone());
         self.db.set_file_language_level(file_id, level);
-        self.db.set_file_text(file_id, Arc::new(text));
+        self.set_file_text(file_id, Arc::new(text));
         if is_new {
             self.sync_workspace_files();
         }
@@ -140,7 +158,7 @@ impl GlobalState {
             if let Ok(disk_text) = fs::read_to_string(&path) {
                 let level = self.language_level_for(uri, &disk_text);
                 self.db.set_file_language_level(file_id, level);
-                self.db.set_file_text(file_id, Arc::new(disk_text));
+                self.set_file_text(file_id, Arc::new(disk_text));
                 return;
             }
         }
@@ -148,6 +166,7 @@ impl GlobalState {
         // Non-disk / deleted file: drop it from the workspace index and release its text.
         self.files.remove(uri);
         self.file_urls.remove(&file_id);
+        self.line_indexes.remove(&file_id);
         self.db.set_file_text(file_id, Arc::new(String::new()));
         self.sync_workspace_files();
     }
@@ -157,10 +176,12 @@ impl GlobalState {
             match self.files.get(uri) {
                 Some(&file_id) => {
                     let text = self.db.file_text(file_id);
+                    let index = self.line_index(file_id, &text);
                     let mut diags: Vec<lsp_types::Diagnostic> = ide::diagnostics(&self.db, file_id)
                         .into_iter()
                         .map(|d| lsp_types::Diagnostic {
-                            range: text_range_to_range(
+                            range: text_range_to_range_with_index(
+                                &index,
                                 &text,
                                 d.range.start().into(),
                                 d.range.end().into(),
@@ -178,7 +199,7 @@ impl GlobalState {
                     if let Some(probe) = &self.workspace_probe {
                         for conflict in &probe.conflicts {
                             diags.push(lsp_types::Diagnostic {
-                                range: text_range_to_range(&text, 0, 0),
+                                range: text_range_to_range_with_index(&index, &text, 0, 0),
                                 severity: Some(DiagnosticSeverity::WARNING),
                                 source: Some("java-analyzer".to_string()),
                                 message: conflict.diagnostic_message(),
@@ -194,7 +215,8 @@ impl GlobalState {
                                     probe.layout.check_file_package(file_id, &norm, &syntax_tree)
                                 {
                                     diags.push(lsp_types::Diagnostic {
-                                        range: text_range_to_range(
+                                        range: text_range_to_range_with_index(
+                                            &index,
                                             &text,
                                             pkg_diag.range.start().into(),
                                             pkg_diag.range.end().into(),
@@ -227,9 +249,10 @@ impl GlobalState {
     fn document_symbols(&self, params: DocumentSymbolParams) -> Option<DocumentSymbolResponse> {
         let file_id = *self.files.get(&params.text_document.uri)?;
         let text = self.db.file_text(file_id);
+        let index = self.line_index(file_id, &text);
         let symbols = ide::document_symbols(&self.db, file_id)
             .iter()
-            .map(|node| to_document_symbol(&text, node))
+            .map(|node| to_document_symbol(&index, &text, node))
             .collect();
         Some(DocumentSymbolResponse::Nested(symbols))
     }
@@ -238,7 +261,8 @@ impl GlobalState {
         let pos = params.text_document_position_params;
         let file_id = *self.files.get(&pos.text_document.uri)?;
         let text = self.db.file_text(file_id);
-        let offset = position_to_offset(&text, pos.position)?;
+        let index = self.line_index(file_id, &text);
+        let offset = position_to_offset_with_index(&index, &text, pos.position)?;
         let result = ide::hover(&self.db, file_id, offset)?;
         Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
@@ -253,11 +277,14 @@ impl GlobalState {
         let pos = params.text_document_position_params;
         let file_id = *self.files.get(&pos.text_document.uri)?;
         let text = self.db.file_text(file_id);
-        let offset = position_to_offset(&text, pos.position)?;
+        let index = self.line_index(file_id, &text);
+        let offset = position_to_offset_with_index(&index, &text, pos.position)?;
         let target = ide::goto_definition(&self.db, file_id, offset)?;
         let target_uri = self.file_urls.get(&target.file_id)?.clone();
         let target_text = self.db.file_text(target.file_id);
-        let range = text_range_to_range(
+        let target_index = self.line_index(target.file_id, &target_text);
+        let range = text_range_to_range_with_index(
+            &target_index,
             &target_text,
             target.focus_range.start().into(),
             target.focus_range.end().into(),
@@ -280,8 +307,10 @@ pub fn capabilities() -> ServerCapabilities {
 }
 
 #[allow(deprecated)] // `DocumentSymbol::deprecated` is deprecated but has no default.
-fn to_document_symbol(text: &str, node: &ide::StructureNode) -> DocumentSymbol {
-    let range = |r: ide::TextRange| text_range_to_range(text, r.start().into(), r.end().into());
+fn to_document_symbol(index: &LineIndex, text: &str, node: &ide::StructureNode) -> DocumentSymbol {
+    let range = |r: ide::TextRange| {
+        text_range_to_range_with_index(index, text, r.start().into(), r.end().into())
+    };
     DocumentSymbol {
         name: node.name.clone(),
         detail: node.detail.clone(),
@@ -302,7 +331,7 @@ fn to_document_symbol(text: &str, node: &ide::StructureNode) -> DocumentSymbol {
         children: Some(
             node.children
                 .iter()
-                .map(|c| to_document_symbol(text, c))
+                .map(|c| to_document_symbol(index, text, c))
                 .collect(),
         ),
     }
@@ -507,5 +536,70 @@ mod tests {
             "Expected live mismatch for 'other.bad', got: {:?}",
             diags.diagnostics
         );
+    }
+
+    #[test]
+    fn line_index_cache_tracks_workspace_edits_closes_and_fallback() {
+        let dir = TestDir::new();
+        let disk_path = dir.write("src/Disk.java", "class Disk {\n    int x;\n}\n");
+        let temp_path = dir.write("src/Temp.java", "class Temp {}\n");
+        let disk_uri = path_to_uri(&disk_path).unwrap();
+        let temp_uri = path_to_uri(&temp_path).unwrap();
+
+        let mut state = GlobalState::with_workspace(dir.path());
+        let disk_id = state.files[&disk_uri];
+        let temp_id = state.files[&temp_uri];
+        assert!(state.line_indexes.contains_key(&disk_id));
+        assert!(state.line_indexes.contains_key(&temp_id));
+
+        // Editing updates cached LineIndex.
+        state.set_text(&disk_uri, "class Disk {\n    int x;\n    int y;\n}\n".to_string());
+        assert_eq!(
+            state.line_indexes[&disk_id],
+            LineIndex::new("class Disk {\n    int x;\n    int y;\n}\n")
+        );
+
+        // Closing an on-disk file reloads disk text and updates cached LineIndex.
+        state.close(&disk_uri);
+        assert_eq!(
+            state.line_indexes[&disk_id],
+            LineIndex::new("class Disk {\n    int x;\n}\n")
+        );
+
+        // Closing a deleted file removes its cached LineIndex.
+        fs::remove_file(&temp_path).unwrap();
+        state.close(&temp_uri);
+        assert!(!state.line_indexes.contains_key(&temp_id));
+
+        // Even if a LineIndex entry is absent, queries fall back cleanly without panicking.
+        state.set_text(&disk_uri, "class Disk { int x = ; }\n".to_string());
+        state.line_indexes.remove(&disk_id);
+        let diags = state.diagnostics(&disk_uri, Some(1));
+        assert!(!diags.diagnostics.is_empty());
+        let syms = state.document_symbols(DocumentSymbolParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: disk_uri.clone(),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        });
+        assert!(syms.is_some());
+        let _ = state.hover(HoverParams {
+            text_document_position_params: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier {
+                    uri: disk_uri.clone(),
+                },
+                position: lsp_types::Position::new(0, 6),
+            },
+            work_done_progress_params: Default::default(),
+        });
+        let _ = state.goto_definition(GotoDefinitionParams {
+            text_document_position_params: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: disk_uri },
+                position: lsp_types::Position::new(0, 6),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        });
     }
 }

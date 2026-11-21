@@ -180,10 +180,10 @@ Each step is small, independent, behavior-preserving, and leaves `cargo test` gr
 - [x] Return or retain scanned `(rel_path, String)` texts from `probe_workspace()` so `GlobalState::set_workspace_root` and `inspect::run_with_io` do not re-read and re-parse every `.java` file from disk.
 - [x] Remove the full-file parse on every `didChange` inside `GlobalState::language_level_for`.
 
-### Step 3: Replace O(N) Offset Math and Hand-Rolled URI Encoding in `convert.rs` **[New Dependency]**
-- Add `line-index` and `url` to `[workspace.dependencies]`.
-- Replace `position_to_offset` / `offset_to_position` / `text_range_to_range` with `line_index::LineIndex` (cached per `FileId` in Salsa or `GlobalState`), turning O(N·M) `document_symbols`/`diagnostics` conversions into O(M log L).
-- Replace the ~190-line `path_to_uri` / `uri_to_path` / percent-encoding implementation with thin wrappers around `url::Url::from_file_path` / `to_file_path`.
+### Step 3: Replace O(N) Offset Math and Hand-Rolled URI Encoding in `convert.rs` **[New Dependency]** *(Completed)*
+- [x] Add `line-index` and `url` to `[workspace.dependencies]`.
+- [x] Replace `position_to_offset` / `offset_to_position` / `text_range_to_range` with `line_index::LineIndex` (cached per `FileId` in Salsa or `GlobalState`), turning O(N·M) `document_symbols`/`diagnostics` conversions into O(M log L).
+- [x] Replace the ~190-line `path_to_uri` / `uri_to_path` / percent-encoding implementation with thin wrappers around `url::Url::from_file_path` / `to_file_path`.
 
 ### Step 4: Replace Hand-Rolled XML Slicer with `roxmltree` **[New Dependency]**
 - Add `roxmltree` to `java-analyzer`.

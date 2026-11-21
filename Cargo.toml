@@ -19,6 +19,7 @@ description = "A Java Language Server Protocol implementation in Rust"
 clap = { version = "4", features = ["derive"] }
 expect-test = "1"
 ignore = "0.4"
+line-index = "0.1"
 lsp-server = "0.10"
 lsp-types = "0.97"
 rowan = "0.17"
@@ -28,6 +29,7 @@ serde_json = "1"
 similar = "2"
 tempfile = "3"
 toml = "1"
+url = "2"
 
 # Workspace crates
 syntax = { path = "crates/syntax" }

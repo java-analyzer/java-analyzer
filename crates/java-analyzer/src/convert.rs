@@ -1,5 +1,6 @@
-use std::path::{Component, Path, PathBuf, Prefix};
+use std::path::{Path, PathBuf};
 
+use line_index::{LineIndex, TextSize, WideEncoding, WideLineCol};
 use lsp_types::{Position, Range, Uri};
 
 /// Converts an absolute filesystem [`Path`] into a `file://` [`Uri`].
@@ -7,192 +8,65 @@ use lsp_types::{Position, Range, Uri};
 /// Returns `None` if `path` is relative, uses an unsupported Windows prefix, or cannot be
 /// represented as a valid URI.
 pub fn path_to_uri(path: &Path) -> Option<Uri> {
-    if !path.is_absolute() {
-        return None;
-    }
-
-    let mut out = String::from("file://");
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix) => match prefix.kind() {
-                Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => {
-                    out.push('/');
-                    out.push(drive as char);
-                    out.push(':');
-                }
-                Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
-                    percent_encode_bytes(os_str_bytes(server)?, &mut out);
-                    out.push('/');
-                    percent_encode_bytes(os_str_bytes(share)?, &mut out);
-                }
-                Prefix::Verbatim(_) | Prefix::DeviceNS(_) => return None,
-            },
-            Component::RootDir => {
-                if out == "file://" || !out.ends_with('/') {
-                    out.push('/');
-                }
-            }
-            Component::CurDir => {
-                if !out.ends_with('/') {
-                    out.push('/');
-                }
-                out.push('.');
-            }
-            Component::ParentDir => {
-                if !out.ends_with('/') {
-                    out.push('/');
-                }
-                out.push_str("..");
-            }
-            Component::Normal(seg) => {
-                if !out.ends_with('/') {
-                    out.push('/');
-                }
-                percent_encode_bytes(os_str_bytes(seg)?, &mut out);
-            }
-        }
-    }
-
-    out.parse::<Uri>().ok()
+    let url = url::Url::from_file_path(path).ok()?;
+    url.as_str().parse::<Uri>().ok()
 }
 
 /// Converts a `file://` [`Uri`] back into a local filesystem [`PathBuf`].
 ///
-/// Returns `None` if `uri` is not a `file` URI, specifies a non-local host (on non-Windows),
-/// or contains invalid percent-encoding or NUL bytes.
+/// Returns `None` if `uri` is not a `file` URI, has an empty path, specifies a non-local host
+/// (on non-Windows), or contains NUL bytes.
 pub fn uri_to_path(uri: &Uri) -> Option<PathBuf> {
-    let s = uri.as_str();
-    if !s.get(..5)?.eq_ignore_ascii_case("file:") {
+    if uri.path().as_str().is_empty() {
         return None;
     }
+    let url = url::Url::parse(uri.as_str()).ok()?;
+    if url.scheme() != "file" {
+        return None;
+    }
+    let path = url.to_file_path().ok()?;
+    if path.as_os_str().as_encoded_bytes().contains(&0) {
+        return None;
+    }
+    Some(path)
+}
 
-    let after_scheme = &s[5..];
-    let without_query_or_fragment = match after_scheme.find(['?', '#']) {
-        Some(idx) => &after_scheme[..idx],
-        None => after_scheme,
+/// Converts an LSP position (line + UTF-16 code unit column) into a byte offset in `text`
+/// using a precomputed [`LineIndex`].
+///
+/// Returns `None` if the line is out of range. A column past the end of the line is clamped
+/// to the end of that line (before `\n`/`\r\n`), as the LSP specification requires.
+pub fn position_to_offset_with_index(
+    index: &LineIndex,
+    text: &str,
+    position: Position,
+) -> Option<u32> {
+    let line_range = index.line(position.line)?;
+    let start = usize::from(line_range.start());
+    let end = usize::from(line_range.end());
+    let line_text = &text[start..end];
+    let trimmed = line_text
+        .strip_suffix('\n')
+        .map(|s| s.strip_suffix('\r').unwrap_or(s))
+        .unwrap_or(line_text);
+    let line_end = line_range.start() + TextSize::of(trimmed);
+
+    let wide_col = WideLineCol {
+        line: position.line,
+        col: position.character,
     };
-
-    if let Some(after_slashes) = without_query_or_fragment.strip_prefix("//") {
-        let slash_idx = after_slashes.find('/')?;
-        let authority = &after_slashes[..slash_idx];
-        let raw_path = &after_slashes[slash_idx..];
-
-        #[cfg(windows)]
-        if !authority.is_empty() && !authority.eq_ignore_ascii_case("localhost") {
-            let server = String::from_utf8(percent_decode_bytes(authority)?).ok()?;
-            let path = String::from_utf8(percent_decode_bytes(raw_path)?).ok()?;
-            return Some(PathBuf::from(format!(
-                "\\\\{}{}",
-                server,
-                path.replace('/', "\\")
-            )));
-        }
-
-        #[cfg(not(windows))]
-        if !authority.is_empty() && !authority.eq_ignore_ascii_case("localhost") {
-            return None;
-        }
-
-        let decoded = percent_decode_bytes(raw_path)?;
-        bytes_to_path_buf(decoded)
-    } else if without_query_or_fragment.starts_with('/') {
-        let decoded = percent_decode_bytes(without_query_or_fragment)?;
-        bytes_to_path_buf(decoded)
-    } else {
-        None
-    }
-}
-
-fn os_str_bytes(s: &std::ffi::OsStr) -> Option<&[u8]> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        Some(s.as_bytes())
-    }
-    #[cfg(not(unix))]
-    {
-        s.to_str().map(str::as_bytes)
-    }
-}
-
-#[cfg(unix)]
-fn bytes_to_path_buf(bytes: Vec<u8>) -> Option<PathBuf> {
-    use std::ffi::OsString;
-    use std::os::unix::ffi::OsStringExt;
-    Some(PathBuf::from(OsString::from_vec(bytes)))
-}
-
-#[cfg(not(unix))]
-fn bytes_to_path_buf(bytes: Vec<u8>) -> Option<PathBuf> {
-    let s = String::from_utf8(bytes).ok()?;
-    #[cfg(windows)]
-    {
-        let mut chars = s.chars();
-        if matches!(
-            (chars.next(), chars.next(), chars.next(), chars.next()),
-            (Some('/'), Some(d), Some(':'), None | Some('/')) if d.is_ascii_alphabetic()
-        ) {
-            let trimmed = &s[1..];
-            let win = if trimmed.len() == 2 {
-                format!("{trimmed}\\")
-            } else {
-                trimmed.replace('/', "\\")
-            };
-            return Some(PathBuf::from(win));
-        }
-    }
-    Some(PathBuf::from(s))
-}
-
-fn percent_encode_bytes(bytes: &[u8], out: &mut String) {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    for &b in bytes {
-        if matches!(
-            b,
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~'
-        ) {
-            out.push(b as char);
-        } else {
-            out.push('%');
-            out.push(HEX[(b >> 4) as usize] as char);
-            out.push(HEX[(b & 0x0F) as usize] as char);
-        }
-    }
-}
-
-fn percent_decode_bytes(input: &str) -> Option<Vec<u8>> {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b == b'%' {
-            let hi = hex_val(*bytes.get(i + 1)?)?;
-            let lo = hex_val(*bytes.get(i + 2)?)?;
-            let decoded = (hi << 4) | lo;
-            if decoded == 0 {
-                return None;
+    let offset = match index.to_utf8(WideEncoding::Utf16, wide_col) {
+        Some(lc) => {
+            let max_col = u32::from(line_end - line_range.start());
+            let mut off = start + lc.col.min(max_col) as usize;
+            while !text.is_char_boundary(off) {
+                off -= 1;
             }
-            out.push(decoded);
-            i += 3;
-        } else {
-            if b == 0 {
-                return None;
-            }
-            out.push(b);
-            i += 1;
+            off as u32
         }
-    }
-    Some(out)
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
+        None => u32::from(line_end),
+    };
+    Some(offset)
 }
 
 /// Converts an LSP position (line + UTF-16 code unit column) into a byte offset in `text`.
@@ -200,27 +74,30 @@ fn hex_val(b: u8) -> Option<u8> {
 /// Returns `None` if the line is out of range. A column past the end of the line is clamped
 /// to the end of that line, as the LSP specification requires.
 pub fn position_to_offset(text: &str, position: Position) -> Option<u32> {
-    let mut line_start = 0usize;
-    for _ in 0..position.line {
-        let newline = text[line_start..].find('\n')?;
-        line_start += newline + 1;
+    position_to_offset_with_index(&LineIndex::new(text), text, position)
+}
+
+/// Converts a byte offset in `text` into an LSP position (line + UTF-16 code unit column)
+/// using a precomputed [`LineIndex`].
+///
+/// An offset past the end of `text` is clamped to the end; an offset inside a multi-byte
+/// character is rounded down to the start of that character.
+pub fn offset_to_position_with_index(index: &LineIndex, text: &str, offset: u32) -> Position {
+    let mut off = (offset as usize).min(text.len()).min(usize::from(index.len()));
+    while !text.is_char_boundary(off) {
+        off -= 1;
     }
-
-    let line = &text[line_start..];
-    let line_end = line.find('\n').unwrap_or(line.len());
-    let line = &line[..line_end];
-
-    let mut utf16_col = 0u32;
-    let mut byte_col = line.len();
-    for (idx, ch) in line.char_indices() {
-        if utf16_col >= position.character {
-            byte_col = idx;
-            break;
-        }
-        utf16_col += ch.len_utf16() as u32;
+    let line_col = index.line_col(TextSize::from(off as u32));
+    let wide = index
+        .to_wide(WideEncoding::Utf16, line_col)
+        .unwrap_or(WideLineCol {
+            line: line_col.line,
+            col: line_col.col,
+        });
+    Position {
+        line: wide.line,
+        character: wide.col,
     }
-
-    u32::try_from(line_start + byte_col).ok()
 }
 
 /// Converts a byte offset in `text` into an LSP position (line + UTF-16 code unit column).
@@ -228,26 +105,25 @@ pub fn position_to_offset(text: &str, position: Position) -> Option<u32> {
 /// An offset past the end of `text` is clamped to the end; an offset inside a multi-byte
 /// character is rounded down to the start of that character.
 pub fn offset_to_position(text: &str, offset: u32) -> Position {
-    let mut offset = (offset as usize).min(text.len());
-    while !text.is_char_boundary(offset) {
-        offset -= 1;
-    }
-    let before = &text[..offset];
-    let line = before.matches('\n').count();
-    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
-    let character = before[line_start..].encode_utf16().count();
-    Position {
-        line: line as u32,
-        character: character as u32,
+    offset_to_position_with_index(&LineIndex::new(text), text, offset)
+}
+
+/// Converts a byte range in `text` into an LSP range using a precomputed [`LineIndex`].
+pub fn text_range_to_range_with_index(
+    index: &LineIndex,
+    text: &str,
+    start: u32,
+    end: u32,
+) -> Range {
+    Range {
+        start: offset_to_position_with_index(index, text, start),
+        end: offset_to_position_with_index(index, text, end),
     }
 }
 
 /// Converts a byte range in `text` into an LSP range.
 pub fn text_range_to_range(text: &str, start: u32, end: u32) -> Range {
-    Range {
-        start: offset_to_position(text, start),
-        end: offset_to_position(text, end),
-    }
+    text_range_to_range_with_index(&LineIndex::new(text), text, start, end)
 }
 
 #[cfg(test)]
@@ -397,5 +273,31 @@ mod tests {
             let remote: Uri = "file://example.com/tmp/Main.java".parse().unwrap();
             assert_eq!(uri_to_path(&remote), None);
         }
+    }
+
+    #[test]
+    fn uri_to_path_rejects_nul_bytes() {
+        let nul: Uri = "file:///tmp/bad%00.java".parse().unwrap();
+        assert_eq!(uri_to_path(&nul), None);
+    }
+
+    #[test]
+    fn crlf_and_huge_columns_clamp_to_line_end() {
+        assert_eq!(position_to_offset("ab\r\ncd", pos(0, 99)), Some(2));
+        assert_eq!(position_to_offset("é😀x", pos(0, u32::MAX)), Some(7));
+    }
+
+    #[test]
+    fn with_index_helpers_round_trip() {
+        let text = "class A {\n  String s = \"😀\";\n}\n";
+        let index = LineIndex::new(text);
+        let offset = position_to_offset_with_index(&index, text, pos(1, 16)).unwrap();
+        assert_eq!(offset, 28);
+        assert_eq!(offset_to_position_with_index(&index, text, offset), pos(1, 16));
+        // Mid-surrogate UTF-16 column rounds down to the start of the scalar value.
+        assert_eq!(position_to_offset_with_index(&index, text, pos(1, 15)), Some(24));
+        let range = text_range_to_range_with_index(&index, text, 10, offset);
+        assert_eq!(range.start, pos(1, 0));
+        assert_eq!(range.end, pos(1, 16));
     }
 }
