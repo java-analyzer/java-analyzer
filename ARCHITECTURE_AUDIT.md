@@ -185,9 +185,9 @@ Each step is small, independent, behavior-preserving, and leaves `cargo test` gr
 - [x] Replace `position_to_offset` / `offset_to_position` / `text_range_to_range` with `line_index::LineIndex` (cached per `FileId` in Salsa or `GlobalState`), turning O(N·M) `document_symbols`/`diagnostics` conversions into O(M log L).
 - [x] Replace the ~190-line `path_to_uri` / `uri_to_path` / percent-encoding implementation with thin wrappers around `url::Url::from_file_path` / `to_file_path`.
 
-### Step 4: Replace Hand-Rolled XML Slicer with `roxmltree` **[New Dependency]**
-- Add `roxmltree` to `java-analyzer`.
-- Rewrite `maven.rs` and `ant_ivy.rs` to query parsed `roxmltree::Document` nodes, deleting `workspace_config/xml.rs` (keeping `expand_props` as a small helper).
+### Step 4: Replace Hand-Rolled XML Slicer with `roxmltree` **[New Dependency]** *(Completed)*
+- [x] Add `roxmltree` to `java-analyzer`.
+- [x] Rewrite `maven.rs` and `ant_ivy.rs` to query parsed `roxmltree::Document` nodes, deleting `workspace_config/xml.rs` (keeping `expand_props` as a small helper).
 
 ### Step 5: Add Structured Logging, Error Types, and LSP Panic/Reliability Hardening **[New Dependency]**
 - Add `tracing`, `tracing-subscriber`, `anyhow`, and `rustc-hash`.

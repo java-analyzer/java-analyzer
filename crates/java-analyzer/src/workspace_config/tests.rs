@@ -1268,3 +1268,123 @@ fn scan_respects_gitignore_and_ignore_files_while_keeping_hidden_sources() {
         probe.file_paths
     );
 }
+
+#[test]
+fn xml_tags_with_attributes_namespaces_doctype_and_comments_parse_cleanly() {
+    let tmp = TestDir::new();
+    tmp.write(
+        "pom.xml",
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE project>
+<mvn:project xmlns:mvn="http://maven.apache.org/POM/4.0.0"
+             xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <mvn:modelVersion>4.0.0</mvn:modelVersion>
+    <mvn:groupId>com.example</mvn:groupId>
+    <mvn:artifactId>xml-edge</mvn:artifactId>
+    <mvn:version>1.2.3</mvn:version>
+    <mvn:properties>
+        <mvn:maven.compiler.release attr="ignored">21</mvn:maven.compiler.release>
+        <!-- <mvn:ignored.prop>99</mvn:ignored.prop> -->
+    </mvn:properties>
+    <mvn:build>
+        <mvn:plugins>
+            <mvn:plugin>
+                <mvn:configuration>
+                    <mvn:compilerArgs>
+                        <!-- <mvn:enablePreview>false</mvn:enablePreview> -->
+                        <mvn:arg>--enable-preview</mvn:arg>
+                    </mvn:compilerArgs>
+                </mvn:configuration>
+            </mvn:plugin>
+        </mvn:plugins>
+    </mvn:build>
+    <mvn:dependencies>
+        <mvn:dependency id="x" optional="false">
+            <mvn:groupId>com.google.guava</mvn:groupId>
+            <mvn:artifactId>guava<!-- inline comment --></mvn:artifactId>
+            <mvn:version>33.2.1-jre</mvn:version>
+            <mvn:exclusions>
+                <mvn:exclusion>
+                    <mvn:groupId>com.ignored</mvn:groupId>
+                    <mvn:artifactId>excluded</mvn:artifactId>
+                </mvn:exclusion>
+            </mvn:exclusions>
+        </mvn:dependency>
+    </mvn:dependencies>
+</mvn:project>"#,
+    );
+    tmp.write(
+        "src/main/java/com/example/App.java",
+        "package com.example;\npublic class App {}\n",
+    );
+
+    let probe = probe_workspace(tmp.path());
+    assert_eq!(probe.resolved_build, BuildToolKind::Maven);
+    assert_eq!(
+        probe.resolved_level,
+        LanguageLevel::new(Release::JAVA_21, true)
+    );
+    let root_mod = probe.layout.module_by_path(".").unwrap();
+    assert!(root_mod.dependencies.contains(&ModuleDependency::Maven {
+        group: "com.google.guava".to_string(),
+        artifact: "guava".to_string(),
+        version: "33.2.1-jre".to_string(),
+        classifier: None,
+        scope: RootScope::Main,
+    }));
+    assert_eq!(root_mod.dependencies.len(), 1);
+
+    // Malformed XML must never panic and returns default/empty metadata.
+    let malformed = maven::parse_maven_pom_metadata(
+        "<project><dependencies><dependency><groupId>broken",
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    );
+    assert!(malformed.release.is_none());
+    assert!(malformed.dependencies.is_empty());
+
+    // Ant build.xml and Ivy ivy.xml with DOCTYPE, namespaces, attributes, and comments
+    let ant_tmp = TestDir::new();
+    ant_tmp.write(
+        "build.xml",
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE project>
+<ant:project xmlns:ant="antlib:org.apache.tools.ant" name="demo" default="compile" basedir=".">
+    <!-- <ant:javac release="8"/> -->
+    <ant:target name="compile">
+        <ant:javac srcdir="src" destdir="build" release="21">
+            <ant:compilerarg value="--enable-preview"/>
+        </ant:javac>
+    </ant:target>
+</ant:project>"#,
+    );
+    ant_tmp.write(
+        "ivy.xml",
+        r#"<!DOCTYPE ivy-module>
+<ivy-module version="2.0">
+    <info organisation="com.example" module="demo"/>
+    <dependencies>
+        <dependency id="x" org="com.google.guava" name="guava" rev="33.2.1-jre" conf="compile->default"/>
+    </dependencies>
+</ivy-module>"#,
+    );
+    ant_tmp.write(
+        "src/com/example/App.java",
+        "package com.example;\npublic class App {}\n",
+    );
+    let ant_probe = probe_workspace(ant_tmp.path());
+    assert_eq!(ant_probe.resolved_build, BuildToolKind::Ant);
+    assert_eq!(
+        ant_probe.resolved_level,
+        LanguageLevel::new(Release::JAVA_21, true)
+    );
+    assert!(ant_probe.layout.modules[0]
+        .dependencies
+        .contains(&ModuleDependency::Maven {
+            group: "com.google.guava".to_string(),
+            artifact: "guava".to_string(),
+            version: "33.2.1-jre".to_string(),
+            classifier: None,
+            scope: RootScope::Main,
+        }));
+}

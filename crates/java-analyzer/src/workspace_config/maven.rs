@@ -1,12 +1,9 @@
 use std::{collections::BTreeMap, path::Path};
 
 use hir::{normalize_rel_path, ModuleDependency, Release, RootScope};
+use roxmltree::{Document, Node, ParsingOptions};
 
-use super::{
-    parse_version_string,
-    xml::{expand_props, extract_xml_tag_text, remove_xml_blocks, strip_xml_comments},
-    DetectedVersionSpec, ManifestMetadata,
-};
+use super::{expand_props, parse_version_string, DetectedVersionSpec, ManifestMetadata};
 
 #[derive(Default)]
 pub(super) struct MavenPomMetadata {
@@ -17,6 +14,50 @@ pub(super) struct MavenPomMetadata {
     pub(super) dependencies: Vec<ModuleDependency>,
     pub(super) properties: BTreeMap<String, String>,
     pub(super) managed_versions: BTreeMap<(String, String), String>,
+}
+
+fn parse_xml(content: &str) -> Option<Document<'_>> {
+    Document::parse_with_options(
+        content,
+        ParsingOptions {
+            allow_dtd: true,
+            ..Default::default()
+        },
+    )
+    .ok()
+}
+
+fn is_tag(node: Node<'_, '_>, name: &str) -> bool {
+    node.is_element() && node.tag_name().name() == name
+}
+
+fn has_any_ancestor(node: Node<'_, '_>, names: &[&str]) -> bool {
+    let mut cur = node.parent();
+    while let Some(parent) = cur {
+        if parent.is_element() && names.contains(&parent.tag_name().name()) {
+            return true;
+        }
+        cur = parent.parent();
+    }
+    false
+}
+
+fn child_text(node: Node<'_, '_>) -> String {
+    let mut out = String::new();
+    for child in node.children() {
+        if child.is_text() {
+            if let Some(t) = child.text() {
+                out.push_str(t);
+            }
+        }
+    }
+    out.trim().to_string()
+}
+
+fn direct_child_text(node: Node<'_, '_>, tag: &str) -> Option<String> {
+    node.children()
+        .find(|child| is_tag(*child, tag))
+        .map(child_text)
 }
 
 pub(super) fn introspect_maven_pom(
@@ -55,105 +96,84 @@ pub(super) fn parse_maven_pom_metadata(
     inherited_props: &BTreeMap<String, String>,
     inherited_managed: &BTreeMap<(String, String), String>,
 ) -> MavenPomMetadata {
-    let cleaned = strip_xml_comments(content);
+    let Some(doc) = parse_xml(content) else {
+        return MavenPomMetadata::default();
+    };
+
     let mut props = inherited_props.clone();
-    props.extend(parse_maven_properties(&cleaned));
+    props.extend(parse_maven_properties_doc(&doc));
 
-    let (without_profiles, profile_blocks) = remove_xml_blocks(&cleaned, "profiles");
-    let preview = without_profiles.contains("<enablePreview>true</enablePreview>")
-        || without_profiles.contains("--enable-preview");
-
-    let mut release = None;
-    for tag in [
-        "maven.compiler.release",
-        "maven.compiler.source",
-        "java.version",
-        "release",
-    ] {
-        if let Some(raw_val) = extract_xml_tag_text(&without_profiles, tag) {
-            let val = expand_props(&raw_val, &props);
-            if let Some(rel) = parse_version_string(&val) {
-                release = Some(rel);
-                break;
-            }
+    let preview = doc.descendants().any(|n| {
+        if has_any_ancestor(n, &["profiles"]) {
+            return false;
         }
-    }
+        (is_tag(n, "enablePreview") && child_text(n) == "true")
+            || (n.is_text() && n.text().is_some_and(|t| t.contains("--enable-preview")))
+    });
 
-    let mut test_release = None;
-    for tag in [
-        "maven.compiler.testRelease",
-        "maven.compiler.testSource",
-        "testRelease",
-    ] {
-        if let Some(raw_val) = extract_xml_tag_text(&without_profiles, tag) {
-            let val = expand_props(&raw_val, &props);
-            if let Some(rel) = parse_version_string(&val) {
-                test_release = Some(rel);
-                break;
-            }
-        }
-    }
-    if test_release.is_none() {
-        test_release = extract_test_release_from_executions(&without_profiles, &props);
-    }
-    if test_release.is_none() {
-        for profile_block in &profile_blocks {
-            if let Some(rel) = extract_test_release_from_executions(profile_block, &props) {
-                test_release = Some(test_release.map_or(rel, |cur| cur.max(rel)));
-            }
-        }
-    }
+    let release = find_release_by_tags(
+        &doc,
+        &[
+            "maven.compiler.release",
+            "maven.compiler.source",
+            "java.version",
+            "release",
+        ],
+        &props,
+    );
 
-    // Extract <sourceDirectory> and <testSourceDirectory> from <build> BEFORE stripping <build>.
+    let test_release = find_release_by_tags(
+        &doc,
+        &[
+            "maven.compiler.testRelease",
+            "maven.compiler.testSource",
+            "testRelease",
+        ],
+        &props,
+    )
+    .or_else(|| extract_test_release_from_executions(&doc, false, &props))
+    .or_else(|| extract_test_release_from_executions(&doc, true, &props));
+
     let mut extra_source_dirs = Vec::new();
-    if let Some(raw_src_dir) = extract_xml_tag_text(&without_profiles, "sourceDirectory") {
-        let src_dir = expand_props(&raw_src_dir, &props);
-        if !src_dir.contains("${") {
-            extra_source_dirs.push((normalize_rel_path(&src_dir), RootScope::Main));
+    for (tag, scope) in [
+        ("sourceDirectory", RootScope::Main),
+        ("testSourceDirectory", RootScope::Test),
+    ] {
+        if let Some(node) = doc
+            .descendants()
+            .find(|n| is_tag(*n, tag) && !has_any_ancestor(*n, &["profiles"]))
+        {
+            let dir = expand_props(&child_text(node), &props);
+            if !dir.is_empty() && !dir.contains("${") {
+                extra_source_dirs.push((normalize_rel_path(&dir), scope));
+            }
         }
-    }
-    if let Some(raw_test_dir) = extract_xml_tag_text(&without_profiles, "testSourceDirectory") {
-        let test_dir = expand_props(&raw_test_dir, &props);
-        if !test_dir.contains("${") {
-            extra_source_dirs.push((normalize_rel_path(&test_dir), RootScope::Test));
-        }
-    }
-
-    // Strip <build>, <reporting>, <plugins>, and <pluginManagement> before scanning <dependency>
-    // blocks so plugin dependencies never leak into project compile/test dependencies.
-    let mut deps_xml = without_profiles;
-    for container in ["build", "reporting", "plugins", "pluginManagement"] {
-        deps_xml = remove_xml_blocks(&deps_xml, container).0;
     }
 
     // Parse <dependencyManagement> separately so managed-only entries are not emitted as direct
     // dependencies and can provide version fallbacks when direct <dependency> entries omit <version>.
-    let (without_dep_mgmt, dep_mgmt_blocks) = remove_xml_blocks(&deps_xml, "dependencyManagement");
     let mut own_managed: BTreeMap<(String, String), String> = BTreeMap::new();
-    for mgmt_block in &dep_mgmt_blocks {
-        let mut rest = mgmt_block.as_str();
-        while let Some(start) = rest.find("<dependency>") {
-            let after = &rest[start + "<dependency>".len()..];
-            let Some(end) = after.find("</dependency>") else {
-                break;
-            };
-            let block = &after[..end];
-            rest = &after[end + "</dependency>".len()..];
-            let (block_clean, _) = remove_xml_blocks(block, "exclusions");
+    for dep_node in doc.descendants().filter(|n| {
+        is_tag(*n, "dependency")
+            && has_any_ancestor(*n, &["dependencyManagement"])
+            && !has_any_ancestor(
+                *n,
+                &[
+                    "profiles",
+                    "build",
+                    "reporting",
+                    "plugins",
+                    "pluginManagement",
+                    "exclusions",
+                ],
+            )
+    }) {
+        let group = dependency_child_prop(dep_node, "groupId", &props);
+        let artifact = dependency_child_prop(dep_node, "artifactId", &props);
+        let version = dependency_child_prop(dep_node, "version", &props);
 
-            let group = extract_xml_tag_text(&block_clean, "groupId")
-                .map(|s| expand_props(&s, &props).trim().to_string())
-                .filter(|s| !s.is_empty());
-            let artifact = extract_xml_tag_text(&block_clean, "artifactId")
-                .map(|s| expand_props(&s, &props).trim().to_string())
-                .filter(|s| !s.is_empty());
-            let version = extract_xml_tag_text(&block_clean, "version")
-                .map(|s| expand_props(&s, &props).trim().to_string())
-                .filter(|s| !s.is_empty());
-
-            if let (Some(g), Some(a), Some(v)) = (group, artifact, version) {
-                own_managed.entry((g, a)).or_insert(v);
-            }
+        if let (Some(g), Some(a), Some(v)) = (group, artifact, version) {
+            own_managed.entry((g, a)).or_insert(v);
         }
     }
     let mut managed_versions = inherited_managed.clone();
@@ -161,29 +181,26 @@ pub(super) fn parse_maven_pom_metadata(
 
     // Extract compile-time <dependency> blocks (Main: default/compile/provided; Test: test; skip runtime)
     let mut dependencies = Vec::new();
-    let mut rest = without_dep_mgmt.as_str();
-    while let Some(start) = rest.find("<dependency>") {
-        let after = &rest[start + "<dependency>".len()..];
-        let Some(end) = after.find("</dependency>") else {
-            break;
-        };
-        let block = &after[..end];
-        rest = &after[end + "</dependency>".len()..];
-        let (block_clean, _) = remove_xml_blocks(block, "exclusions");
-
-        let group = extract_xml_tag_text(&block_clean, "groupId")
-            .map(|s| expand_props(&s, &props).trim().to_string())
-            .filter(|s| !s.is_empty());
-        let artifact = extract_xml_tag_text(&block_clean, "artifactId")
-            .map(|s| expand_props(&s, &props).trim().to_string())
-            .filter(|s| !s.is_empty());
-        let explicit_version = extract_xml_tag_text(&block_clean, "version")
-            .map(|s| expand_props(&s, &props).trim().to_string())
-            .filter(|s| !s.is_empty());
-        let classifier = extract_xml_tag_text(&block_clean, "classifier")
-            .map(|s| expand_props(&s, &props).trim().to_string())
-            .filter(|s| !s.is_empty());
-        let scope_str = extract_xml_tag_text(&block_clean, "scope").unwrap_or_default();
+    for dep_node in doc.descendants().filter(|n| {
+        is_tag(*n, "dependency")
+            && !has_any_ancestor(
+                *n,
+                &[
+                    "profiles",
+                    "build",
+                    "reporting",
+                    "plugins",
+                    "pluginManagement",
+                    "dependencyManagement",
+                    "exclusions",
+                ],
+            )
+    }) {
+        let group = dependency_child_prop(dep_node, "groupId", &props);
+        let artifact = dependency_child_prop(dep_node, "artifactId", &props);
+        let explicit_version = dependency_child_prop(dep_node, "version", &props);
+        let classifier = dependency_child_prop(dep_node, "classifier", &props);
+        let scope_str = direct_child_text(dep_node, "scope").unwrap_or_default();
 
         if let (Some(g), Some(a)) = (group, artifact) {
             let version = explicit_version
@@ -221,19 +238,67 @@ pub(super) fn parse_maven_pom_metadata(
     }
 }
 
+fn dependency_child_prop(
+    dep_node: Node<'_, '_>,
+    tag: &str,
+    props: &BTreeMap<String, String>,
+) -> Option<String> {
+    direct_child_text(dep_node, tag)
+        .map(|s| expand_props(&s, props).trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn find_release_by_tags(
+    doc: &Document<'_>,
+    tags: &[&str],
+    props: &BTreeMap<String, String>,
+) -> Option<Release> {
+    for &tag in tags {
+        for node in doc
+            .descendants()
+            .filter(|n| is_tag(*n, tag) && !has_any_ancestor(*n, &["profiles"]))
+        {
+            let raw_val = child_text(node);
+            let val = expand_props(&raw_val, props);
+            if let Some(rel) = parse_version_string(&val) {
+                return Some(rel);
+            }
+        }
+    }
+    None
+}
+
+fn execution_mentions_test_compile(exec: Node<'_, '_>) -> bool {
+    exec.descendants().any(|n| {
+        (n.is_text()
+            && n.text().is_some_and(|t| {
+                let lower = t.to_ascii_lowercase();
+                lower.contains("testcompile") || lower.contains("test-compile")
+            }))
+            || (n.is_element()
+                && n.attributes().any(|a| {
+                    let lower = a.value().to_ascii_lowercase();
+                    lower.contains("testcompile") || lower.contains("test-compile")
+                }))
+    })
+}
+
 fn extract_test_release_from_executions(
-    xml: &str,
+    doc: &Document<'_>,
+    in_profiles: bool,
     props: &BTreeMap<String, String>,
 ) -> Option<Release> {
     let mut max_release: Option<Release> = None;
-    let (_, exec_blocks) = remove_xml_blocks(xml, "execution");
-    for block in exec_blocks {
-        let lower = block.to_ascii_lowercase();
-        if !lower.contains("testcompile") && !lower.contains("test-compile") {
+    for exec in doc
+        .descendants()
+        .filter(|n| is_tag(*n, "execution") && has_any_ancestor(*n, &["profiles"]) == in_profiles)
+    {
+        if !execution_mentions_test_compile(exec) {
             continue;
         }
         for tag in ["testRelease", "release"] {
-            if let Some(raw_val) = extract_xml_tag_text(&block, tag) {
+            if let Some(node) = exec.descendants().find(|n| is_tag(*n, tag)) {
+                let raw_val = child_text(node);
                 let val = expand_props(&raw_val, props);
                 if let Some(rel) = parse_version_string(&val) {
                     max_release = Some(max_release.map_or(rel, |cur| cur.max(rel)));
@@ -245,40 +310,37 @@ fn extract_test_release_from_executions(
     max_release
 }
 
-fn extract_maven_project_coords(content: &str) -> (Option<String>, Option<String>, Option<String>) {
-    let (without_parent, parent_blocks) = remove_xml_blocks(content, "parent");
-    let mut top_only = without_parent;
-    for container in [
-        "dependencies",
-        "dependencyManagement",
-        "build",
-        "profiles",
-        "reporting",
-        "properties",
-    ] {
-        top_only = remove_xml_blocks(&top_only, container).0;
-    }
-    let group_id = extract_xml_tag_text(&top_only, "groupId")
-        .or_else(|| {
-            parent_blocks
-                .first()
-                .and_then(|p| extract_xml_tag_text(p, "groupId"))
-        })
-        .filter(|v| !v.is_empty());
-    let artifact_id = extract_xml_tag_text(&top_only, "artifactId").filter(|v| !v.is_empty());
-    let version = extract_xml_tag_text(&top_only, "version")
-        .or_else(|| {
-            parent_blocks
-                .first()
-                .and_then(|p| extract_xml_tag_text(p, "version"))
-        })
-        .filter(|v| !v.is_empty());
-    (group_id, artifact_id, version)
+#[cfg(test)]
+pub(super) fn parse_maven_properties(content: &str) -> BTreeMap<String, String> {
+    let Some(doc) = parse_xml(content) else {
+        return BTreeMap::new();
+    };
+    parse_maven_properties_doc(&doc)
 }
 
-pub(super) fn parse_maven_properties(content: &str) -> BTreeMap<String, String> {
+fn parse_maven_properties_doc(doc: &Document<'_>) -> BTreeMap<String, String> {
     let mut props = BTreeMap::new();
-    let (proj_group, proj_artifact, proj_ver) = extract_maven_project_coords(content);
+    let root = doc.root_element();
+    let parent_node = root.children().find(|n| is_tag(*n, "parent"));
+
+    let parent_group = parent_node
+        .and_then(|p| direct_child_text(p, "groupId"))
+        .filter(|v| !v.is_empty());
+    let parent_artifact = parent_node
+        .and_then(|p| direct_child_text(p, "artifactId"))
+        .filter(|v| !v.is_empty());
+    let parent_version = parent_node
+        .and_then(|p| direct_child_text(p, "version"))
+        .filter(|v| !v.is_empty());
+
+    let proj_group = direct_child_text(root, "groupId")
+        .filter(|v| !v.is_empty())
+        .or_else(|| parent_group.clone());
+    let proj_artifact = direct_child_text(root, "artifactId").filter(|v| !v.is_empty());
+    let proj_ver = direct_child_text(root, "version")
+        .filter(|v| !v.is_empty())
+        .or_else(|| parent_version.clone());
+
     if let Some(g) = proj_group {
         props.insert("project.groupId".to_string(), g);
     }
@@ -289,66 +351,30 @@ pub(super) fn parse_maven_properties(content: &str) -> BTreeMap<String, String> 
         props.insert("project.version".to_string(), v);
     }
 
-    let (without_profiles, _) = remove_xml_blocks(content, "profiles");
-    if let Some(parent_block) = extract_xml_tag_text(&without_profiles, "parent") {
-        for (xml_tag, prop_key) in [
-            ("groupId", "project.parent.groupId"),
-            ("artifactId", "project.parent.artifactId"),
-            ("version", "project.parent.version"),
-        ] {
-            if let Some(val) = extract_xml_tag_text(&parent_block, xml_tag).filter(|v| !v.is_empty())
-            {
-                props.insert(prop_key.to_string(), val);
-            }
-        }
+    if let Some(g) = parent_group {
+        props.insert("project.parent.groupId".to_string(), g);
     }
-    let props_source = if extract_xml_tag_text(&without_profiles, "properties").is_some() {
-        without_profiles.as_str()
-    } else {
-        content
-    };
-    if let Some(props_block) = extract_xml_tag_text(props_source, "properties") {
-        let mut rest = props_block.as_str();
-        while let Some(open_lt) = rest.find('<') {
-            let after_lt = &rest[open_lt + 1..];
-            if after_lt.starts_with('/') || after_lt.starts_with('!') || after_lt.starts_with('?')
-            {
-                if let Some(gt) = after_lt.find('>') {
-                    rest = &after_lt[gt + 1..];
-                } else {
-                    break;
-                }
-                continue;
-            }
-            let Some(gt) = after_lt.find('>') else {
-                break;
-            };
-            let tag_header = &after_lt[..gt];
-            if tag_header.ends_with('/') {
-                let tag_name = tag_header
-                    .trim_end_matches('/')
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("");
-                if !tag_name.is_empty() {
-                    props.insert(tag_name.to_string(), String::new());
-                }
-                rest = &after_lt[gt + 1..];
-                continue;
-            }
-            let tag_name = tag_header.split_whitespace().next().unwrap_or("");
-            if tag_name.is_empty() {
-                rest = &after_lt[gt + 1..];
-                continue;
-            }
-            let close_tag = format!("</{tag_name}>");
-            let after_open = &after_lt[gt + 1..];
-            if let Some(close_idx) = after_open.find(&close_tag) {
-                let val = after_open[..close_idx].trim().to_string();
-                props.insert(tag_name.to_string(), val);
-                rest = &after_open[close_idx + close_tag.len()..];
-            } else {
-                rest = after_open;
+    if let Some(a) = parent_artifact {
+        props.insert("project.parent.artifactId".to_string(), a);
+    }
+    if let Some(v) = parent_version {
+        props.insert("project.parent.version".to_string(), v);
+    }
+
+    let props_node = root
+        .children()
+        .find(|n| is_tag(*n, "properties"))
+        .or_else(|| {
+            doc.descendants()
+                .find(|n| is_tag(*n, "properties") && !has_any_ancestor(*n, &["profiles"]))
+        })
+        .or_else(|| doc.descendants().find(|n| is_tag(*n, "properties")));
+
+    if let Some(props_el) = props_node {
+        for child in props_el.children().filter(|n| n.is_element()) {
+            let key = child.tag_name().name();
+            if !key.is_empty() {
+                props.insert(key.to_string(), child_text(child));
             }
         }
     }
