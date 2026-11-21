@@ -494,19 +494,25 @@ fn run_interactive_tui<R: BufRead, W: Write>(
                 for (idx, kind) in kinds.iter().enumerate() {
                     writeln!(out, "  [{}] {}", idx + 1, build_tool_name(*kind))?;
                 }
+                let Some(&default_kind) = kinds.first() else {
+                    continue;
+                };
                 write!(
                     out,
                     "Select authoritative build tool [1 ({})]: ",
-                    build_tool_name(kinds[0])
+                    build_tool_name(default_kind)
                 )?;
                 out.flush()?;
                 let choice = read_line_trimmed(reader)?;
                 let chosen_kind = if choice.is_empty() {
-                    kinds[0]
+                    default_kind
                 } else if let Ok(n) = choice.parse::<usize>() {
-                    kinds.get(n.saturating_sub(1)).copied().unwrap_or(kinds[0])
+                    kinds
+                        .get(n.saturating_sub(1))
+                        .copied()
+                        .unwrap_or(default_kind)
                 } else {
-                    parse_build_tool_kind(&choice).unwrap_or(kinds[0])
+                    parse_build_tool_kind(&choice).unwrap_or(default_kind)
                 };
                 desired.build = Some(chosen_kind);
             }

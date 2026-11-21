@@ -189,10 +189,10 @@ Each step is small, independent, behavior-preserving, and leaves `cargo test` gr
 - [x] Add `roxmltree` to `java-analyzer`.
 - [x] Rewrite `maven.rs` and `ant_ivy.rs` to query parsed `roxmltree::Document` nodes, deleting `workspace_config/xml.rs` (keeping `expand_props` as a small helper).
 
-### Step 5: Add Structured Logging, Error Types, and LSP Panic/Reliability Hardening **[New Dependency]**
-- Add `tracing`, `tracing-subscriber`, `anyhow`, and `rustc-hash`.
-- Replace `eprintln!` in `main.rs` with `tracing` (configured to stderr), switch `RootDatabase::files` and `GlobalState` maps to `FxHashMap`/`FxHashSet`, and wrap `handle_request` / `handle_notification` in `std::panic::catch_unwind` so a bug never crashes the LSP server.
-- Fix `GlobalState::close()` to clean up removed files in `RootDatabase`, sort `diagnostics` before `dedup_by`, and remove the `.unwrap()` in `lexer.rs:199` and unchecked `kinds[0]` in `configure.rs:500`.
+### Step 5: Add Structured Logging, Error Types, and LSP Panic/Reliability Hardening **[New Dependency]** *(Completed)*
+- [x] Add `tracing`, `tracing-subscriber`, `anyhow`, and `rustc-hash`.
+- [x] Replace `eprintln!` in `main.rs` with `tracing` (configured to stderr), switch `RootDatabase::files` and `GlobalState` maps to `FxHashMap`/`FxHashSet`, and wrap `handle_request` / `handle_notification` in `std::panic::catch_unwind` so a bug never crashes the LSP server.
+- [x] Fix `GlobalState::close()` to clean up removed files in `RootDatabase`, sort `diagnostics` before `dedup_by`, and remove the `.unwrap()` in `lexer.rs:199` and unchecked `kinds[0]` in `configure.rs:500`.
 
 ### Step 6: Fix `ide` ↔ `hir` Layering & Deduplicate CST/AST Helpers **[Crate Boundary Change]**
 - Add a lightweight `syntax::ast` / `syntax::ext` module housing `collapsed_text`, `is_type_node`, `path_segments`, and thin typed node wrappers.

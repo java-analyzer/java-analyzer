@@ -4,8 +4,9 @@ pub mod symbols;
 pub mod test_fixture;
 pub mod workspace;
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
+use rustc_hash::FxHashMap;
 use salsa::Setter as _;
 
 pub use resolve::{resolve_at_offset, LocalKind, ResolvedSymbol, ResolvedSymbolKind};
@@ -38,7 +39,7 @@ pub struct WorkspaceFiles {
 
 #[salsa::tracked]
 fn parse_file(db: &dyn salsa::Database, file: SourceFile) -> Parse {
-    syntax::parse_with_level(&file.text(db), *file.language_level(db))
+    syntax::parse_with_level(file.text(db), *file.language_level(db))
 }
 
 #[salsa::tracked]
@@ -88,20 +89,11 @@ pub trait DefDatabase: SourceDatabase {
 }
 
 #[salsa::db]
+#[derive(Default)]
 pub struct RootDatabase {
     storage: salsa::Storage<Self>,
-    files: HashMap<FileId, SourceFile>,
+    files: FxHashMap<FileId, SourceFile>,
     workspace: Option<WorkspaceFiles>,
-}
-
-impl Default for RootDatabase {
-    fn default() -> Self {
-        Self {
-            storage: salsa::Storage::default(),
-            files: HashMap::new(),
-            workspace: None,
-        }
-    }
 }
 
 #[salsa::db]
@@ -159,6 +151,11 @@ impl RootDatabase {
         } else {
             self.workspace = Some(WorkspaceFiles::new(self, files));
         }
+    }
+
+    /// Removes `file_id` from the tracked file map. Does nothing if `file_id` is absent.
+    pub fn remove_file(&mut self, file_id: FileId) {
+        self.files.remove(&file_id);
     }
 }
 
@@ -970,5 +967,25 @@ class LocalDecls {
         db.set_workspace_files(Arc::new(vec![f1]));
         assert_eq!(db.workspace_files().as_slice(), &[f1]);
         assert!(!db.workspace_index().types_by_fqn.contains_key("p.Keep"));
+    }
+
+    #[test]
+    fn remove_file_cleans_up_tracked_entry_and_ignores_missing() {
+        let mut db = RootDatabase::default();
+        let f1 = FileId(1);
+        let f2 = FileId(2);
+
+        db.set_file_text(f1, Arc::new("package p; class One {}".to_string()));
+        db.set_file_text(f2, Arc::new("package p; class Two {}".to_string()));
+        db.set_workspace_files(Arc::new(vec![f1, f2]));
+
+        db.set_workspace_files(Arc::new(vec![f1]));
+        db.remove_file(f2);
+        assert!(!db.files.contains_key(&f2));
+        assert!(db.files.contains_key(&f1));
+
+        // Removing an absent FileId does not panic.
+        db.remove_file(f2);
+        db.remove_file(FileId(999));
     }
 }

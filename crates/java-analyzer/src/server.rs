@@ -1,8 +1,8 @@
 use std::{
+    any::Any,
     borrow::Cow,
-    collections::{HashMap, HashSet},
-    error::Error,
     fs,
+    panic::{catch_unwind, AssertUnwindSafe},
     path::Path,
     sync::Arc,
 };
@@ -22,6 +22,7 @@ use lsp_types::{
     PublishDiagnosticsParams, ServerCapabilities, SymbolKind, TextDocumentSyncCapability,
     TextDocumentSyncKind, Uri,
 };
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     convert::{
@@ -30,15 +31,13 @@ use crate::{
     workspace_config::{parse_shebang_level, probe_workspace, WorkspaceProbe},
 };
 
-type BoxError = Box<dyn Error + Sync + Send>;
-
 /// All mutable server state. Lives on the main loop thread only.
 pub struct GlobalState {
     db: RootDatabase,
-    files: HashMap<Uri, FileId>,
-    file_urls: HashMap<FileId, Uri>,
-    line_indexes: HashMap<FileId, LineIndex>,
-    open_files: HashSet<Uri>,
+    files: FxHashMap<Uri, FileId>,
+    file_urls: FxHashMap<FileId, Uri>,
+    line_indexes: FxHashMap<FileId, LineIndex>,
+    open_files: FxHashSet<Uri>,
     next_file_id: u32,
     workspace_probe: Option<WorkspaceProbe>,
 }
@@ -53,10 +52,10 @@ impl GlobalState {
     pub fn new() -> Self {
         Self {
             db: RootDatabase::default(),
-            files: HashMap::new(),
-            file_urls: HashMap::new(),
-            line_indexes: HashMap::new(),
-            open_files: HashSet::new(),
+            files: FxHashMap::default(),
+            file_urls: FxHashMap::default(),
+            line_indexes: FxHashMap::default(),
+            open_files: FxHashSet::default(),
             next_file_id: 0,
             workspace_probe: None,
         }
@@ -163,12 +162,12 @@ impl GlobalState {
             }
         }
 
-        // Non-disk / deleted file: drop it from the workspace index and release its text.
+        // Non-disk / deleted file: drop it from the workspace index and clean up its database entry.
         self.files.remove(uri);
         self.file_urls.remove(&file_id);
         self.line_indexes.remove(&file_id);
-        self.db.set_file_text(file_id, Arc::new(String::new()));
         self.sync_workspace_files();
+        self.db.remove_file(file_id);
     }
 
     pub fn diagnostics(&self, uri: &Uri, version: Option<i32>) -> PublishDiagnosticsParams {
@@ -238,6 +237,22 @@ impl GlobalState {
         } else {
             Vec::new()
         };
+        diagnostics.sort_by(|a, b| {
+            (
+                a.range.start.line,
+                a.range.start.character,
+                a.range.end.line,
+                a.range.end.character,
+                a.message.as_str(),
+            )
+                .cmp(&(
+                    b.range.start.line,
+                    b.range.start.character,
+                    b.range.end.line,
+                    b.range.end.character,
+                    b.message.as_str(),
+                ))
+        });
         diagnostics.dedup_by(|a, b| a.range == b.range && a.message == b.message);
         PublishDiagnosticsParams {
             uri: uri.clone(),
@@ -337,23 +352,36 @@ fn to_document_symbol(index: &LineIndex, text: &str, node: &ide::StructureNode) 
     }
 }
 
+fn panic_message(payload: &(dyn Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("unknown panic")
+}
+
 /// Runs the server main loop until the client requests shutdown/exit.
-pub fn run(connection: Connection) -> Result<(), BoxError> {
+pub fn run(connection: Connection) -> anyhow::Result<()> {
     let init_params_val = connection.initialize(serde_json::to_value(capabilities())?)?;
 
     let mut state = GlobalState::new();
-    if let Ok(init_params) = serde_json::from_value::<InitializeParams>(init_params_val) {
-        #[allow(deprecated)]
-        let workspace_url = init_params
-            .workspace_folders
-            .as_ref()
-            .and_then(|folders| folders.first())
-            .map(|f| &f.uri)
-            .or(init_params.root_uri.as_ref());
-        if let Some(uri) = workspace_url {
-            if let Some(dir) = uri_to_path(uri) {
-                state.set_workspace_root(&dir);
+    match serde_json::from_value::<InitializeParams>(init_params_val) {
+        Ok(init_params) => {
+            #[allow(deprecated)]
+            let workspace_url = init_params
+                .workspace_folders
+                .as_ref()
+                .and_then(|folders| folders.first())
+                .map(|f| &f.uri)
+                .or(init_params.root_uri.as_ref());
+            if let Some(uri) = workspace_url {
+                if let Some(dir) = uri_to_path(uri) {
+                    state.set_workspace_root(&dir);
+                }
             }
+        }
+        Err(err) => {
+            tracing::warn!(%err, "failed to parse InitializeParams");
         }
     }
 
@@ -363,12 +391,37 @@ pub fn run(connection: Connection) -> Result<(), BoxError> {
                 if connection.handle_shutdown(&req)? {
                     return Ok(());
                 }
-                let response = handle_request(&state, req);
+                let req_id = req.id.clone();
+                let method = req.method.clone();
+                let response = match catch_unwind(AssertUnwindSafe(|| handle_request(&state, req))) {
+                    Ok(response) => response,
+                    Err(payload) => {
+                        let msg = panic_message(&*payload);
+                        tracing::error!(method = %method, panic = %msg, "panic while handling LSP request");
+                        Response::new_err(
+                            req_id,
+                            ErrorCode::InternalError as i32,
+                            format!("internal error handling {method}: {msg}"),
+                        )
+                    }
+                };
                 connection.sender.send(Message::Response(response))?;
             }
             Message::Notification(not) => {
-                for outgoing in handle_notification(&mut state, not)? {
-                    connection.sender.send(Message::Notification(outgoing))?;
+                let method = not.method.clone();
+                match catch_unwind(AssertUnwindSafe(|| handle_notification(&mut state, not))) {
+                    Ok(Ok(outgoing_list)) => {
+                        for outgoing in outgoing_list {
+                            connection.sender.send(Message::Notification(outgoing))?;
+                        }
+                    }
+                    Ok(Err(err)) => {
+                        tracing::error!(method = %method, %err, "error while handling LSP notification");
+                    }
+                    Err(payload) => {
+                        let msg = panic_message(&*payload);
+                        tracing::error!(method = %method, panic = %msg, "panic while handling LSP notification");
+                    }
                 }
             }
             Message::Response(_) => {}
@@ -408,7 +461,7 @@ where
         .map_err(|e| Response::new_err(id, ErrorCode::InvalidParams as i32, e.to_string()))
 }
 
-fn publish(params: PublishDiagnosticsParams) -> Result<Notification, BoxError> {
+fn publish(params: PublishDiagnosticsParams) -> anyhow::Result<Notification> {
     Ok(Notification::new(
         PublishDiagnostics::METHOD.to_string(),
         serde_json::to_value(params)?,
@@ -419,7 +472,7 @@ fn publish(params: PublishDiagnosticsParams) -> Result<Notification, BoxError> {
 fn handle_notification(
     state: &mut GlobalState,
     not: Notification,
-) -> Result<Vec<Notification>, BoxError> {
+) -> anyhow::Result<Vec<Notification>> {
     let mut outgoing = Vec::new();
     match not.method.as_str() {
         DidOpenTextDocument::METHOD => {
@@ -601,5 +654,39 @@ mod tests {
             work_done_progress_params: Default::default(),
             partial_result_params: Default::default(),
         });
+    }
+
+    #[test]
+    fn diagnostics_deduplicates_non_adjacent_duplicates() {
+        let dir = TestDir::new();
+        dir.write(".java-version", "17\n");
+        dir.write(".sdkmanrc", "java=21.0.2-tem\n");
+        dir.write("pom.xml", "<project/>\n");
+        dir.write("build.gradle", "");
+        let java_path = dir.write("src/Main.java", "class Main {}\n");
+
+        let mut state = GlobalState::with_workspace(dir.path());
+        let uri = path_to_uri(&java_path).unwrap();
+        state.set_text(&uri, "class Main {}\n".to_string());
+
+        let probe = state.workspace_probe.as_mut().unwrap();
+        assert!(probe.conflicts.len() >= 2);
+        let first_conflict = probe.conflicts[0].clone();
+        let dup_msg = first_conflict.diagnostic_message();
+        // Push a duplicate after a different conflict so duplicates are non-adjacent.
+        probe.conflicts.push(first_conflict);
+
+        let pub_diags = state.diagnostics(&uri, Some(1));
+        assert_eq!(
+            pub_diags
+                .diagnostics
+                .iter()
+                .filter(|d| d.message == dup_msg)
+                .count(),
+            1,
+            "Expected non-adjacent duplicate diagnostic to be deduplicated, got: {:?}",
+            pub_diags.diagnostics
+        );
+        assert_eq!(pub_diags.diagnostics.len(), 2);
     }
 }

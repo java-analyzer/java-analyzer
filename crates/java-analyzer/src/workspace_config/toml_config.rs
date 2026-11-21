@@ -143,8 +143,12 @@ struct RawConfig {
 // ---- Minimal-Overlay `.java-analyzer.toml` Parser & Serializer ----
 
 pub fn parse_config_toml(text: &str) -> ExplicitConfig {
-    let Ok(raw) = toml::from_str::<RawConfig>(text) else {
-        return ExplicitConfig::default();
+    let raw = match toml::from_str::<RawConfig>(text) {
+        Ok(raw) => raw,
+        Err(err) => {
+            tracing::warn!(%err, "failed to parse workspace TOML config; falling back to defaults");
+            return ExplicitConfig::default();
+        }
     };
 
     let mut cfg = ExplicitConfig {

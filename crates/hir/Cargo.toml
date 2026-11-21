@@ -10,5 +10,6 @@ description.workspace = true
 test-utils = []
 
 [dependencies]
+rustc-hash.workspace = true
 salsa.workspace = true
 syntax.workspace = true

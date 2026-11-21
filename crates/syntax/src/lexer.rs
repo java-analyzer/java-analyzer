@@ -196,7 +196,9 @@ fn text_block(rest: &str) -> Lexed {
                 }
             }
             _ => {
-                let c = rest[i..].chars().next().unwrap();
+                let Some(c) = rest[i..].chars().next() else {
+                    break;
+                };
                 i += c.len_utf8();
             }
         }
