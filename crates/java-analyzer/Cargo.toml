@@ -13,7 +13,6 @@ hir.workspace = true
 ide.workspace = true
 ignore.workspace = true
 line-index.workspace = true
-syntax.workspace = true
 lsp-server.workspace = true
 lsp-types.workspace = true
 roxmltree.workspace = true

@@ -53,8 +53,8 @@ pub fn run_with_io<W: Write>(args: InspectArgs, out: &mut W) -> io::Result<()> {
     }
 
     let index = db.workspace_index();
-    let indexed_packages = index.types_by_package.len();
-    let indexed_types = index.types_by_fqn.len();
+    let indexed_packages = index.package_count();
+    let indexed_types = index.type_count();
 
     if args.json {
         render_inspect_json(
@@ -255,8 +255,7 @@ fn render_inspect_json<W: Write>(
         }
     });
 
-    let rendered = serde_json::to_string_pretty(&payload)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let rendered = serde_json::to_string_pretty(&payload).map_err(io::Error::other)?;
     writeln!(out, "{rendered}")
 }
 

@@ -4,6 +4,10 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use syntax::{
+    ext::{
+        has_direct_token, has_modifier, name_child, path_segments, type_child,
+        type_text_with_dims,
+    },
     syntax_kind::SyntaxKind::{self, *},
     SyntaxNode, TextRange,
 };
@@ -33,8 +37,6 @@ pub struct ImportDecl {
     pub path: Vec<String>,
     pub range: TextRange,
 }
-
-pub type ImportItem = ImportDecl;
 
 /// Kind of a declared Java type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -155,14 +157,44 @@ pub struct FileSymbols {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkspaceIndex {
     /// Canonical FQN (`"com.example.Outer.Inner"`, or `"Foo"` in unnamed package) -> `TypeSymbol`.
-    pub types_by_fqn: BTreeMap<String, TypeSymbol>,
+    pub(crate) types_by_fqn: BTreeMap<String, TypeSymbol>,
     /// Package name (`""` for unnamed package, `"com.example"` otherwise) -> top-level type FQNs.
-    pub types_by_package: BTreeMap<String, Vec<String>>,
+    pub(crate) types_by_package: BTreeMap<String, Vec<String>>,
     /// Package name -> simple name -> top-level type FQN for fast same-package & wildcard lookup.
-    pub package_type_map: BTreeMap<String, BTreeMap<String, String>>,
+    pub(crate) package_type_map: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl WorkspaceIndex {
+    /// Returns the indexed [`TypeSymbol`] for `fqn`, if present.
+    pub fn get_type(&self, fqn: &str) -> Option<&TypeSymbol> {
+        self.types_by_fqn.get(fqn)
+    }
+
+    /// Returns `true` if `fqn` is present in the workspace index.
+    pub fn contains_type(&self, fqn: &str) -> bool {
+        self.types_by_fqn.contains_key(fqn)
+    }
+
+    /// Returns the indexed top-level type FQNs belonging to `pkg` (`""` for the unnamed package).
+    pub fn package_types(&self, pkg: &str) -> Option<&[String]> {
+        self.types_by_package.get(pkg).map(Vec::as_slice)
+    }
+
+    /// Returns the number of distinct indexed packages.
+    pub fn package_count(&self) -> usize {
+        self.types_by_package.len()
+    }
+
+    /// Returns the total number of indexed types (top-level and nested).
+    pub fn type_count(&self) -> usize {
+        self.types_by_fqn.len()
+    }
+
+    /// Returns `true` if the index contains no types.
+    pub fn is_empty(&self) -> bool {
+        self.types_by_fqn.is_empty()
+    }
+
     /// Returns `true` if `prefix` is a known package or ancestor prefix of any indexed package.
     pub fn has_package_prefix(&self, prefix: &str) -> bool {
         if prefix.is_empty() {
@@ -189,16 +221,14 @@ pub fn extract_file_symbols(file_id: FileId, root: &SyntaxNode) -> FileSymbols {
 
     for child in root.children() {
         match child.kind() {
-            PACKAGE_DECL => {
-                if package.is_none() {
-                    let segs = child
-                        .children()
-                        .find(|n| n.kind() == PATH)
-                        .map(|p| path_segments(&p))
-                        .unwrap_or_default();
-                    if !segs.is_empty() {
-                        package = Some(segs.join("."));
-                    }
+            PACKAGE_DECL if package.is_none() => {
+                let segs = child
+                    .children()
+                    .find(|n| n.kind() == PATH)
+                    .map(|p| path_segments(&p))
+                    .unwrap_or_default();
+                if !segs.is_empty() {
+                    package = Some(segs.join("."));
                 }
             }
             IMPORT_DECL => {
@@ -327,7 +357,7 @@ fn extract_type_decl(
     out: &mut Vec<TypeSymbol>,
 ) -> Option<String> {
     let kind = TypeKind::from_syntax(node.kind())?;
-    let name_node = node.children().find(|n| n.kind() == NAME)?;
+    let name_node = name_child(node)?;
     let name = name_node.text().to_string();
 
     let qualified_name = match enclosing_fqn {
@@ -357,11 +387,8 @@ fn extract_type_decl(
         match part.kind() {
             RECORD_COMPONENT_LIST => {
                 for comp in part.children().filter(|n| n.kind() == RECORD_COMPONENT) {
-                    if let Some(comp_name) = comp.children().find(|n| n.kind() == NAME) {
-                        let type_ref = comp
-                            .children()
-                            .find(|n| is_type_node(n.kind()))
-                            .map(|t| type_text_with_dims(&t, &comp));
+                    if let Some(comp_name) = name_child(&comp) {
+                        let type_ref = type_child(&comp).map(|t| type_text_with_dims(&t, &comp));
                         members.push(MemberSymbol {
                             file_id,
                             owner_type: Some(qualified_name.clone()),
@@ -380,9 +407,7 @@ fn extract_type_decl(
                 for member_node in part.children() {
                     match member_node.kind() {
                         ENUM_CONSTANT => {
-                            if let Some(const_name) =
-                                member_node.children().find(|n| n.kind() == NAME)
-                            {
+                            if let Some(const_name) = name_child(&member_node) {
                                 members.push(MemberSymbol {
                                     file_id,
                                     owner_type: Some(qualified_name.clone()),
@@ -470,7 +495,7 @@ pub(crate) fn extract_field_decl(
     owner_kind: Option<TypeKind>,
     out: &mut Vec<MemberSymbol>,
 ) {
-    let base_type = node.children().find(|n| is_type_node(n.kind()));
+    let base_type = type_child(node);
     let is_static = has_modifier(node, STATIC_KW)
         || matches!(
             owner_kind,
@@ -478,7 +503,7 @@ pub(crate) fn extract_field_decl(
         );
 
     for declarator in node.children().filter(|n| n.kind() == VARIABLE_DECLARATOR) {
-        let Some(name_node) = declarator.children().find(|n| n.kind() == NAME) else {
+        let Some(name_node) = name_child(&declarator) else {
             continue;
         };
         let type_ref = base_type
@@ -504,12 +529,10 @@ pub(crate) fn extract_method_or_ctor(
     owner_fqn: Option<&str>,
     kind: MemberKind,
 ) -> Option<MemberSymbol> {
-    let name_node = node.children().find(|n| n.kind() == NAME)?;
+    let name_node = name_child(node)?;
     let is_static = kind == MemberKind::Method && has_modifier(node, STATIC_KW);
     let type_ref = if kind == MemberKind::Method {
-        node.children()
-            .find(|n| is_type_node(n.kind()))
-            .map(|t| type_text_with_dims(&t, node))
+        type_child(node).map(|t| type_text_with_dims(&t, node))
     } else {
         None
     };
@@ -538,15 +561,10 @@ fn extract_params(param_list: &SyntaxNode) -> Vec<ParamSummary> {
         .children()
         .filter(|n| n.kind() == PARAM)
         .filter_map(|param| {
-            let type_node = param.children().find(|n| is_type_node(n.kind()))?;
+            let type_node = type_child(&param)?;
             let type_ref = type_text_with_dims(&type_node, &param);
-            let is_varargs = param
-                .children_with_tokens()
-                .any(|el| el.into_token().is_some_and(|t| t.kind() == DOT3));
-            let name = param
-                .children()
-                .find(|n| n.kind() == NAME)
-                .map(|n| n.text().to_string());
+            let is_varargs = has_direct_token(&param, DOT3);
+            let name = name_child(&param).map(|n| n.text().to_string());
             Some(ParamSummary {
                 name,
                 type_ref,
@@ -562,63 +580,8 @@ fn extract_type_param_names(node: &SyntaxNode) -> Vec<String> {
         .map(|tps| {
             tps.children()
                 .filter(|n| n.kind() == TYPE_PARAM)
-                .filter_map(|tp| {
-                    tp.children()
-                        .find(|n| n.kind() == NAME)
-                        .map(|n| n.text().to_string())
-                })
+                .filter_map(|tp| name_child(&tp).map(|n| n.text().to_string()))
                 .collect()
         })
         .unwrap_or_default()
-}
-
-pub(crate) fn path_segments(path_node: &SyntaxNode) -> Vec<String> {
-    path_node
-        .children()
-        .filter(|n| n.kind() == NAME_REF)
-        .map(|n| n.text().to_string())
-        .collect()
-}
-
-pub(crate) fn has_modifier(node: &SyntaxNode, kw: SyntaxKind) -> bool {
-    node.children()
-        .find(|n| n.kind() == MODIFIER_LIST)
-        .is_some_and(|mods| {
-            mods.children_with_tokens()
-                .any(|el| el.into_token().is_some_and(|t| t.kind() == kw))
-        })
-}
-
-pub(crate) fn is_type_node(kind: SyntaxKind) -> bool {
-    matches!(kind, PATH_TYPE | PRIMITIVE_TYPE | ARRAY_TYPE)
-}
-
-pub(crate) fn type_text_with_dims(base_type: &SyntaxNode, dims_owner: &SyntaxNode) -> String {
-    let mut text = collapsed_text(base_type);
-    let extra_dims = dims_owner
-        .children_with_tokens()
-        .filter(|el| el.as_token().is_some_and(|t| t.kind() == L_BRACK))
-        .count();
-    for _ in 0..extra_dims {
-        text.push_str("[]");
-    }
-    text
-}
-
-/// Renders a node's text with every run of whitespace and comments collapsed into a single space.
-pub(crate) fn collapsed_text(node: &SyntaxNode) -> String {
-    let mut out = String::new();
-    for token in node
-        .descendants_with_tokens()
-        .filter_map(|e| e.into_token())
-    {
-        if token.kind().is_trivia() {
-            if !out.ends_with(' ') {
-                out.push(' ');
-            }
-        } else {
-            out.push_str(token.text());
-        }
-    }
-    out.trim().to_string()
 }

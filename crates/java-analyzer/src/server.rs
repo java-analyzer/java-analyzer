@@ -176,25 +176,36 @@ impl GlobalState {
                 Some(&file_id) => {
                     let text = self.db.file_text(file_id);
                     let index = self.line_index(file_id, &text);
-                    let mut diags: Vec<lsp_types::Diagnostic> = ide::diagnostics(&self.db, file_id)
-                        .into_iter()
-                        .map(|d| lsp_types::Diagnostic {
-                            range: text_range_to_range_with_index(
-                                &index,
-                                &text,
-                                d.range.start().into(),
-                                d.range.end().into(),
-                            ),
-                            severity: Some(match d.severity {
-                                ide::Severity::Error => DiagnosticSeverity::ERROR,
-                            }),
-                            source: Some("java-analyzer".to_string()),
-                            message: d.message,
-                            ..Default::default()
-                        })
-                        .collect();
+                    let rel_path = self.workspace_probe.as_ref().and_then(|probe| {
+                        let file_path = uri_to_path(uri)?;
+                        let rel = file_path.strip_prefix(&probe.workspace_dir).ok()?;
+                        Some(normalize_rel_path(&rel.to_string_lossy()))
+                    });
+                    let layout_ctx = match (&self.workspace_probe, &rel_path) {
+                        (Some(probe), Some(norm)) => Some((&probe.layout, norm.as_str())),
+                        _ => None,
+                    };
 
-                    // Surface workspace-level diagnostics (PackageMismatch and multi-spec Conflicts)
+                    let mut diags: Vec<lsp_types::Diagnostic> =
+                        ide::diagnostics_with_layout(&self.db, file_id, layout_ctx)
+                            .into_iter()
+                            .map(|d| lsp_types::Diagnostic {
+                                range: text_range_to_range_with_index(
+                                    &index,
+                                    &text,
+                                    d.range.start().into(),
+                                    d.range.end().into(),
+                                ),
+                                severity: Some(match d.severity {
+                                    ide::Severity::Error => DiagnosticSeverity::ERROR,
+                                }),
+                                source: Some("java-analyzer".to_string()),
+                                message: d.message,
+                                ..Default::default()
+                            })
+                            .collect();
+
+                    // Surface workspace-level conflicts
                     if let Some(probe) = &self.workspace_probe {
                         for conflict in &probe.conflicts {
                             diags.push(lsp_types::Diagnostic {
@@ -204,29 +215,6 @@ impl GlobalState {
                                 message: conflict.diagnostic_message(),
                                 ..Default::default()
                             });
-                        }
-
-                        if let Some(file_path) = uri_to_path(uri) {
-                            if let Ok(rel) = file_path.strip_prefix(&probe.workspace_dir) {
-                                let norm = normalize_rel_path(&rel.to_string_lossy());
-                                let syntax_tree = self.db.syntax_tree(file_id);
-                                if let Some(pkg_diag) =
-                                    probe.layout.check_file_package(file_id, &norm, &syntax_tree)
-                                {
-                                    diags.push(lsp_types::Diagnostic {
-                                        range: text_range_to_range_with_index(
-                                            &index,
-                                            &text,
-                                            pkg_diag.range.start().into(),
-                                            pkg_diag.range.end().into(),
-                                        ),
-                                        severity: Some(DiagnosticSeverity::ERROR),
-                                        source: Some("java-analyzer".to_string()),
-                                        message: pkg_diag.message(),
-                                        ..Default::default()
-                                    });
-                                }
-                            }
                         }
                     }
 

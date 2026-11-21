@@ -22,7 +22,7 @@ use std::{
 };
 
 use hir::{
-    infer_workspace_layout, normalize_rel_path, FileId, LanguageLevel, ModuleDelta,
+    infer_workspace_layout_from_sources, normalize_rel_path, FileId, LanguageLevel, ModuleDelta,
     ModuleDependency, Release, RootScope, WorkspaceDelta, WorkspaceLayout,
 };
 
@@ -198,7 +198,7 @@ pub fn parse_build_tool_kind(s: &str) -> Option<BuildToolKind> {
     }
 }
 
-pub use syntax::parse_shebang_level;
+pub use hir::parse_shebang_level;
 
 /// Probes `workspace_dir` strictly read-only following the 3-tier precedence rules.
 pub fn probe_workspace(workspace_dir: &Path) -> WorkspaceProbe {
@@ -301,14 +301,13 @@ pub fn probe_workspace(workspace_dir: &Path) -> WorkspaceProbe {
 
     let resolved_level = LanguageLevel::new(resolved_release, resolved_preview);
 
-    // Parse scanned Java files at resolved_level
-    let mut parsed_nodes = Vec::with_capacity(raw_java_files.len());
+    // Assign FileIds and collect source texts for layout inference at resolved_level
     let mut file_paths = BTreeMap::new();
+    let mut source_files = Vec::with_capacity(raw_java_files.len());
     for (idx, (rel_path, text)) in raw_java_files.iter().enumerate() {
         let file_id = FileId(idx as u32);
         file_paths.insert(rel_path.clone(), file_id);
-        let parse = syntax::parse_with_level(text, resolved_level);
-        parsed_nodes.push((file_id, rel_path.as_str(), parse.syntax_node()));
+        source_files.push((file_id, rel_path.as_str(), text.as_str()));
     }
 
     for res_dir in &manifest_meta.extra_resource_dirs {
@@ -341,13 +340,12 @@ pub fn probe_workspace(workspace_dir: &Path) -> WorkspaceProbe {
         }
     }
 
-    let file_refs: Vec<(FileId, &str, &syntax::SyntaxNode)> = parsed_nodes
-        .iter()
-        .map(|(id, p, node)| (*id, *p, node))
-        .collect();
-
-    let mut layout =
-        infer_workspace_layout(&file_refs, &resource_dir_refs, resolved_level, &combined_delta);
+    let mut layout = infer_workspace_layout_from_sources(
+        &source_files,
+        &resource_dir_refs,
+        resolved_level,
+        &combined_delta,
+    );
 
     let file_contents: BTreeMap<String, Arc<String>> = raw_java_files
         .into_iter()

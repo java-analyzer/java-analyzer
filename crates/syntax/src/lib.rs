@@ -1,6 +1,7 @@
 //! Lossless, error-resilient Java parser producing a `rowan` concrete syntax tree.
 //! See `docs/specs/0002-java-syntax-subset.md`.
 
+pub mod ext;
 pub mod language_level;
 pub mod lexer;
 mod parser;

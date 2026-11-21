@@ -1,5 +1,12 @@
-use hir::{DefDatabase, FileId, ResolvedSymbol, ResolvedSymbolKind, SourceDatabase};
-use syntax::{syntax_kind::SyntaxKind::*, SyntaxNode};
+use hir::{
+    DefDatabase, FileId, ResolvedSymbol, ResolvedSymbolKind, SourceDatabase, SymbolDetail,
+    WorkspaceLayout,
+};
+use syntax::{
+    ext::{collapsed_text, name_child, type_child},
+    syntax_kind::SyntaxKind::*,
+    SyntaxNode,
+};
 
 pub use syntax::TextRange;
 
@@ -70,19 +77,37 @@ fn format_resolved_hover(sym: &ResolvedSymbol) -> String {
                 ResolvedSymbolKind::Annotation => "@interface",
                 _ => unreachable!(),
             };
-            let tparams = sym.detail.as_deref().unwrap_or("");
+            let tparams = match &sym.detail {
+                Some(SymbolDetail::TypeParams(params)) if !params.is_empty() => {
+                    format!("<{}>", params.join(", "))
+                }
+                _ => String::new(),
+            };
             format!("```java\n{kw} {}{tparams}\n```", sym.qualified_name)
         }
         ResolvedSymbolKind::Field | ResolvedSymbolKind::RecordComponent => match &sym.detail {
-            Some(ty) => format!("```java\n{ty} {}\n```", sym.qualified_name),
-            None => format!("```java\n{}\n```", sym.qualified_name),
+            Some(SymbolDetail::TypeRef(ty)) => format!("```java\n{ty} {}\n```", sym.qualified_name),
+            _ => format!("```java\n{}\n```", sym.qualified_name),
         },
         ResolvedSymbolKind::Method => {
-            let sig = format_method_signature(&sym.qualified_name, sym.detail.as_deref());
+            let sig = match &sym.detail {
+                Some(SymbolDetail::Method {
+                    return_type: Some(ret),
+                    params,
+                }) => format!("{ret} {}{params}", sym.qualified_name),
+                Some(SymbolDetail::Method {
+                    return_type: None,
+                    params,
+                }) => format!("{}{params}", sym.qualified_name),
+                _ => format!("{}()", sym.qualified_name),
+            };
             format!("```java\n{sig}\n```")
         }
         ResolvedSymbolKind::Constructor => {
-            let params = sym.detail.as_deref().unwrap_or("()");
+            let params = match &sym.detail {
+                Some(SymbolDetail::Constructor { params }) => params.as_str(),
+                _ => "()",
+            };
             format!("```java\n{}{params}\n```", sym.qualified_name)
         }
         ResolvedSymbolKind::EnumConstant => format!("```java\n{}\n```", sym.qualified_name),
@@ -93,7 +118,10 @@ fn format_resolved_hover(sym: &ResolvedSymbol) -> String {
         | ResolvedSymbolKind::CatchParam
         | ResolvedSymbolKind::ResourceVar
         | ResolvedSymbolKind::PatternVar => {
-            let ty = sym.detail.as_deref().unwrap_or("var");
+            let ty = match &sym.detail {
+                Some(SymbolDetail::TypeRef(ty)) => ty.as_str(),
+                _ => "var",
+            };
             let label = match sym.kind {
                 ResolvedSymbolKind::LocalVar => "local variable",
                 ResolvedSymbolKind::Param => "parameter",
@@ -107,74 +135,15 @@ fn format_resolved_hover(sym: &ResolvedSymbol) -> String {
             format!("```java\n{ty} {}\n```\n{label}", sym.name)
         }
         ResolvedSymbolKind::TypeParam => match &sym.detail {
-            Some(bounds) => format!("```java\ntype parameter {} {bounds}\n```", sym.name),
-            None => format!("```java\ntype parameter {}\n```", sym.name),
+            Some(SymbolDetail::Bounds(bounds)) if !bounds.is_empty() => format!(
+                "```java\ntype parameter {} extends {}\n```",
+                sym.name,
+                bounds.join(" & ")
+            ),
+            _ => format!("```java\ntype parameter {}\n```", sym.name),
         },
         ResolvedSymbolKind::Package => format!("```java\npackage {}\n```", sym.qualified_name),
     }
-}
-
-fn format_method_signature(qualified_name: &str, detail: Option<&str>) -> String {
-    let Some(detail) = detail else {
-        return format!("{qualified_name}()");
-    };
-    if let Some(paren_idx) = trailing_paren_group_start(detail) {
-        let ret = detail[..paren_idx].trim();
-        let params = detail[paren_idx..].trim_end();
-        if ret.is_empty() {
-            format!("{qualified_name}{params}")
-        } else {
-            format!("{ret} {qualified_name}{params}")
-        }
-    } else {
-        format!("{detail} {qualified_name}()")
-    }
-}
-
-fn trailing_paren_group_start(s: &str) -> Option<usize> {
-    let trimmed = s.trim_end();
-    if !trimmed.ends_with(')') {
-        return None;
-    }
-
-    let mut depth = 0usize;
-    let mut group_start = None;
-    let mut last_group = None;
-    let mut in_quote: Option<char> = None;
-    let mut escaped = false;
-
-    for (idx, ch) in trimmed.char_indices() {
-        if let Some(q) = in_quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == q {
-                in_quote = None;
-            }
-            continue;
-        }
-
-        match ch {
-            '"' | '\'' => in_quote = Some(ch),
-            '(' => {
-                if depth == 0 {
-                    group_start = Some(idx);
-                }
-                depth += 1;
-            }
-            ')' if depth > 0 => {
-                depth -= 1;
-                if depth == 0 {
-                    last_group = group_start.take().map(|start| (start, idx));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let (start, end) = last_group?;
-    (end == trimmed.len() - 1).then_some(start)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,10 +200,7 @@ fn collect_symbols(parent: &SyntaxNode, out: &mut Vec<StructureNode>) {
                             for component in
                                 part.children().filter(|n| n.kind() == RECORD_COMPONENT)
                             {
-                                let detail = component
-                                    .children()
-                                    .find(is_type)
-                                    .map(|t| collapsed_text(&t));
+                                let detail = type_child(&component).map(|t| collapsed_text(&t));
                                 push_symbol(
                                     &mut children,
                                     &component,
@@ -252,7 +218,7 @@ fn collect_symbols(parent: &SyntaxNode, out: &mut Vec<StructureNode>) {
                 push_symbol(out, &node, &node, kind, None, children);
             }
             FIELD_DECL => {
-                let detail = node.children().find(is_type).map(|t| collapsed_text(&t));
+                let detail = type_child(&node).map(|t| collapsed_text(&t));
                 for declarator in node.children().filter(|n| n.kind() == VARIABLE_DECLARATOR) {
                     push_symbol(
                         out,
@@ -300,7 +266,7 @@ fn push_symbol(
     detail: Option<String>,
     children: Vec<StructureNode>,
 ) {
-    match named.children().find(|n| n.kind() == NAME) {
+    match name_child(named) {
         Some(name) => out.push(StructureNode {
             name: name.text().to_string(),
             kind,
@@ -311,28 +277,6 @@ fn push_symbol(
         }),
         None => out.extend(children),
     }
-}
-
-fn is_type(node: &SyntaxNode) -> bool {
-    matches!(node.kind(), PATH_TYPE | PRIMITIVE_TYPE | ARRAY_TYPE)
-}
-
-/// The text of a node with every run of whitespace and comments squeezed into one space.
-fn collapsed_text(node: &SyntaxNode) -> String {
-    let mut out = String::new();
-    for token in node
-        .descendants_with_tokens()
-        .filter_map(|e| e.into_token())
-    {
-        if matches!(token.kind(), WHITESPACE | LINE_COMMENT | BLOCK_COMMENT) {
-            if !out.ends_with(' ') {
-                out.push(' ');
-            }
-        } else {
-            out.push_str(token.text());
-        }
-    }
-    out.trim().to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -347,16 +291,39 @@ pub struct Diagnostic {
     pub message: String,
 }
 
-/// Diagnostics for a file: currently its lexical and syntax errors, ordered by position.
-pub fn diagnostics(db: &dyn SourceDatabase, file_id: FileId) -> Vec<Diagnostic> {
-    db.syntax_errors(file_id)
+/// Diagnostics for a file: lexical/syntax errors plus optional package-vs-layout mismatch errors.
+pub fn diagnostics_with_layout(
+    db: &dyn SourceDatabase,
+    file_id: FileId,
+    layout: Option<(&WorkspaceLayout, &str)>,
+) -> Vec<Diagnostic> {
+    let mut diags: Vec<Diagnostic> = db
+        .syntax_errors(file_id)
         .iter()
         .map(|error| Diagnostic {
             range: error.range,
             severity: Severity::Error,
             message: error.message.clone(),
         })
-        .collect()
+        .collect();
+
+    if let Some((layout, rel_path)) = layout {
+        let syntax_tree = db.syntax_tree(file_id);
+        if let Some(pkg_diag) = layout.check_file_package(file_id, rel_path, &syntax_tree) {
+            diags.push(Diagnostic {
+                range: pkg_diag.range,
+                severity: Severity::Error,
+                message: pkg_diag.message(),
+            });
+        }
+    }
+
+    diags
+}
+
+/// Diagnostics for a file: currently its lexical and syntax errors, ordered by position.
+pub fn diagnostics(db: &dyn SourceDatabase, file_id: FileId) -> Vec<Diagnostic> {
+    diagnostics_with_layout(db, file_id, None)
 }
 
 #[cfg(test)]
@@ -459,6 +426,7 @@ public class App<E extends Number> {
 class C {
     <T> @Anno(\"x\") String /*m1*/foo(int a) { return \"\"; }
     java.util.List<@Anno(\"x\") String> /*m2*/bar(int a) { return null; }
+    <T> @Anno(\")\") String /*m3*/baz(java.util.List<@Param(\"(\") String> a) { return \"\"; }
 }
 ";
         let (db, file_id) = db_with(text);
@@ -475,13 +443,27 @@ class C {
             "```java\njava.util.List<@Anno(\"x\") String> C.bar(int a)\n```"
         );
 
+        let h3 = hover(&db, file_id, cursor(text, "/*m3*/")).unwrap();
         assert_eq!(
-            format_method_signature("C.foo", Some("@Anno(\"x\") String (int a)")),
-            "@Anno(\"x\") String C.foo(int a)"
+            h3.content,
+            "```java\n@Anno(\")\") String C.baz(java.util.List<@Param(\"(\") String> a)\n```"
         );
+
+        let structured = ResolvedSymbol {
+            file_id: None,
+            full_range: None,
+            focus_range: None,
+            name: "baz".to_string(),
+            qualified_name: "C.baz".to_string(),
+            detail: Some(SymbolDetail::Method {
+                return_type: Some("@Anno(\")\") String".to_string()),
+                params: "(@Param(\"(\") int a)".to_string(),
+            }),
+            kind: ResolvedSymbolKind::Method,
+        };
         assert_eq!(
-            format_method_signature("C.foo", Some("@Anno(\")\") String (@Param(\"(\") int a)")),
-            "@Anno(\")\") String C.foo(@Param(\"(\") int a)"
+            format_resolved_hover(&structured),
+            "```java\n@Anno(\")\") String C.baz(@Param(\"(\") int a)\n```"
         );
     }
 
@@ -751,5 +733,33 @@ Method main (String[] args)
             messages.contains(&"unterminated string literal".to_string()),
             "{messages:?}"
         );
+    }
+
+    #[test]
+    fn diagnostics_with_layout_reports_package_mismatch() {
+        let pkg_info = "package com.example;\n";
+        let bad_file = "package wrong.pkg;\nclass Broken {}\n";
+        let db = db_with_files(&[(1, pkg_info), (2, bad_file)]);
+        let layout = hir::infer_workspace_layout_from_sources(
+            &[
+                (FileId(1), "src/com/example/package-info.java", pkg_info),
+                (FileId(2), "src/com/example/Broken.java", bad_file),
+            ],
+            &[],
+            hir::LanguageLevel::latest(),
+            &hir::WorkspaceDelta::default(),
+        );
+
+        assert!(diagnostics(&db, FileId(2)).is_empty());
+        let diags = diagnostics_with_layout(
+            &db,
+            FileId(2),
+            Some((&layout, "src/com/example/Broken.java")),
+        );
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert!(diags[0]
+            .message
+            .contains("declared package 'wrong.pkg' does not match package-info.java package 'com.example'"));
     }
 }

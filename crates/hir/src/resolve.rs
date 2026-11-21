@@ -2,15 +2,18 @@
 //! See `docs/specs/0005-symbol-indexing-and-name-resolution.md`.
 
 use syntax::{
-    syntax_kind::SyntaxKind::{self, *},
+    ext::{
+        collapsed_text, has_direct_token, has_modifier, is_type_node, path_segments,
+        type_text_with_dims,
+    },
+    syntax_kind::SyntaxKind::*,
     SyntaxNode, TextRange, TextSize,
 };
 
 use crate::{
     symbols::{
-        collapsed_text, extract_field_decl, extract_local_type_symbol, extract_method_or_ctor,
-        has_modifier, is_type_node, path_segments, type_text_with_dims, FileSymbols, ImportKind,
-        MemberKind, MemberSymbol, TypeKind, TypeSymbol, WorkspaceIndex,
+        extract_field_decl, extract_local_type_symbol, extract_method_or_ctor, FileSymbols,
+        ImportKind, MemberKind, MemberSymbol, TypeKind, TypeSymbol, WorkspaceIndex,
     },
     DefDatabase, FileId,
 };
@@ -89,6 +92,21 @@ impl From<LocalKind> for ResolvedSymbolKind {
     }
 }
 
+/// Structured metadata carried by a [`ResolvedSymbol`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SymbolDetail {
+    TypeParams(Vec<String>),
+    TypeRef(String),
+    Method {
+        return_type: Option<String>,
+        params: String,
+    },
+    Constructor {
+        params: String,
+    },
+    Bounds(Vec<String>),
+}
+
 /// A resolved semantic symbol with source location and display metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedSymbol {
@@ -97,7 +115,7 @@ pub struct ResolvedSymbol {
     pub focus_range: Option<TextRange>,
     pub name: String,
     pub qualified_name: String,
-    pub detail: Option<String>,
+    pub detail: Option<SymbolDetail>,
     pub kind: ResolvedSymbolKind,
 }
 
@@ -145,11 +163,8 @@ impl ResolvedTarget {
     fn into_resolved_symbol(self) -> ResolvedSymbol {
         match self {
             Self::Type(t) => {
-                let detail = if t.type_params.is_empty() {
-                    None
-                } else {
-                    Some(format!("<{}>", t.type_params.join(", ")))
-                };
+                let detail =
+                    (!t.type_params.is_empty()).then_some(SymbolDetail::TypeParams(t.type_params));
                 ResolvedSymbol {
                     file_id: Some(t.file_id),
                     full_range: Some(t.full_range),
@@ -166,15 +181,16 @@ impl ResolvedTarget {
                     None => m.name.clone(),
                 };
                 let detail = match m.kind {
-                    MemberKind::Field | MemberKind::RecordComponent => m.type_ref.clone(),
-                    MemberKind::Method => {
-                        let sig = m.params_signature();
-                        Some(match &m.type_ref {
-                            Some(ret) => format!("{ret} {sig}"),
-                            None => sig,
-                        })
+                    MemberKind::Field | MemberKind::RecordComponent => {
+                        m.type_ref.clone().map(SymbolDetail::TypeRef)
                     }
-                    MemberKind::Constructor => Some(m.params_signature()),
+                    MemberKind::Method => Some(SymbolDetail::Method {
+                        return_type: m.type_ref.clone(),
+                        params: m.params_signature(),
+                    }),
+                    MemberKind::Constructor => Some(SymbolDetail::Constructor {
+                        params: m.params_signature(),
+                    }),
                     MemberKind::EnumConstant => None,
                 };
                 ResolvedSymbol {
@@ -193,15 +209,11 @@ impl ResolvedTarget {
                 focus_range: Some(l.selection_range),
                 name: l.name.clone(),
                 qualified_name: l.name,
-                detail: l.type_ref,
+                detail: l.type_ref.map(SymbolDetail::TypeRef),
                 kind: l.kind.into(),
             },
             Self::TypeParam(tp) => {
-                let detail = if tp.bounds.is_empty() {
-                    None
-                } else {
-                    Some(format!("extends {}", tp.bounds.join(" & ")))
-                };
+                let detail = (!tp.bounds.is_empty()).then_some(SymbolDetail::Bounds(tp.bounds));
                 ResolvedSymbol {
                     file_id: Some(tp.file_id),
                     full_range: Some(tp.full_range),
@@ -791,23 +803,21 @@ fn resolve_local_scope(
                     }
                 }
             }
-            CATCH_CLAUSE => {
-                if child_on_path.kind() == BLOCK {
-                    if let Some(name_node) = ancestor.children().find(|n| n.kind() == NAME) {
-                        if name_node.text() == name {
-                            let type_ref = ancestor
-                                .children()
-                                .find(|n| is_type_node(n.kind()))
-                                .map(|t| collapsed_text(&t));
-                            return Some(LocalSymbol {
-                                file_id,
-                                name: name.to_string(),
-                                kind: LocalKind::CatchParam,
-                                type_ref,
-                                full_range: ancestor.text_range(),
-                                selection_range: name_node.text_range(),
-                            });
-                        }
+            CATCH_CLAUSE if child_on_path.kind() == BLOCK => {
+                if let Some(name_node) = ancestor.children().find(|n| n.kind() == NAME) {
+                    if name_node.text() == name {
+                        let type_ref = ancestor
+                            .children()
+                            .find(|n| is_type_node(n.kind()))
+                            .map(|t| collapsed_text(&t));
+                        return Some(LocalSymbol {
+                            file_id,
+                            name: name.to_string(),
+                            kind: LocalKind::CatchParam,
+                            type_ref,
+                            full_range: ancestor.text_range(),
+                            selection_range: name_node.text_range(),
+                        });
                     }
                 }
             }
@@ -903,11 +913,11 @@ fn resolve_local_scope(
                     .find(|e| e.as_token().is_some_and(|t| t.kind() == ELSE_KW))
                     .map(|e| e.text_range().start());
                 let in_then = r_paren_end.is_some_and(|s| child_on_path.text_range().start() >= s)
-                    && else_start.map_or(true, |e| child_on_path.text_range().end() <= e);
+                    && else_start.is_none_or(|e| child_on_path.text_range().end() <= e);
                 if in_then {
                     if let Some(cond) = ancestor
                         .children()
-                        .find(|c| r_paren_end.map_or(true, |end| c.text_range().end() <= end))
+                        .find(|c| r_paren_end.is_none_or(|end| c.text_range().end() <= end))
                     {
                         let mut patterns = Vec::new();
                         collect_positive_patterns(file_id, &cond, &mut patterns);
@@ -1030,15 +1040,13 @@ fn collect_positive_patterns(file_id: FileId, node: &SyntaxNode, out: &mut Vec<L
                 collect_positive_patterns(file_id, &inner, out);
             }
         }
-        BINARY_EXPR => {
-            if has_direct_token(node, AMP2) {
-                let mut children = node.children();
-                if let Some(lhs) = children.next() {
-                    collect_positive_patterns(file_id, &lhs, out);
-                }
-                if let Some(rhs) = children.next() {
-                    collect_positive_patterns(file_id, &rhs, out);
-                }
+        BINARY_EXPR if has_direct_token(node, AMP2) => {
+            let mut children = node.children();
+            if let Some(lhs) = children.next() {
+                collect_positive_patterns(file_id, &lhs, out);
+            }
+            if let Some(rhs) = children.next() {
+                collect_positive_patterns(file_id, &rhs, out);
             }
         }
         INSTANCEOF_EXPR => {
@@ -1225,10 +1233,10 @@ fn resolve_enclosing_type_or_param(
                     allow_type_params = false;
                 }
             }
-            FIELD_DECL | INITIALIZER => {
-                if has_modifier(&ancestor, STATIC_KW) || has_direct_token(&ancestor, STATIC_KW) {
-                    allow_type_params = false;
-                }
+            FIELD_DECL | INITIALIZER
+                if has_modifier(&ancestor, STATIC_KW) || has_direct_token(&ancestor, STATIC_KW) =>
+            {
+                allow_type_params = false;
             }
             k if TypeKind::from_syntax(k).is_some() => {
                 if allow_type_params {
@@ -1519,7 +1527,7 @@ fn select_method(
         return Some(candidates[0].clone());
     }
 
-    if include_record_components && call_arity.map_or(true, |a| a == 0) {
+    if include_record_components && call_arity.is_none_or(|a| a == 0) {
         if let Some(rc) = members
             .iter()
             .find(|m| m.kind == MemberKind::RecordComponent && m.name == name)
@@ -1801,9 +1809,4 @@ fn collect_dotted_chain(node: &SyntaxNode, out: &mut Vec<String>) -> bool {
 
 fn count_args(arg_list: &SyntaxNode) -> usize {
     arg_list.children().count()
-}
-
-fn has_direct_token(node: &SyntaxNode, kind: SyntaxKind) -> bool {
-    node.children_with_tokens()
-        .any(|el| el.into_token().is_some_and(|t| t.kind() == kind))
 }

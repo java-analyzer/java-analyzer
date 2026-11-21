@@ -9,32 +9,35 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 use salsa::Setter as _;
 
-pub use resolve::{resolve_at_offset, LocalKind, ResolvedSymbol, ResolvedSymbolKind};
+pub use resolve::{resolve_at_offset, LocalKind, ResolvedSymbol, ResolvedSymbolKind, SymbolDetail};
 pub use symbols::{
-    build_workspace_index, extract_file_symbols, FileSymbols, ImportDecl, ImportItem, ImportKind,
-    MemberKind, MemberSymbol, ParamSummary, TypeKind, TypeSymbol, WorkspaceIndex,
+    build_workspace_index, extract_file_symbols, FileSymbols, ImportDecl, ImportKind, MemberKind,
+    MemberSymbol, ParamSummary, TypeKind, TypeSymbol, WorkspaceIndex,
 };
-pub use syntax::{LanguageLevel, Parse, Release, SyntaxError, SyntaxNode, TextRange, TextSize};
+pub use syntax::{
+    parse_shebang_level, LanguageLevel, Parse, Release, SyntaxError, SyntaxNode, TextRange,
+    TextSize,
+};
 pub use workspace::{
-    extract_file_header, infer_workspace_layout, normalize_rel_path, DeltaSet, FileHeader,
-    ModuleData, ModuleDelta, ModuleDependency, ModuleHeader, ModuleId, ModuleTarget,
-    PackageMismatch, ResourceRoot, ResourceRootId, RootScope, SourceRoot, SourceRootId,
-    WorkspaceDelta, WorkspaceLayout,
+    extract_file_header, infer_workspace_layout, infer_workspace_layout_from_sources,
+    normalize_rel_path, DeltaSet, FileHeader, ModuleData, ModuleDelta, ModuleDependency,
+    ModuleHeader, ModuleId, ModuleTarget, PackageMismatch, ResourceRoot, ResourceRootId, RootScope,
+    SourceRoot, SourceRootId, WorkspaceDelta, WorkspaceLayout,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FileId(pub u32);
 
 #[salsa::input]
-pub struct SourceFile {
-    pub file_id: FileId,
-    pub text: Arc<String>,
-    pub language_level: LanguageLevel,
+pub(crate) struct SourceFile {
+    pub(crate) file_id: FileId,
+    pub(crate) text: Arc<String>,
+    pub(crate) language_level: LanguageLevel,
 }
 
 #[salsa::input]
-pub struct WorkspaceFiles {
-    pub files: Arc<Vec<SourceFile>>,
+pub(crate) struct WorkspaceFiles {
+    pub(crate) files: Arc<Vec<SourceFile>>,
 }
 
 #[salsa::tracked]
@@ -416,9 +419,9 @@ class A {
         let (mut db, file_id) = db_with(initial);
         let syms_before = db.file_symbols(file_id);
         let idx_before = db.workspace_index();
-        assert!(idx_before.types_by_fqn.contains_key("p.A"));
+        assert!(idx_before.contains_type("p.A"));
         assert_eq!(
-            idx_before.types_by_package.get("p").map(Vec::as_slice),
+            idx_before.package_types("p"),
             Some(["p.A".to_string()].as_slice())
         );
 
@@ -430,8 +433,8 @@ class A {
         // Structural edit updates workspace_index incrementally.
         db.set_file_text(file_id, Arc::new("package p; class B {}".to_string()));
         let idx_updated = db.workspace_index();
-        assert!(!idx_updated.types_by_fqn.contains_key("p.A"));
-        assert!(idx_updated.types_by_fqn.contains_key("p.B"));
+        assert!(!idx_updated.contains_type("p.A"));
+        assert!(idx_updated.contains_type("p.B"));
     }
 
     #[test]
@@ -556,7 +559,13 @@ public class App {
         let stat_wild = resolve_at_offset(&db, app_id, cursor(app, "/*stat_wild*/")).unwrap();
         assert_eq!(stat_wild.kind, ResolvedSymbolKind::Method);
         assert_eq!(stat_wild.qualified_name, "com.util.Constants.helper");
-        assert_eq!(stat_wild.detail.as_deref(), Some("int (int x)"));
+        assert_eq!(
+            stat_wild.detail,
+            Some(SymbolDetail::Method {
+                return_type: Some("int".to_string()),
+                params: "(int x)".to_string(),
+            })
+        );
 
         // Static wildcard import nested type.
         let stat_nested = resolve_at_offset(&db, app_id, cursor(app, "/*stat_nested*/")).unwrap();
@@ -697,7 +706,7 @@ class Scopes {
         // Lambda params (typed and untyped).
         let lp = resolve_at_offset(&db, file_id, cursor(text, "/*lparam_use*/")).unwrap();
         assert_eq!(lp.kind, ResolvedSymbolKind::LambdaParam);
-        assert_eq!(lp.detail.as_deref(), Some("int"));
+        assert_eq!(lp.detail, Some(SymbolDetail::TypeRef("int".to_string())));
         let ulp = resolve_at_offset(&db, file_id, cursor(text, "/*untyped_lparam*/")).unwrap();
         assert_eq!(ulp.kind, ResolvedSymbolKind::LambdaParam);
         assert_eq!(ulp.detail, None);
@@ -758,12 +767,24 @@ public class User<E extends Number> {
         let put0_off = cursor(user_file, "/*field_method0*/myBox.");
         let put0 = resolve_at_offset(&db, user_id, put0_off).unwrap();
         assert_eq!(put0.kind, ResolvedSymbolKind::Method);
-        assert_eq!(put0.detail.as_deref(), Some("void ()"));
+        assert_eq!(
+            put0.detail,
+            Some(SymbolDetail::Method {
+                return_type: Some("void".to_string()),
+                params: "()".to_string(),
+            })
+        );
 
         let put2_off = cursor(user_file, "/*field_method2*/myBox.");
         let put2 = resolve_at_offset(&db, user_id, put2_off).unwrap();
         assert_eq!(put2.kind, ResolvedSymbolKind::Method);
-        assert_eq!(put2.detail.as_deref(), Some("void (T a, T b)"));
+        assert_eq!(
+            put2.detail,
+            Some(SymbolDetail::Method {
+                return_type: Some("void".to_string()),
+                params: "(T a, T b)".to_string(),
+            })
+        );
 
         let rec_x = resolve_at_offset(&db, user_id, cursor(user_file, "/*rec_comp*/")).unwrap();
         assert_eq!(rec_x.kind, ResolvedSymbolKind::RecordComponent);
@@ -776,7 +797,10 @@ public class User<E extends Number> {
         let tp = resolve_at_offset(&db, user_id, cursor(user_file, "/*tp_ref*/")).unwrap();
         assert_eq!(tp.kind, ResolvedSymbolKind::TypeParam);
         assert_eq!(tp.name, "E");
-        assert_eq!(tp.detail.as_deref(), Some("extends Number"));
+        assert_eq!(
+            tp.detail,
+            Some(SymbolDetail::Bounds(vec!["Number".to_string()]))
+        );
 
         let lcf =
             resolve_at_offset(&db, user_id, cursor(user_file, "/*local_cls_field*/")).unwrap();
@@ -899,32 +923,49 @@ class LocalDecls {
         let lf = resolve_at_offset(&db, file_id, cursor(text, "/*local_field*/")).unwrap();
         assert_eq!(lf.kind, ResolvedSymbolKind::Field);
         assert_eq!(lf.qualified_name, "Local.val");
-        assert_eq!(lf.detail.as_deref(), Some("int"));
+        assert_eq!(lf.detail, Some(SymbolDetail::TypeRef("int".to_string())));
 
         let lm = resolve_at_offset(&db, file_id, cursor(text, "/*local_method*/")).unwrap();
         assert_eq!(lm.kind, ResolvedSymbolKind::Method);
         assert_eq!(lm.qualified_name, "Local.greet");
-        assert_eq!(lm.detail.as_deref(), Some("String (int x)"));
+        assert_eq!(
+            lm.detail,
+            Some(SymbolDetail::Method {
+                return_type: Some("String".to_string()),
+                params: "(int x)".to_string(),
+            })
+        );
 
         let lc = resolve_at_offset(&db, file_id, cursor(text, "/*local_ctor*/")).unwrap();
         assert_eq!(lc.kind, ResolvedSymbolKind::Constructor);
         assert_eq!(lc.qualified_name, "Local.Local");
-        assert_eq!(lc.detail.as_deref(), Some("()"));
+        assert_eq!(
+            lc.detail,
+            Some(SymbolDetail::Constructor {
+                params: "()".to_string(),
+            })
+        );
 
         let lrc = resolve_at_offset(&db, file_id, cursor(text, "/*local_rec_comp*/")).unwrap();
         assert_eq!(lrc.kind, ResolvedSymbolKind::RecordComponent);
         assert_eq!(lrc.qualified_name, "LocalRec.coord");
-        assert_eq!(lrc.detail.as_deref(), Some("int"));
+        assert_eq!(lrc.detail, Some(SymbolDetail::TypeRef("int".to_string())));
 
         let af = resolve_at_offset(&db, file_id, cursor(text, "/*anon_field*/")).unwrap();
         assert_eq!(af.kind, ResolvedSymbolKind::Field);
         assert_eq!(af.qualified_name, "count");
-        assert_eq!(af.detail.as_deref(), Some("int"));
+        assert_eq!(af.detail, Some(SymbolDetail::TypeRef("int".to_string())));
 
         let am = resolve_at_offset(&db, file_id, cursor(text, "/*anon_method*/")).unwrap();
         assert_eq!(am.kind, ResolvedSymbolKind::Method);
         assert_eq!(am.qualified_name, "run");
-        assert_eq!(am.detail.as_deref(), Some("void ()"));
+        assert_eq!(
+            am.detail,
+            Some(SymbolDetail::Method {
+                return_type: Some("void".to_string()),
+                params: "()".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -937,7 +978,7 @@ class LocalDecls {
         db.set_file_text(file_id, Arc::new(text.to_string()));
         db.set_file_language_level(file_id, LanguageLevel::latest());
 
-        assert!(db.workspace_index().types_by_fqn.is_empty());
+        assert!(db.workspace_index().is_empty());
         let res = resolve_at_offset(&db, file_id, cursor(text, "/*r*/")).unwrap();
         assert_eq!(res.kind, ResolvedSymbolKind::Field);
         assert_eq!(res.name, "x");
@@ -962,11 +1003,11 @@ class LocalDecls {
 
         db.set_workspace_files(Arc::new(vec![f1, f2]));
         assert_eq!(db.workspace_files().as_slice(), &[f1, f2]);
-        assert!(db.workspace_index().types_by_fqn.contains_key("p.Keep"));
+        assert!(db.workspace_index().contains_type("p.Keep"));
 
         db.set_workspace_files(Arc::new(vec![f1]));
         assert_eq!(db.workspace_files().as_slice(), &[f1]);
-        assert!(!db.workspace_index().types_by_fqn.contains_key("p.Keep"));
+        assert!(!db.workspace_index().contains_type("p.Keep"));
     }
 
     #[test]

@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use syntax::{
+    ext::path_text,
     syntax_kind::SyntaxKind::*,
     LanguageLevel, Release, SyntaxNode, TextRange,
 };
@@ -468,7 +469,7 @@ pub fn extract_file_header(root: &SyntaxNode) -> FileHeader {
         match child.kind() {
             PACKAGE_DECL => {
                 if let Some(path_node) = child.children().find(|n| n.kind() == PATH) {
-                    package = Some(clean_path_text(&path_node));
+                    package = Some(path_text(&path_node));
                     package_range = Some(path_node.text_range());
                 }
             }
@@ -488,20 +489,11 @@ pub fn extract_file_header(root: &SyntaxNode) -> FileHeader {
     }
 }
 
-fn clean_path_text(path_node: &SyntaxNode) -> String {
-    path_node
-        .descendants_with_tokens()
-        .filter_map(|e| e.into_token())
-        .filter(|t| !t.kind().is_trivia())
-        .map(|t| t.text().to_string())
-        .collect()
-}
-
 fn parse_module_decl(node: &SyntaxNode) -> Option<ModuleHeader> {
     let name = node
         .children()
         .find(|n| n.kind() == PATH)
-        .map(|p| clean_path_text(&p))?;
+        .map(|p| path_text(&p))?;
     let open = node
         .children_with_tokens()
         .filter_map(|e| e.into_token())
@@ -528,7 +520,7 @@ fn parse_module_decl(node: &SyntaxNode) -> Option<ModuleHeader> {
             let first_path = directive
                 .children()
                 .find(|n| n.kind() == PATH)
-                .map(|p| clean_path_text(&p));
+                .map(|p| path_text(&p));
             match (kw.as_deref(), first_path) {
                 (Some("requires"), Some(target)) => requires.push(RequiresDirective {
                     name: target,
@@ -659,6 +651,28 @@ fn is_excluded(rel_path: &str, excludes: &[String]) -> bool {
     })
 }
 
+/// Parses raw `(FileId, rel_path, source_text)` entries at `default_level` and delegates to
+/// [`infer_workspace_layout`].
+pub fn infer_workspace_layout_from_sources(
+    files: &[(FileId, &str, &str)],
+    candidate_resources: &[&str],
+    default_level: LanguageLevel,
+    delta: &WorkspaceDelta,
+) -> WorkspaceLayout {
+    let parsed: Vec<(FileId, &str, SyntaxNode)> = files
+        .iter()
+        .map(|&(id, rel_path, text)| {
+            let parse = syntax::parse_with_level(text, default_level);
+            (id, rel_path, parse.syntax_node())
+        })
+        .collect();
+    let refs: Vec<(FileId, &str, &SyntaxNode)> = parsed
+        .iter()
+        .map(|(id, rel_path, node)| (*id, *rel_path, node))
+        .collect();
+    infer_workspace_layout(&refs, candidate_resources, default_level, delta)
+}
+
 /// Pure zero-config workspace layout inference from `.java` files, `package-info.java`,
 /// `module-info.java`, and candidate resource directories (including `META-INF/` indicators),
 /// followed by applying `delta` (`{ include, exclude }`).
@@ -779,17 +793,18 @@ pub fn infer_workspace_layout(
             let root = strip_package_suffix(&pf.dir, auth_pkg)
                 .or_else(|| find_enclosing_root(&pf.dir, &known_source_roots))
                 .unwrap_or_else(|| pf.dir.clone());
-            if pf.name != "package-info.java" && pf.name != "module-info.java" {
-                if pf.header.package.as_deref() != Some(auth_pkg.as_str()) {
-                    package_mismatches.push(PackageMismatch {
-                        file_id: pf.id,
-                        path: pf.path.clone(),
-                        declared: pf.header.package.clone(),
-                        expected: auth_pkg.clone(),
-                        authoritative_package_info: true,
-                        range: pf.header.package_range.unwrap_or_default(),
-                    });
-                }
+            if pf.name != "package-info.java"
+                && pf.name != "module-info.java"
+                && pf.header.package.as_deref() != Some(auth_pkg.as_str())
+            {
+                package_mismatches.push(PackageMismatch {
+                    file_id: pf.id,
+                    path: pf.path.clone(),
+                    declared: pf.header.package.clone(),
+                    expected: auth_pkg.clone(),
+                    authoritative_package_info: true,
+                    range: pf.header.package_range.unwrap_or_default(),
+                });
             }
             root
         } else if let Some(root) = find_enclosing_root(&pf.dir, &known_source_roots) {
