@@ -1,48 +1,12 @@
-use std::{
-    env, fs,
-    path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
-};
+mod common;
 
+use common::TempWorkspace;
 use hir::{LanguageLevel, ModuleDependency, ModuleTarget, Release, RootScope};
 use java_analyzer::workspace_config::{probe_workspace, BuildToolKind, Conflict};
 
-struct FixtureDir(PathBuf);
-
-impl FixtureDir {
-    fn new(label: &str) -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = env::temp_dir().join(format!(
-            "java_analyzer_fixture_{}_{}_{}",
-            label,
-            std::process::id(),
-            nanos
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        Self(dir)
-    }
-
-    fn write(&self, rel: &str, content: &str) {
-        let full = self.0.join(rel);
-        if let Some(parent) = full.parent() {
-            fs::create_dir_all(parent).unwrap();
-        }
-        fs::write(full, content).unwrap();
-    }
-}
-
-impl Drop for FixtureDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
 #[test]
 fn fixture_maven_single_module() {
-    let dir = FixtureDir::new("maven_single");
+    let dir = TempWorkspace::new();
     dir.write(
         "pom.xml",
         r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
@@ -106,7 +70,7 @@ fn fixture_maven_single_module() {
     );
     dir.write("src/site/resources/style.css", "body { color: black; }\n");
 
-    let probe = probe_workspace(&dir.0);
+    let probe = probe_workspace(dir.path());
 
     assert!(probe.conflicts.is_empty(), "conflicts: {:?}", probe.conflicts);
     assert!(
@@ -184,7 +148,7 @@ fn fixture_maven_single_module() {
 
 #[test]
 fn fixture_jpms_multi_module() {
-    let dir = FixtureDir::new("jpms_multi");
+    let dir = TempWorkspace::new();
     dir.write(
         "core/src/main/java/module-info.java",
         "module com.example.core {\n    exports com.example.core;\n}\n",
@@ -202,7 +166,7 @@ fn fixture_jpms_multi_module() {
         "package com.example.app;\npublic class AppMain {}\n",
     );
 
-    let probe = probe_workspace(&dir.0);
+    let probe = probe_workspace(dir.path());
 
     assert!(probe.conflicts.is_empty(), "conflicts: {:?}", probe.conflicts);
     assert!(
@@ -247,7 +211,7 @@ fn fixture_jpms_multi_module() {
 
 #[test]
 fn fixture_gradle_kotlin_dsl() {
-    let dir = FixtureDir::new("gradle_kts");
+    let dir = TempWorkspace::new();
     dir.write(
         "build.gradle.kts",
         r#"plugins {
@@ -275,7 +239,7 @@ fn fixture_gradle_kotlin_dsl() {
         "package com.example;\npublic class GreeterTest {}\n",
     );
 
-    let probe = probe_workspace(&dir.0);
+    let probe = probe_workspace(dir.path());
 
     assert!(probe.conflicts.is_empty(), "conflicts: {:?}", probe.conflicts);
     assert!(
@@ -321,7 +285,7 @@ fn fixture_gradle_kotlin_dsl() {
 
 #[test]
 fn fixture_ant_and_ivy_pair() {
-    let dir = FixtureDir::new("ant_ivy_pair");
+    let dir = TempWorkspace::new();
     dir.write(
         "build.xml",
         r#"<project name="ant-demo" default="compile" basedir=".">
@@ -358,7 +322,7 @@ fn fixture_ant_and_ivy_pair() {
         "package com.example;\npublic class AntAppTest {}\n",
     );
 
-    let probe = probe_workspace(&dir.0);
+    let probe = probe_workspace(dir.path());
 
     assert!(probe.conflicts.is_empty(), "conflicts: {:?}", probe.conflicts);
     assert!(
@@ -407,13 +371,13 @@ fn fixture_ant_and_ivy_pair() {
 
 #[test]
 fn fixture_zero_config_jbang_compact_source() {
-    let dir = FixtureDir::new("jbang_compact");
+    let dir = TempWorkspace::new();
     dir.write(
         "Hello.java",
         "#!/usr/bin/env -S java --source 25\n//DEPS com.google.guava:guava:33.3.1-jre\n//DEPS github:google/guava#v33.3.1\n\nvoid main() {\n    IO.println(\"Hello!\");\n}\n",
     );
 
-    let probe = probe_workspace(&dir.0);
+    let probe = probe_workspace(dir.path());
 
     assert!(probe.conflicts.is_empty(), "conflicts: {:?}", probe.conflicts);
     assert!(
@@ -450,7 +414,7 @@ fn fixture_zero_config_jbang_compact_source() {
 
 #[test]
 fn fixture_intentional_conflicts_and_tier1_disambiguation() {
-    let dir = FixtureDir::new("conflicts_tier1");
+    let dir = TempWorkspace::new();
     dir.write(
         "pom.xml",
         "<project><properties><maven.compiler.release>17</maven.compiler.release></properties></project>",
@@ -469,7 +433,7 @@ fn fixture_intentional_conflicts_and_tier1_disambiguation() {
         "package com.wrong;\npublic class BadPkg {}\n",
     );
 
-    let probe = probe_workspace(&dir.0);
+    let probe = probe_workspace(dir.path());
     assert!(probe
         .conflicts
         .iter()
@@ -494,7 +458,7 @@ fn fixture_intentional_conflicts_and_tier1_disambiguation() {
         "build = \"gradle\"\nrelease = 21\nexclude = [\"src/main/java/com/example/BadPkg.java\"]\n",
     );
 
-    let resolved_probe = probe_workspace(&dir.0);
+    let resolved_probe = probe_workspace(dir.path());
     assert!(
         resolved_probe.conflicts.is_empty(),
         "Tier 1 .java-analyzer.toml must clear BuildTool and Release conflicts: {:?}",
@@ -514,7 +478,7 @@ fn fixture_intentional_conflicts_and_tier1_disambiguation() {
 
 #[test]
 fn fixture_maven_multi_module_gson_style() {
-    let dir = FixtureDir::new("maven_gson_style");
+    let dir = TempWorkspace::new();
     dir.write(
         "pom.xml",
         r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
@@ -649,7 +613,7 @@ fn fixture_maven_multi_module_gson_style() {
         "package com.google.gson.metrics;\npublic class BagOfPrimitives {}\n",
     );
 
-    let probe = probe_workspace(&dir.0);
+    let probe = probe_workspace(dir.path());
 
     assert!(probe.conflicts.is_empty(), "conflicts: {:?}", probe.conflicts);
     assert!(
@@ -749,19 +713,19 @@ fn fixture_maven_multi_module_gson_style() {
     );
 
     assert_eq!(
-        probe.language_level_for_path(&dir.0.join("gson/src/main/java/com/google/gson/Gson.java")),
+        probe.language_level_for_path(&dir.path().join("gson/src/main/java/com/google/gson/Gson.java")),
         LanguageLevel::new(Release::JAVA_8, false)
     );
     assert_eq!(
         probe.language_level_for_path(
-            &dir.0
+            &dir.path()
                 .join("gson/src/main/java-templates/com/google/gson/internal/GsonBuildConfig.java")
         ),
         LanguageLevel::new(Release::JAVA_8, false)
     );
     assert_eq!(
         probe.language_level_for_path(
-            &dir.0.join("gson/src/test/java/com/google/gson/GsonTest.java")
+            &dir.path().join("gson/src/test/java/com/google/gson/GsonTest.java")
         ),
         LanguageLevel::new(Release::JAVA_17, false)
     );

@@ -362,41 +362,7 @@ pub fn diagnostics(db: &dyn SourceDatabase, file_id: FileId) -> Vec<Diagnostic> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hir::RootDatabase;
-    use std::sync::Arc;
-
-    fn db_with(text: &str) -> (RootDatabase, FileId) {
-        let mut db = RootDatabase::default();
-        let file_id = FileId(1);
-        db.set_file_text(file_id, Arc::new(text.to_string()));
-        db.set_file_language_level(file_id, hir::LanguageLevel::latest());
-        db.set_workspace_files(Arc::new(vec![file_id]));
-        (db, file_id)
-    }
-
-    fn db_with_files(files: &[(u32, &str)]) -> RootDatabase {
-        let mut db = RootDatabase::default();
-        let mut ids = Vec::with_capacity(files.len());
-        for &(id, text) in files {
-            let file_id = FileId(id);
-            db.set_file_text(file_id, Arc::new(text.to_string()));
-            db.set_file_language_level(file_id, hir::LanguageLevel::latest());
-            ids.push(file_id);
-        }
-        db.set_workspace_files(Arc::new(ids));
-        db
-    }
-
-    fn cursor(text: &str, marker: &str) -> u32 {
-        let idx = text
-            .find(marker)
-            .unwrap_or_else(|| panic!("marker not found: {marker:?}"));
-        (idx + marker.len()) as u32
-    }
-
-    fn slice(text: &str, range: TextRange) -> &str {
-        &text[usize::from(range.start())..usize::from(range.end())]
-    }
+    use hir::test_fixture::{cursor, db_with, db_with_files, slice};
 
     #[test]
     fn test_hover_class_keyword() {

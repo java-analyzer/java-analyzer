@@ -558,45 +558,12 @@ fn read_line_trimmed<R: BufRead>(reader: &mut R) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::TestDir;
     use std::io::Cursor;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new(label: &str) -> Self {
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let dir = env::temp_dir().join(format!(
-                "java_analyzer_configure_test_{}_{}_{}",
-                label,
-                std::process::id(),
-                nanos
-            ));
-            fs::create_dir_all(&dir).unwrap();
-            Self(dir)
-        }
-
-        fn write(&self, rel: &str, content: &str) {
-            let full = self.0.join(rel);
-            if let Some(parent) = full.parent() {
-                fs::create_dir_all(parent).unwrap();
-            }
-            fs::write(full, content).unwrap();
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
 
     #[test]
     fn configure_interactive_default_reconciles_external_specs_instead_of_writing_toml() {
-        let tmp = TempDir::new("interactive_reconcile");
+        let tmp = TestDir::new();
         tmp.write(".java-version", "17\n");
         tmp.write(".sdkmanrc", "java=21.0.2-tem\n");
         tmp.write(
@@ -605,7 +572,7 @@ mod tests {
         );
 
         let args = ConfigureArgs {
-            workspace_dir: Some(tmp.0.clone()),
+            workspace_dir: Some(tmp.path().to_path_buf()),
             ..Default::default()
         };
 
@@ -620,19 +587,21 @@ mod tests {
             "output was:\n{out_str}"
         );
         assert_eq!(
-            fs::read_to_string(tmp.0.join(".java-version")).unwrap().trim(),
+            fs::read_to_string(tmp.path().join(".java-version"))
+                .unwrap()
+                .trim(),
             "21"
         );
         // And because external files were reconciled, no .java-analyzer.toml was needed!
         assert!(
-            !tmp.0.join(".java-analyzer.toml").exists(),
+            !tmp.path().join(".java-analyzer.toml").exists(),
             ".java-analyzer.toml should not be created when external specs were reconciled"
         );
     }
 
     #[test]
     fn configure_never_hardcodes_uniquely_inferred_values_in_toml() {
-        let tmp = TempDir::new("minimal_overlay");
+        let tmp = TestDir::new();
         tmp.write(".java-version", "21\n");
         tmp.write(
             "pom.xml",
@@ -642,7 +611,7 @@ mod tests {
         // Passing --build maven --release 21 when Maven + Java 21 are already uniquely inferred
         // must produce an empty overlay (no .java-analyzer.toml created).
         let args = ConfigureArgs {
-            workspace_dir: Some(tmp.0.clone()),
+            workspace_dir: Some(tmp.path().to_path_buf()),
             build: Some(BuildToolKind::Maven),
             release: Some(Release::JAVA_21),
             yes: true,
@@ -653,7 +622,7 @@ mod tests {
         run_with_io(args, false, &mut input, &mut output).unwrap();
 
         assert!(
-            !tmp.0.join(".java-analyzer.toml").exists(),
+            !tmp.path().join(".java-analyzer.toml").exists(),
             "Uniquely inferred build=maven and release=21 must not be hardcoded into .java-analyzer.toml"
         );
     }

@@ -419,37 +419,19 @@ fn handle_notification(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        env, fs,
-        path::PathBuf,
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use crate::test_util::TestDir;
+    use std::fs;
 
     #[test]
     fn surfaces_package_mismatch_and_conflict_diagnostics_in_lsp() {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir: PathBuf = env::temp_dir().join(format!(
-            "java_analyzer_lsp_diag_test_{}_{}",
-            std::process::id(),
-            nanos
-        ));
-        fs::create_dir_all(dir.join("src/com/example")).unwrap();
-
-        fs::write(dir.join(".java-version"), "17\n").unwrap();
-        fs::write(dir.join(".sdkmanrc"), "java=21.0.2-tem\n").unwrap();
-        fs::write(
-            dir.join("src/com/example/package-info.java"),
-            "package com.example;\n",
-        )
-        .unwrap();
-        let bad_file = dir.join("src/com/example/Broken.java");
+        let dir = TestDir::new();
+        dir.write(".java-version", "17\n");
+        dir.write(".sdkmanrc", "java=21.0.2-tem\n");
+        dir.write("src/com/example/package-info.java", "package com.example;\n");
         let bad_text = "package wrong.pkg;\npublic class Broken {}\n";
-        fs::write(&bad_file, bad_text).unwrap();
+        let bad_file = dir.write("src/com/example/Broken.java", bad_text);
 
-        let mut state = GlobalState::with_workspace(&dir);
+        let mut state = GlobalState::with_workspace(dir.path());
         let uri = path_to_uri(&bad_file).unwrap();
         state.set_text(&uri, bad_text.to_string());
 
@@ -472,30 +454,16 @@ mod tests {
             "Expected package mismatch error diagnostic, got: {:?}",
             pub_diags.diagnostics
         );
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn package_mismatch_updates_live_without_disk_writes_or_reprobing() {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir: PathBuf = env::temp_dir().join(format!(
-            "java_analyzer_lsp_live_pkg_test_{}_{}",
-            std::process::id(),
-            nanos
-        ));
-        fs::create_dir_all(dir.join("src/com/example")).unwrap();
-
-        let pkg_info = dir.join("src/com/example/package-info.java");
-        fs::write(&pkg_info, "package com.example;\n").unwrap();
-        let file_path = dir.join("src/com/example/Live.java");
+        let dir = TestDir::new();
+        let pkg_info = dir.write("src/com/example/package-info.java", "package com.example;\n");
         let bad_text = "package wrong.pkg;\npublic class Live {}\n";
-        fs::write(&file_path, bad_text).unwrap();
+        let file_path = dir.write("src/com/example/Live.java", bad_text);
 
-        let mut state = GlobalState::with_workspace(&dir);
+        let mut state = GlobalState::with_workspace(dir.path());
         let uri = path_to_uri(&file_path).unwrap();
 
         // Remove package-info.java on disk after initial probe: if `set_text` re-probed disk,
@@ -534,7 +502,5 @@ mod tests {
             "Expected live mismatch for 'other.bad', got: {:?}",
             diags.diagnostics
         );
-
-        let _ = fs::remove_dir_all(&dir);
     }
 }

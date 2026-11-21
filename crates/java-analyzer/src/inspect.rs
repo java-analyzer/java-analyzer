@@ -312,45 +312,11 @@ fn dependency_to_json(dep: &ModuleDependency) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new(label: &str) -> Self {
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let dir = env::temp_dir().join(format!(
-                "java_analyzer_inspect_test_{}_{}_{}",
-                label,
-                std::process::id(),
-                nanos
-            ));
-            fs::create_dir_all(&dir).unwrap();
-            Self(dir)
-        }
-
-        fn write(&self, rel: &str, content: &str) {
-            let full = self.0.join(rel);
-            if let Some(parent) = full.parent() {
-                fs::create_dir_all(parent).unwrap();
-            }
-            fs::write(full, content).unwrap();
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::test_util::TestDir;
 
     #[test]
     fn inspect_human_output_reports_layout_health_and_errors() {
-        let tmp = TempDir::new("inspect_human");
+        let tmp = TestDir::new();
         tmp.write(
             "pom.xml",
             r#"<project>
@@ -379,7 +345,7 @@ mod tests {
         let mut output = Vec::new();
         run_with_io(
             InspectArgs {
-                workspace_dir: Some(tmp.0.clone()),
+                workspace_dir: Some(tmp.path().to_path_buf()),
                 json: false,
                 show_errors: true,
             },
@@ -423,7 +389,7 @@ mod tests {
 
     #[test]
     fn inspect_json_output_is_structured_and_complete() {
-        let tmp = TempDir::new("inspect_json");
+        let tmp = TestDir::new();
         tmp.write(".java-version", "17\n");
         tmp.write(
             "src/com/example/Main.java",
@@ -437,7 +403,7 @@ mod tests {
         let mut output = Vec::new();
         run_with_io(
             InspectArgs {
-                workspace_dir: Some(tmp.0.clone()),
+                workspace_dir: Some(tmp.path().to_path_buf()),
                 json: true,
                 show_errors: true,
             },

@@ -7,7 +7,7 @@ license.workspace = true
 description.workspace = true
 
 [dependencies]
-rowan = "0.17"
+rowan.workspace = true
 
 [dev-dependencies]
-similar = "2"
+similar.workspace = true

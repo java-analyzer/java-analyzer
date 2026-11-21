@@ -1,55 +1,9 @@
 mod common;
 
-use std::{
-    env, fs,
-    path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
-};
-
-use common::{shutdown, start_server, start_server_with_root, URI};
-use java_analyzer::convert::path_to_uri;
+use common::{shutdown, start_server, start_server_with_root, TempWorkspace, URI};
 use serde_json::{json, Value};
 
 const PUBLISH: &str = "textDocument/publishDiagnostics";
-
-struct TempWorkspace {
-    dir: PathBuf,
-}
-
-impl TempWorkspace {
-    fn new(prefix: &str) -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = env::temp_dir().join(format!(
-            "java_analyzer_{prefix}_{}_{}",
-            std::process::id(),
-            nanos
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        Self { dir }
-    }
-
-    fn write(&self, rel_path: &str, content: &str) -> String {
-        let path = self.dir.join(rel_path);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).unwrap();
-        }
-        fs::write(&path, content).unwrap();
-        path_to_uri(&path).unwrap().to_string()
-    }
-
-    fn root_uri(&self) -> String {
-        path_to_uri(&self.dir).unwrap().to_string()
-    }
-}
-
-impl Drop for TempWorkspace {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
-    }
-}
 
 fn lsp_range(start_line: u32, start_char: u32, end_line: u32, end_char: u32) -> Value {
     json!({
@@ -103,8 +57,8 @@ class Calc {
 
 #[test]
 fn goto_definition_across_files_in_workspace() {
-    let ws = TempWorkspace::new("lsp_goto_cross");
-    let helper_uri = ws.write(
+    let ws = TempWorkspace::new();
+    let helper_uri = ws.write_uri(
         "src/com/util/Helper.java",
         "\
 package com.util;
@@ -114,7 +68,7 @@ public class Helper {
 }
 ",
     );
-    let same_pkg_uri = ws.write(
+    let same_pkg_uri = ws.write_uri(
         "src/com/app/SamePkg.java",
         "\
 package com.app;
@@ -134,7 +88,7 @@ public class App {
     }
 }
 ";
-    let app_uri = ws.write("src/com/app/App.java", app_text);
+    let app_uri = ws.write_uri("src/com/app/App.java", app_text);
 
     let (mut client, handle) = start_server_with_root(&ws.root_uri());
     // Only open App.java; Helper.java and SamePkg.java remain closed on disk.
@@ -182,8 +136,8 @@ public class App {
 
 #[test]
 fn goto_definition_reflects_unsaved_edits_and_reloads_disk_on_close() {
-    let ws = TempWorkspace::new("lsp_goto_lifecycle");
-    let helper_uri = ws.write(
+    let ws = TempWorkspace::new();
+    let helper_uri = ws.write_uri(
         "src/com/util/Helper.java",
         "\
 package com.util;
@@ -202,7 +156,7 @@ public class App {
     }
 }
 ";
-    let app_uri = ws.write("src/com/app/App.java", app_text);
+    let app_uri = ws.write_uri("src/com/app/App.java", app_text);
 
     let (mut client, handle) = start_server_with_root(&ws.root_uri());
     client.open_uri(&app_uri, app_text);
@@ -304,8 +258,8 @@ fn goto_definition_on_whitespace_or_unknown_symbol_returns_null() {
 
 #[test]
 fn goto_definition_uses_utf16_columns_in_target_file() {
-    let ws = TempWorkspace::new("lsp_goto_utf16");
-    let target_uri = ws.write(
+    let ws = TempWorkspace::new();
+    let target_uri = ws.write_uri(
         "src/com/app/Target.java",
         "\
 package com.app;
@@ -318,7 +272,7 @@ public class App {
     /* 😀 */ Target field;
 }
 ";
-    let app_uri = ws.write("src/com/app/App.java", app_text);
+    let app_uri = ws.write_uri("src/com/app/App.java", app_text);
 
     let (mut client, handle) = start_server_with_root(&ws.root_uri());
     client.open_uri(&app_uri, app_text);

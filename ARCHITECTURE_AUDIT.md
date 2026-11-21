@@ -170,10 +170,10 @@
 
 Each step is small, independent, behavior-preserving, and leaves `cargo test` green.
 
-### Step 1: Centralize `[workspace.dependencies]` and Test Helpers **[New Dependency]**
-- Add `[workspace.dependencies]` to root [`Cargo.toml`](file:///Users/rolandtepp/Developer/luolong/java-analyzer/Cargo.toml) for all shared external and internal crates (`rowan`, `salsa`, `serde`, `serde_json`, `lsp-server`, `lsp-types`, `clap`, `ignore`, `toml`, `similar`, plus `tempfile` and `expect-test` as dev-dependencies).
-- Replace the 5 hand-rolled `TempDir`/`TempWorkspace` structs in `crates/java-analyzer/` with `tempfile::TempDir`.
-- Deduplicate `db_with`, `db_with_files`, `cursor`, and `slice` test helpers between `hir` and `ide`.
+### Step 1: Centralize `[workspace.dependencies]` and Test Helpers **[New Dependency]** *(Completed)*
+- [x] Add `[workspace.dependencies]` to root [`Cargo.toml`](file:///Users/rolandtepp/Developer/luolong/java-analyzer/Cargo.toml) for all shared external and internal crates (`rowan`, `salsa`, `serde`, `serde_json`, `lsp-server`, `lsp-types`, `clap`, `ignore`, `toml`, `similar`, plus `tempfile` and `expect-test` as dev-dependencies).
+- [x] Replace the hand-rolled `TempDir`/`TempWorkspace`/`FixtureDir` structs in `crates/java-analyzer/` with `tempfile::TempDir`.
+- [x] Deduplicate `db_with`, `db_with_files`, `cursor`, and `slice` test helpers between `hir` and `ide`.
 
 ### Step 2: Eliminate Redundant Parsing (`parse_shebang_level` & `probe_workspace` File Retention)
 - Promote a line-1-only `parse_shebang_level(text: &str) -> Option<LanguageLevel>` into `syntax::language_level` (reused by `hir::workspace` and `java-analyzer::workspace_config`).

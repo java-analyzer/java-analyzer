@@ -6,6 +6,9 @@ authors.workspace = true
 license.workspace = true
 description.workspace = true
 
+[features]
+test-utils = []
+
 [dependencies]
-salsa = "0.28"
-syntax = { path = "../syntax" }
+salsa.workspace = true
+syntax.workspace = true

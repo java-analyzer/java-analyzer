@@ -1,49 +1,11 @@
-use std::{
-    env, fs,
-    path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
-};
-
+use crate::test_util::TestDir;
 use hir::{LanguageLevel, ModuleDependency, Release, RootScope};
 
 use super::{maven::parse_maven_properties, *};
 
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new(label: &str) -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = env::temp_dir().join(format!(
-            "java_analyzer_ws_test_{}_{}_{}",
-            label,
-            std::process::id(),
-            nanos
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        Self(dir)
-    }
-
-    fn write(&self, rel: &str, content: &str) {
-        let full = self.0.join(rel);
-        if let Some(parent) = full.parent() {
-            fs::create_dir_all(parent).unwrap();
-        }
-        fs::write(full, content).unwrap();
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
 #[test]
 fn ant_and_ivy_pair_without_conflict_and_extract_compile_time_deps() {
-    let tmp = TempDir::new("ant_ivy");
+    let tmp = TestDir::new();
     tmp.write(
         "build.xml",
         r#"<project name="demo" default="compile" basedir=".">
@@ -76,7 +38,7 @@ fn ant_and_ivy_pair_without_conflict_and_extract_compile_time_deps() {
         "package com.example;\npublic class App {}\n",
     );
 
-    let probe = probe_workspace(&tmp.0);
+    let probe = probe_workspace(tmp.path());
     assert!(
         probe.conflicts.is_empty(),
         "build.xml + ivy.xml must not conflict: {:?}",
@@ -117,7 +79,7 @@ fn ant_and_ivy_pair_without_conflict_and_extract_compile_time_deps() {
 
 #[test]
 fn detects_build_and_release_conflicts_and_disambiguates_via_tier1_or_reconcile() {
-    let tmp = TempDir::new("conflicts");
+    let tmp = TestDir::new();
     tmp.write(
         "pom.xml",
         r#"<project>
@@ -136,7 +98,7 @@ fn detects_build_and_release_conflicts_and_disambiguates_via_tier1_or_reconcile(
     );
     tmp.write(".java-version", "25\n");
 
-    let probe = probe_workspace(&tmp.0);
+    let probe = probe_workspace(tmp.path());
     assert_eq!(probe.conflicts.len(), 2);
     assert!(probe
         .conflicts
@@ -148,10 +110,10 @@ fn detects_build_and_release_conflicts_and_disambiguates_via_tier1_or_reconcile(
         .any(|c| matches!(c, Conflict::Release(_))));
 
     // Reconciling external version files updates .java-version and pom.xml to 21
-    let modified = reconcile_version_conflict(&tmp.0, Release::JAVA_21);
+    let modified = reconcile_version_conflict(tmp.path(), Release::JAVA_21);
     assert_eq!(modified.len(), 2);
 
-    let probe_after_reconcile = probe_workspace(&tmp.0);
+    let probe_after_reconcile = probe_workspace(tmp.path());
     assert!(
         !probe_after_reconcile
             .conflicts
@@ -172,14 +134,14 @@ fn detects_build_and_release_conflicts_and_disambiguates_via_tier1_or_reconcile(
     assert_eq!(toml_text, "build = \"gradle\"\n");
 
     tmp.write(".java-analyzer.toml", &toml_text);
-    let final_probe = probe_workspace(&tmp.0);
+    let final_probe = probe_workspace(tmp.path());
     assert!(final_probe.conflicts.is_empty());
     assert_eq!(final_probe.resolved_build, BuildToolKind::Gradle);
 }
 
 #[test]
 fn meta_inf_manifest_signals_resource_root_and_tier1_deltas_override() {
-    let tmp = TempDir::new("meta_inf_and_deltas");
+    let tmp = TestDir::new();
     tmp.write(
         "src/com/example/App.java",
         "package com.example;\nclass App {}\n",
@@ -194,7 +156,7 @@ dependencies = { include = ["com.google.guava:guava:33.3.1-jre", "github:google/
 "#,
     );
 
-    let probe = probe_workspace(&tmp.0);
+    let probe = probe_workspace(tmp.path());
     let root_mod = &probe.layout.modules[0];
     assert_eq!(root_mod.rel_path, ".");
     assert!(root_mod.sources.iter().any(|s| s.rel_path == "src"));
@@ -222,7 +184,7 @@ dependencies = { include = ["com.google.guava:guava:33.3.1-jre", "github:google/
 
 #[test]
 fn maven_pom_strips_comments_expands_properties_and_handles_dependency_management() {
-    let tmp = TempDir::new("maven_props_and_mgmt");
+    let tmp = TestDir::new();
     tmp.write(
         "pom.xml",
         r#"<project>
@@ -305,7 +267,7 @@ fn maven_pom_strips_comments_expands_properties_and_handles_dependency_managemen
         "package com.example;\nclass AppTest {}\n",
     );
 
-    let probe = probe_workspace(&tmp.0);
+    let probe = probe_workspace(tmp.path());
     assert_eq!(probe.resolved_build, BuildToolKind::Maven);
     assert_eq!(
         probe.resolved_level,
@@ -362,7 +324,7 @@ fn maven_pom_strips_comments_expands_properties_and_handles_dependency_managemen
 
 #[test]
 fn scan_ignores_site_resources_and_skips_java_fixtures_inside_resource_roots() {
-    let tmp = TempDir::new("scan_resources_filter");
+    let tmp = TestDir::new();
     tmp.write(
         "src/main/java/com/example/resources/ResourceHelper.java",
         "package com.example.resources;\npublic class ResourceHelper {}\n",
@@ -380,7 +342,7 @@ fn scan_ignores_site_resources_and_skips_java_fixtures_inside_resource_roots() {
         "com.example.Impl\n",
     );
 
-    let probe = probe_workspace(&tmp.0);
+    let probe = probe_workspace(tmp.path());
     // Only real Java sources are collected; fixtures in conventional resource roots and src/site are skipped.
     assert!(probe
         .file_paths
@@ -415,7 +377,7 @@ fn scan_ignores_site_resources_and_skips_java_fixtures_inside_resource_roots() {
 
 #[test]
 fn meta_inf_dir_allows_java_sources_while_conventional_resources_skip_them() {
-    let tmp = TempDir::new("meta_inf_with_java_sources");
+    let tmp = TestDir::new();
     tmp.write("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n");
     tmp.write(
         "src/main/java/com/example/App.java",
@@ -434,7 +396,7 @@ fn meta_inf_dir_allows_java_sources_while_conventional_resources_skip_them() {
         "package fixtures;\npublic class Fixture {}\n",
     );
 
-    let probe = probe_workspace(&tmp.0);
+    let probe = probe_workspace(tmp.path());
 
     let foo_test_id = probe
         .file_paths
@@ -492,7 +454,7 @@ fn meta_inf_dir_allows_java_sources_while_conventional_resources_skip_them() {
 
 #[test]
 fn maven_pom_ignores_build_reporting_and_profile_plugin_dependencies() {
-    let tmp = TempDir::new("maven_ignore_plugin_deps");
+    let tmp = TestDir::new();
     tmp.write(
         "pom.xml",
         r#"<project>
@@ -581,7 +543,7 @@ fn maven_pom_ignores_build_reporting_and_profile_plugin_dependencies() {
         "package com.example;\nclass AppTest {}\n",
     );
 
-    let probe = probe_workspace(&tmp.0);
+    let probe = probe_workspace(tmp.path());
     let root_mod = probe.layout.module_by_path(".").unwrap();
     assert!(root_mod
         .sources
@@ -605,18 +567,18 @@ fn maven_pom_ignores_build_reporting_and_profile_plugin_dependencies() {
         Some(LanguageLevel::new(Release::JAVA_17, false))
     );
     assert_eq!(
-        probe.language_level_for_path(&tmp.0.join("custom/src/com/example/App.java")),
+        probe.language_level_for_path(&tmp.path().join("custom/src/com/example/App.java")),
         LanguageLevel::new(Release::JAVA_8, false)
     );
     assert_eq!(
-        probe.language_level_for_path(&tmp.0.join("src/test/java/com/example/AppTest.java")),
+        probe.language_level_for_path(&tmp.path().join("src/test/java/com/example/AppTest.java")),
         LanguageLevel::new(Release::JAVA_17, false)
     );
 }
 
 #[test]
 fn maven_multi_module_inherits_props_splits_deps_and_resolves_test_language_level() {
-    let tmp = TempDir::new("maven_multi_module");
+    let tmp = TestDir::new();
     tmp.write(
         "pom.xml",
         r#"<project>
@@ -739,7 +701,7 @@ dependencies = { exclude = ["com.example:excluded-dep"] }
 "#,
     );
 
-    let probe = probe_workspace(&tmp.0);
+    let probe = probe_workspace(tmp.path());
     assert!(probe.conflicts.is_empty(), "conflicts: {:?}", probe.conflicts);
     assert_eq!(
         probe.resolved_level,
@@ -818,24 +780,24 @@ dependencies = { exclude = ["com.example:excluded-dep"] }
     );
 
     assert_eq!(
-        probe.language_level_for_path(&tmp.0.join("core/src/main/java/com/example/core/Core.java")),
+        probe.language_level_for_path(&tmp.path().join("core/src/main/java/com/example/core/Core.java")),
         LanguageLevel::new(Release::JAVA_8, false)
     );
     assert_eq!(
         probe.language_level_for_path(
-            &tmp.0.join("core/src/test/java/com/example/core/CoreTest.java")
+            &tmp.path().join("core/src/test/java/com/example/core/CoreTest.java")
         ),
         LanguageLevel::new(Release::JAVA_17, false)
     );
     assert_eq!(
         probe.language_level_for_path(
-            &tmp.0.join("modern/src/main/java/com/example/modern/Modern.java")
+            &tmp.path().join("modern/src/main/java/com/example/modern/Modern.java")
         ),
         LanguageLevel::new(Release::JAVA_17, false)
     );
     assert_eq!(
         probe.language_level_for_path(
-            &tmp.0.join("modern/src/test/java/com/example/modern/ModernTest.java")
+            &tmp.path().join("modern/src/test/java/com/example/modern/ModernTest.java")
         ),
         LanguageLevel::new(Release::JAVA_17, false)
     );
@@ -843,7 +805,7 @@ dependencies = { exclude = ["com.example:excluded-dep"] }
 
 #[test]
 fn maven_submodule_expands_project_parent_properties_in_dependencies() {
-    let tmp = TempDir::new("maven_parent_props");
+    let tmp = TestDir::new();
     tmp.write(
         "pom.xml",
         r#"<project>
@@ -893,7 +855,7 @@ fn maven_submodule_expands_project_parent_properties_in_dependencies() {
         Some("3.4.5")
     );
 
-    let probe = probe_workspace(&tmp.0);
+    let probe = probe_workspace(tmp.path());
     let service_mod = probe.layout.module_by_path("service").unwrap();
     assert!(
         service_mod.dependencies.contains(&ModuleDependency::Maven {
@@ -911,7 +873,7 @@ fn maven_submodule_expands_project_parent_properties_in_dependencies() {
 #[test]
 fn maven_test_release_tag_and_profile_test_compile_execution() {
     // 1. Direct <testRelease>17</testRelease> in maven-compiler-plugin configuration
-    let tmp_tag = TempDir::new("maven_test_release_tag");
+    let tmp_tag = TestDir::new();
     tmp_tag.write(
         "pom.xml",
         r#"<project>
@@ -944,7 +906,7 @@ fn maven_test_release_tag_and_profile_test_compile_execution() {
         "package com.example;\nclass AppTest {}\n",
     );
 
-    let probe_tag = probe_workspace(&tmp_tag.0);
+    let probe_tag = probe_workspace(tmp_tag.path());
     let root_tag = probe_tag.layout.module_by_path(".").unwrap();
     assert_eq!(
         root_tag.language_level,
@@ -955,12 +917,12 @@ fn maven_test_release_tag_and_profile_test_compile_execution() {
         Some(LanguageLevel::new(Release::JAVA_17, false))
     );
     assert_eq!(
-        probe_tag.language_level_for_path(&tmp_tag.0.join("src/test/java/com/example/AppTest.java")),
+        probe_tag.language_level_for_path(&tmp_tag.path().join("src/test/java/com/example/AppTest.java")),
         LanguageLevel::new(Release::JAVA_17, false)
     );
 
     // 2. <profile> containing <execution> with testCompile goal and <configuration><release>17</release></configuration>
-    let tmp_prof = TempDir::new("maven_profile_test_compile");
+    let tmp_prof = TestDir::new();
     tmp_prof.write(
         "pom.xml",
         r#"<project>
@@ -1011,7 +973,7 @@ fn maven_test_release_tag_and_profile_test_compile_execution() {
         "package com.example;\nclass AppTest {}\n",
     );
 
-    let probe_prof = probe_workspace(&tmp_prof.0);
+    let probe_prof = probe_workspace(tmp_prof.path());
     let root_prof = probe_prof.layout.module_by_path(".").unwrap();
     assert_eq!(
         root_prof.language_level,
@@ -1022,14 +984,14 @@ fn maven_test_release_tag_and_profile_test_compile_execution() {
         Some(LanguageLevel::new(Release::JAVA_17, false))
     );
     assert_eq!(
-        probe_prof.language_level_for_path(&tmp_prof.0.join("src/test/java/com/example/AppTest.java")),
+        probe_prof.language_level_for_path(&tmp_prof.path().join("src/test/java/com/example/AppTest.java")),
         LanguageLevel::new(Release::JAVA_17, false)
     );
 }
 
 #[test]
 fn skips_java_fixtures_inside_noncompilable_resource_dirs() {
-    let tmp_only = TempDir::new("noncompilable_resources_only");
+    let tmp_only = TestDir::new();
     tmp_only.write(
         "src/test/resources-noncompilable/Broken.java",
         "package broken;\nclass Broken { @@@ invalid syntax }\n",
@@ -1039,7 +1001,7 @@ fn skips_java_fixtures_inside_noncompilable_resource_dirs() {
         "module bogus.fixture.mod { requires foo.bar; }\n",
     );
 
-    let probe_only = probe_workspace(&tmp_only.0);
+    let probe_only = probe_workspace(tmp_only.path());
     assert!(
         probe_only.file_paths.is_empty(),
         "noncompilable resource fixtures must be skipped completely: {:?}",
@@ -1065,7 +1027,7 @@ fn skips_java_fixtures_inside_noncompilable_resource_dirs() {
     );
 
     // Also ensure real sources are still scanned alongside skipped resources-* subtrees
-    let tmp_mixed = TempDir::new("noncompilable_resources_mixed");
+    let tmp_mixed = TestDir::new();
     tmp_mixed.write(
         "src/main/java/com/example/App.java",
         "package com.example;\npublic class App {}\n",
@@ -1087,7 +1049,7 @@ fn skips_java_fixtures_inside_noncompilable_resource_dirs() {
         "class Filtered {}\n",
     );
 
-    let probe_mixed = probe_workspace(&tmp_mixed.0);
+    let probe_mixed = probe_workspace(tmp_mixed.path());
     assert_eq!(probe_mixed.file_paths.len(), 1);
     assert!(probe_mixed
         .file_paths
@@ -1106,7 +1068,7 @@ fn skips_java_fixtures_inside_noncompilable_resource_dirs() {
 
 #[test]
 fn ant_property_file_expands_javac_release_and_ivy_dependencies() {
-    let tmp = TempDir::new("ant_prop_file_ivy");
+    let tmp = TestDir::new();
     tmp.write(
         "version.properties",
         r#"
@@ -1146,7 +1108,7 @@ already.set=99
         "package com.example;\npublic class App {}\n",
     );
 
-    let probe = probe_workspace(&tmp.0);
+    let probe = probe_workspace(tmp.path());
     assert!(probe.conflicts.is_empty(), "conflicts: {:?}", probe.conflicts);
     assert_eq!(probe.resolved_build, BuildToolKind::Ant);
     assert_eq!(
@@ -1181,7 +1143,7 @@ already.set=99
 
 #[test]
 fn ant_fileset_scoped_to_path_and_classpath_and_ignores_macrodef_placeholders() {
-    let tmp = TempDir::new("ant_fileset_scope");
+    let tmp = TestDir::new();
     tmp.write(
         "build.xml",
         r#"<project name="demo" default="compile" basedir=".">
@@ -1220,7 +1182,7 @@ fn ant_fileset_scoped_to_path_and_classpath_and_ignores_macrodef_placeholders() 
         "package com.example;\npublic class App {}\n",
     );
 
-    let probe = probe_workspace(&tmp.0);
+    let probe = probe_workspace(tmp.path());
     let root_mod = &probe.layout.modules[0];
 
     assert!(
@@ -1261,7 +1223,7 @@ fn ant_fileset_scoped_to_path_and_classpath_and_ignores_macrodef_placeholders() 
 
 #[test]
 fn scan_respects_gitignore_and_ignore_files_while_keeping_hidden_sources() {
-    let tmp = TempDir::new("scan_ignore_and_hidden");
+    let tmp = TestDir::new();
     // No `.git` directory — `.gitignore` must still be honored (`require_git(false)`).
     tmp.write(".gitignore", "generated-ignored/\n");
     tmp.write(".ignore", "scratch/Tmp.java\n");
@@ -1282,7 +1244,7 @@ fn scan_respects_gitignore_and_ignore_files_while_keeping_hidden_sources() {
         "public class Main {}\n",
     );
 
-    let probe = probe_workspace(&tmp.0);
+    let probe = probe_workspace(tmp.path());
     assert!(
         !probe
             .file_paths

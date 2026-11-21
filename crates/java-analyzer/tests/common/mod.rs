@@ -1,9 +1,50 @@
 #![allow(dead_code)] // shared by several test crates, each using a subset
 
-use std::thread;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    thread,
+};
 
+use java_analyzer::convert::path_to_uri;
 use lsp_server::{Connection, Message, Notification, Request, RequestId};
 use serde_json::{json, Value};
+
+pub struct TempWorkspace(tempfile::TempDir);
+
+impl TempWorkspace {
+    pub fn new() -> Self {
+        Self(tempfile::TempDir::new().unwrap())
+    }
+
+    pub fn path(&self) -> &Path {
+        self.0.path()
+    }
+
+    pub fn write(&self, rel: &str, content: &str) -> PathBuf {
+        let full = self.0.path().join(rel);
+        if let Some(parent) = full.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&full, content).unwrap();
+        full
+    }
+
+    pub fn write_uri(&self, rel: &str, content: &str) -> String {
+        let path = self.write(rel, content);
+        path_to_uri(&path).unwrap().to_string()
+    }
+
+    pub fn root_uri(&self) -> String {
+        path_to_uri(self.path()).unwrap().to_string()
+    }
+}
+
+impl Default for TempWorkspace {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 pub const URI: &str = "file:///tmp/Main.java";
 

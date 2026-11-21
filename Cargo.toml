@@ -13,3 +13,23 @@ edition = "2021"
 authors = ["Roland Tepp"]
 license = "MIT OR Apache-2.0"
 description = "A Java Language Server Protocol implementation in Rust"
+
+[workspace.dependencies]
+# External crates
+clap = { version = "4", features = ["derive"] }
+expect-test = "1"
+ignore = "0.4"
+lsp-server = "0.10"
+lsp-types = "0.97"
+rowan = "0.17"
+salsa = "0.28"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+similar = "2"
+tempfile = "3"
+toml = "1"
+
+# Workspace crates
+syntax = { path = "crates/syntax" }
+hir = { path = "crates/hir" }
+ide = { path = "crates/ide" }
