@@ -1,9 +1,13 @@
 use std::{collections::BTreeMap, path::Path};
 
 use ide::{normalize_rel_path, ModuleDependency, Release, RootScope};
-use roxmltree::{Document, Node, ParsingOptions};
+use roxmltree::{Document, Node};
 
-use super::{expand_props, parse_version_string, DetectedVersionSpec, ManifestMetadata};
+use super::{
+    parse_version_string,
+    xml::{child_text, direct_child_text, expand_props, has_any_ancestor, is_tag, parse_xml},
+    DetectedVersionSpec, ManifestMetadata,
+};
 
 #[derive(Default)]
 pub(super) struct MavenPomMetadata {
@@ -14,50 +18,6 @@ pub(super) struct MavenPomMetadata {
     pub(super) dependencies: Vec<ModuleDependency>,
     pub(super) properties: BTreeMap<String, String>,
     pub(super) managed_versions: BTreeMap<(String, String), String>,
-}
-
-fn parse_xml(content: &str) -> Option<Document<'_>> {
-    Document::parse_with_options(
-        content,
-        ParsingOptions {
-            allow_dtd: true,
-            ..Default::default()
-        },
-    )
-    .ok()
-}
-
-fn is_tag(node: Node<'_, '_>, name: &str) -> bool {
-    node.is_element() && node.tag_name().name() == name
-}
-
-fn has_any_ancestor(node: Node<'_, '_>, names: &[&str]) -> bool {
-    let mut cur = node.parent();
-    while let Some(parent) = cur {
-        if parent.is_element() && names.contains(&parent.tag_name().name()) {
-            return true;
-        }
-        cur = parent.parent();
-    }
-    false
-}
-
-fn child_text(node: Node<'_, '_>) -> String {
-    let mut out = String::new();
-    for child in node.children() {
-        if child.is_text() {
-            if let Some(t) = child.text() {
-                out.push_str(t);
-            }
-        }
-    }
-    out.trim().to_string()
-}
-
-fn direct_child_text(node: Node<'_, '_>, tag: &str) -> Option<String> {
-    node.children()
-        .find(|child| is_tag(*child, tag))
-        .map(child_text)
 }
 
 pub(super) fn introspect_maven_pom(

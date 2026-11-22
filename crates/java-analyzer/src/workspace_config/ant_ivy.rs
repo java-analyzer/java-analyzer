@@ -1,35 +1,12 @@
 use std::{collections::BTreeMap, fs, path::Path};
 
 use ide::{normalize_rel_path, ModuleDependency, RootScope};
-use roxmltree::{Document, Node, ParsingOptions};
 
-use super::{expand_props, parse_version_string, DetectedVersionSpec, ManifestMetadata};
-
-fn parse_xml(content: &str) -> Option<Document<'_>> {
-    Document::parse_with_options(
-        content,
-        ParsingOptions {
-            allow_dtd: true,
-            ..Default::default()
-        },
-    )
-    .ok()
-}
-
-fn is_tag(node: Node<'_, '_>, name: &str) -> bool {
-    node.is_element() && node.tag_name().name() == name
-}
-
-fn has_any_ancestor(node: Node<'_, '_>, names: &[&str]) -> bool {
-    let mut cur = node.parent();
-    while let Some(parent) = cur {
-        if parent.is_element() && names.contains(&parent.tag_name().name()) {
-            return true;
-        }
-        cur = parent.parent();
-    }
-    false
-}
+use super::{
+    parse_version_string,
+    xml::{expand_props, has_any_ancestor, is_tag, parse_xml},
+    DetectedVersionSpec, ManifestMetadata,
+};
 
 fn load_ant_properties_file(content: &str, props: &mut BTreeMap<String, String>) {
     for raw_line in content.lines() {

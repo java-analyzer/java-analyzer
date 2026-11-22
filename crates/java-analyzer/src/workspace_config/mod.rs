@@ -10,6 +10,7 @@ mod maven;
 mod scan;
 mod toml_config;
 mod versions;
+mod xml;
 
 #[cfg(test)]
 mod tests;
@@ -535,24 +536,6 @@ pub(super) struct ManifestMetadata {
     pub(super) maven_managed_versions: BTreeMap<(String, String), String>,
     pub(super) maven_test_release: Option<Release>,
     pub(super) maven_preview: bool,
-}
-
-pub(super) fn expand_props(input: &str, props: &BTreeMap<String, String>) -> String {
-    let mut result = input.to_string();
-    for _ in 0..4 {
-        let mut changed = false;
-        for (k, v) in props {
-            let needle = format!("${{{k}}}");
-            if result.contains(&needle) {
-                result = result.replace(&needle, v);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    result
 }
 
 fn introspect_manifests(
