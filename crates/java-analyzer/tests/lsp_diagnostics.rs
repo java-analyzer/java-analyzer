@@ -1,6 +1,6 @@
 mod common;
 
-use common::{shutdown, start_server, URI};
+use common::{URI, shutdown, start_server};
 use serde_json::json;
 
 const PUBLISH: &str = "textDocument/publishDiagnostics";

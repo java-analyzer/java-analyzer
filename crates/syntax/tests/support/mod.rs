@@ -111,8 +111,8 @@ pub fn parse_cases(text: &str) -> Result<Vec<Case>, String> {
             match lines.get(i) {
                 None => {
                     return Err(format!(
-                    "case {title:?} (line {header_line}): missing '---' separator after the source"
-                ))
+                        "case {title:?} (line {header_line}): missing '---' separator after the source"
+                    ));
                 }
                 Some(l) if is_separator(l) => {
                     i += 1;
@@ -303,10 +303,7 @@ impl PairCase {
         let Some(comment) = first_line.trim_start().strip_prefix("//") else {
             return syntax::LanguageLevel::latest();
         };
-        let words: Vec<&str> = comment
-            .trim_start_matches('-')
-            .split_whitespace()
-            .collect();
+        let words: Vec<&str> = comment.trim_start_matches('-').split_whitespace().collect();
         if words
             .iter()
             .all(|w| *w == "preview" || w.starts_with("release="))

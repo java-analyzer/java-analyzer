@@ -39,10 +39,10 @@ pub(super) fn has_any_ancestor(node: Node<'_, '_>, names: &[&str]) -> bool {
 pub(super) fn child_text(node: Node<'_, '_>) -> String {
     let mut out = String::new();
     for child in node.children() {
-        if child.is_text() {
-            if let Some(t) = child.text() {
-                out.push_str(t);
-            }
+        if child.is_text()
+            && let Some(t) = child.text()
+        {
+            out.push_str(t);
         }
     }
     out.trim().to_string()

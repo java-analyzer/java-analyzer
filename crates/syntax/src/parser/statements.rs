@@ -1,13 +1,13 @@
 //! Statement grammar (milestone M2b, see `docs/specs/0002-java-syntax-subset.md`).
 
 use super::{
+    CompletedMarker, Parser,
     expressions::{expr, is_pattern_ahead, pattern},
     grammar::{
         binding_name, dims, is_modifier_kw, is_primitive_kw, local_variable_declarator, modifiers,
         name, name_ref, type_, type_decl_kind, type_decl_rest,
     },
-    lookahead::{skip_parens, skip_type, MAX_SCAN},
-    CompletedMarker, Parser,
+    lookahead::{MAX_SCAN, skip_parens, skip_type},
 };
 use crate::{
     language_level::SWITCH_EXPRESSIONS,

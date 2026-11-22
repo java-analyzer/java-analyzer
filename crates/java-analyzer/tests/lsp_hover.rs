@@ -1,7 +1,7 @@
 mod common;
 
 use common::{shutdown, start_server};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[test]
 fn hover_on_identifier_after_open() {
@@ -9,7 +9,10 @@ fn hover_on_identifier_after_open() {
     client.open("class Main { }");
 
     let result = client.hover(0, 7);
-    assert_eq!(result["contents"]["value"], json!("```java\nclass Main\n```"));
+    assert_eq!(
+        result["contents"]["value"],
+        json!("```java\nclass Main\n```")
+    );
 
     shutdown(client, handle);
 }
@@ -41,7 +44,10 @@ fn hover_falls_back_for_keyword_and_unresolved_identifier() {
     );
 
     let unresolved = client.hover(0, 13);
-    assert_eq!(unresolved["contents"]["value"], json!("Identifier `String`"));
+    assert_eq!(
+        unresolved["contents"]["value"],
+        json!("Identifier `String`")
+    );
 
     shutdown(client, handle);
 }

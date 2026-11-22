@@ -2,7 +2,7 @@
 
 mod support;
 
-use support::{line_col, Case};
+use support::{Case, line_col};
 use syntax::lexer::lex_with_errors;
 
 fn render(case: &Case) -> Vec<String> {

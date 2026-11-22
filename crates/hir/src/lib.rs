@@ -14,21 +14,21 @@ pub use item_tree::{
     AstId, AstIdMap, AstRange, FileItemTree, ImportId, ImportTree, MemberId, MemberItem, TypeId,
     TypeItem,
 };
-pub use resolve::{resolve_at_offset, LocalKind, ResolvedSymbol, ResolvedSymbolKind, SymbolDetail};
+pub use resolve::{LocalKind, ResolvedSymbol, ResolvedSymbolKind, SymbolDetail, resolve_at_offset};
 pub use smol_str::SmolStr;
 pub use symbols::{
     FileSymbols, ImportDecl, ImportKind, MemberKind, MemberSymbol, ModuleIndex, ParamSummary,
     TypeKind, TypeSymbol, WorkspaceIndex,
 };
 pub use syntax::{
-    parse_shebang_level, LanguageLevel, Parse, Release, SyntaxError, SyntaxNode, TextRange,
-    TextSize,
+    LanguageLevel, Parse, Release, SyntaxError, SyntaxNode, TextRange, TextSize,
+    parse_shebang_level,
 };
 pub use workspace::{
-    extract_file_header, infer_workspace_layout, infer_workspace_layout_from_sources,
-    is_path_within, normalize_rel_path, DeltaSet, FileHeader, ModuleData, ModuleDelta,
-    ModuleDependency, ModuleHeader, ModuleId, ModuleTarget, PackageMismatch, ResourceRoot,
-    ResourceRootId, RootScope, SourceRoot, SourceRootId, WorkspaceDelta, WorkspaceLayout,
+    DeltaSet, FileHeader, ModuleData, ModuleDelta, ModuleDependency, ModuleHeader, ModuleId,
+    ModuleTarget, PackageMismatch, ResourceRoot, ResourceRootId, RootScope, SourceRoot,
+    SourceRootId, WorkspaceDelta, WorkspaceLayout, extract_file_header, infer_workspace_layout,
+    infer_workspace_layout_from_sources, is_path_within, normalize_rel_path,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -86,8 +86,10 @@ fn extract_symbols(db: &dyn salsa::Database, file: SourceFile) -> Arc<FileSymbol
 #[salsa::tracked]
 fn build_module_index_query(db: &dyn salsa::Database, module: ModuleFiles) -> Arc<ModuleIndex> {
     let files = module.files(db);
-    let per_file: Vec<Arc<FileItemTree>> =
-        files.iter().map(|&f| file_item_tree(db, f).clone()).collect();
+    let per_file: Vec<Arc<FileItemTree>> = files
+        .iter()
+        .map(|&f| file_item_tree(db, f).clone())
+        .collect();
     Arc::new(symbols::build_module_index(&per_file))
 }
 
@@ -261,11 +263,8 @@ impl RootDatabase {
         for module in module_inputs {
             let current = module.files(self);
             if current.contains(&removed) {
-                let filtered: Vec<SourceFile> = current
-                    .iter()
-                    .copied()
-                    .filter(|&f| f != removed)
-                    .collect();
+                let filtered: Vec<SourceFile> =
+                    current.iter().copied().filter(|&f| f != removed).collect();
                 module.set_files(self).to(Arc::new(filtered));
             }
         }
@@ -431,7 +430,11 @@ public class Outer<T> {
         assert_eq!(syms.imports[4].path, vec!["java", "base"]);
 
         // LocalClass inside `greet` must be excluded from `syms.types`.
-        let fqns: Vec<&str> = syms.types.iter().map(|t| t.qualified_name.as_str()).collect();
+        let fqns: Vec<&str> = syms
+            .types
+            .iter()
+            .map(|t| t.qualified_name.as_str())
+            .collect();
         assert_eq!(
             fqns,
             vec![
@@ -709,10 +712,7 @@ public class App {
         let qual_stat_off = cursor(app, "/*qual_static*/com.model.Item.Nested.");
         let qual_stat = resolve_at_offset(&db, app_id, qual_stat_off).unwrap();
         assert_eq!(qual_stat.kind, ResolvedSymbolKind::Field);
-        assert_eq!(
-            qual_stat.qualified_name,
-            "com.model.Item.Nested.NESTED_VAL"
-        );
+        assert_eq!(qual_stat.qualified_name, "com.model.Item.Nested.NESTED_VAL");
     }
 
     #[test]
@@ -1247,7 +1247,10 @@ class Caller {
         let f0 = FileId(1);
         let f1 = FileId(2);
 
-        db.set_file_text(f0, Arc::new("package m0; public class Alpha {}".to_string()));
+        db.set_file_text(
+            f0,
+            Arc::new("package m0; public class Alpha {}".to_string()),
+        );
         db.set_file_text(f1, Arc::new("package m1; public class Beta {}".to_string()));
         db.set_workspace_modules(vec![
             (ModuleId(0), Arc::new(vec![f0])),

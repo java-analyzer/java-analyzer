@@ -100,14 +100,18 @@ fn detects_build_and_release_conflicts_and_disambiguates_via_tier1_or_reconcile(
 
     let probe = probe_workspace(tmp.path());
     assert_eq!(probe.conflicts.len(), 2);
-    assert!(probe
-        .conflicts
-        .iter()
-        .any(|c| matches!(c, Conflict::BuildTool(_))));
-    assert!(probe
-        .conflicts
-        .iter()
-        .any(|c| matches!(c, Conflict::Release(_))));
+    assert!(
+        probe
+            .conflicts
+            .iter()
+            .any(|c| matches!(c, Conflict::BuildTool(_)))
+    );
+    assert!(
+        probe
+            .conflicts
+            .iter()
+            .any(|c| matches!(c, Conflict::Release(_)))
+    );
 
     // Reconciling external version files updates .java-version and pom.xml to 21
     let modified = reconcile_version_conflict(tmp.path(), Release::JAVA_21);
@@ -162,10 +166,12 @@ dependencies = { include = ["com.google.guava:guava:33.3.1-jre", "github:google/
     let root_mod = &probe.layout.modules[0];
     assert_eq!(root_mod.rel_path, ".");
     assert!(root_mod.sources.iter().any(|s| s.rel_path == "src"));
-    assert!(root_mod
-        .sources
-        .iter()
-        .any(|s| s.rel_path == "generated/src"));
+    assert!(
+        root_mod
+            .sources
+            .iter()
+            .any(|s| s.rel_path == "generated/src")
+    );
     assert!(
         root_mod.resources.iter().any(|r| r.rel_path == "assets"),
         "assets/ containing META-INF/MANIFEST.MF should be inferred as a ResourceRoot"
@@ -278,10 +284,12 @@ fn maven_pom_strips_comments_expands_properties_and_handles_dependency_managemen
 
     let root_mod = &probe.layout.modules[0];
     assert!(root_mod.sources.iter().any(|s| s.rel_path == "custom/src"));
-    assert!(root_mod
-        .sources
-        .iter()
-        .any(|s| s.rel_path == "custom/test" && s.scope == RootScope::Test));
+    assert!(
+        root_mod
+            .sources
+            .iter()
+            .any(|s| s.rel_path == "custom/test" && s.scope == RootScope::Test)
+    );
 
     // Managed version fallback & property expansion
     assert!(root_mod.dependencies.contains(&ModuleDependency::Maven {
@@ -337,7 +345,10 @@ fn scan_ignores_site_resources_and_skips_java_fixtures_inside_resource_roots() {
         "package fixtures;\npublic class Template {}\n",
     );
     tmp.write("src/site/resources/images/logo.png", "png");
-    tmp.write("src/site/resources/SiteSample.java", "class SiteSample {}\n");
+    tmp.write(
+        "src/site/resources/SiteSample.java",
+        "class SiteSample {}\n",
+    );
     tmp.write("docs/resources/guide.md", "# guide\n");
     tmp.write(
         "spi/resources/META-INF/services/com.example.Spi",
@@ -346,15 +357,21 @@ fn scan_ignores_site_resources_and_skips_java_fixtures_inside_resource_roots() {
 
     let probe = probe_workspace(tmp.path());
     // Only real Java sources are collected; fixtures in conventional resource roots and src/site are skipped.
-    assert!(probe
-        .file_paths
-        .contains_key("src/main/java/com/example/resources/ResourceHelper.java"));
-    assert!(!probe
-        .file_paths
-        .contains_key("src/test/resources/fixtures/Template.java"));
-    assert!(!probe
-        .file_paths
-        .contains_key("src/site/resources/SiteSample.java"));
+    assert!(
+        probe
+            .file_paths
+            .contains_key("src/main/java/com/example/resources/ResourceHelper.java")
+    );
+    assert!(
+        !probe
+            .file_paths
+            .contains_key("src/test/resources/fixtures/Template.java")
+    );
+    assert!(
+        !probe
+            .file_paths
+            .contains_key("src/site/resources/SiteSample.java")
+    );
 
     let root_mod = probe.layout.module_by_path(".").unwrap();
     let res_paths: Vec<(&str, RootScope)> = root_mod
@@ -371,10 +388,12 @@ fn scan_ignores_site_resources_and_skips_java_fixtures_inside_resource_roots() {
         ]
     );
     // Package `com.example.resources` was NOT misclassified as a resource root
-    assert!(root_mod
-        .sources
-        .iter()
-        .any(|s| s.rel_path == "src/main/java" && s.scope == RootScope::Main));
+    assert!(
+        root_mod
+            .sources
+            .iter()
+            .any(|s| s.rel_path == "src/main/java" && s.scope == RootScope::Main)
+    );
 }
 
 #[test]
@@ -412,7 +431,9 @@ fn meta_inf_dir_allows_java_sources_while_conventional_resources_skip_them() {
         "root META-INF/ must not skip workspace .java sources"
     );
     assert!(
-        !probe.file_paths.contains_key("src/test/resources/Fixture.java"),
+        !probe
+            .file_paths
+            .contains_key("src/test/resources/Fixture.java"),
         "conventional src/test/resources/ must continue skipping .java fixtures"
     );
 
@@ -547,10 +568,12 @@ fn maven_pom_ignores_build_reporting_and_profile_plugin_dependencies() {
 
     let probe = probe_workspace(tmp.path());
     let root_mod = probe.layout.module_by_path(".").unwrap();
-    assert!(root_mod
-        .sources
-        .iter()
-        .any(|s| s.rel_path == "custom/src" && s.scope == RootScope::Main));
+    assert!(
+        root_mod
+            .sources
+            .iter()
+            .any(|s| s.rel_path == "custom/src" && s.scope == RootScope::Main)
+    );
     assert!(root_mod.dependencies.contains(&ModuleDependency::Maven {
         group: "com.google.guava".to_string(),
         artifact: "guava".to_string(),
@@ -704,7 +727,11 @@ dependencies = { exclude = ["com.example:excluded-dep"] }
     );
 
     let probe = probe_workspace(tmp.path());
-    assert!(probe.conflicts.is_empty(), "conflicts: {:?}", probe.conflicts);
+    assert!(
+        probe.conflicts.is_empty(),
+        "conflicts: {:?}",
+        probe.conflicts
+    );
     assert_eq!(
         probe.resolved_level,
         LanguageLevel::new(Release::JAVA_8, false)
@@ -782,24 +809,30 @@ dependencies = { exclude = ["com.example:excluded-dep"] }
     );
 
     assert_eq!(
-        probe.language_level_for_path(&tmp.path().join("core/src/main/java/com/example/core/Core.java")),
+        probe.language_level_for_path(
+            &tmp.path()
+                .join("core/src/main/java/com/example/core/Core.java")
+        ),
         LanguageLevel::new(Release::JAVA_8, false)
     );
     assert_eq!(
         probe.language_level_for_path(
-            &tmp.path().join("core/src/test/java/com/example/core/CoreTest.java")
+            &tmp.path()
+                .join("core/src/test/java/com/example/core/CoreTest.java")
         ),
         LanguageLevel::new(Release::JAVA_17, false)
     );
     assert_eq!(
         probe.language_level_for_path(
-            &tmp.path().join("modern/src/main/java/com/example/modern/Modern.java")
+            &tmp.path()
+                .join("modern/src/main/java/com/example/modern/Modern.java")
         ),
         LanguageLevel::new(Release::JAVA_17, false)
     );
     assert_eq!(
         probe.language_level_for_path(
-            &tmp.path().join("modern/src/test/java/com/example/modern/ModernTest.java")
+            &tmp.path()
+                .join("modern/src/test/java/com/example/modern/ModernTest.java")
         ),
         LanguageLevel::new(Release::JAVA_17, false)
     );
@@ -849,7 +882,9 @@ fn maven_submodule_expands_project_parent_properties_in_dependencies() {
         Some("com.example.corp")
     );
     assert_eq!(
-        sub_props.get("project.parent.artifactId").map(String::as_str),
+        sub_props
+            .get("project.parent.artifactId")
+            .map(String::as_str),
         Some("corp-parent")
     );
     assert_eq!(
@@ -919,7 +954,11 @@ fn maven_test_release_tag_and_profile_test_compile_execution() {
         Some(LanguageLevel::new(Release::JAVA_17, false))
     );
     assert_eq!(
-        probe_tag.language_level_for_path(&tmp_tag.path().join("src/test/java/com/example/AppTest.java")),
+        probe_tag.language_level_for_path(
+            &tmp_tag
+                .path()
+                .join("src/test/java/com/example/AppTest.java")
+        ),
         LanguageLevel::new(Release::JAVA_17, false)
     );
 
@@ -986,7 +1025,11 @@ fn maven_test_release_tag_and_profile_test_compile_execution() {
         Some(LanguageLevel::new(Release::JAVA_17, false))
     );
     assert_eq!(
-        probe_prof.language_level_for_path(&tmp_prof.path().join("src/test/java/com/example/AppTest.java")),
+        probe_prof.language_level_for_path(
+            &tmp_prof
+                .path()
+                .join("src/test/java/com/example/AppTest.java")
+        ),
         LanguageLevel::new(Release::JAVA_17, false)
     );
 }
@@ -1053,19 +1096,25 @@ fn skips_java_fixtures_inside_noncompilable_resource_dirs() {
 
     let probe_mixed = probe_workspace(tmp_mixed.path());
     assert_eq!(probe_mixed.file_paths.len(), 1);
-    assert!(probe_mixed
-        .file_paths
-        .contains_key("src/main/java/com/example/App.java"));
-    assert!(probe_mixed
-        .layout
-        .modules
-        .iter()
-        .all(|m| m.module_name.is_none()));
-    assert!(probe_mixed
-        .layout
-        .modules
-        .iter()
-        .all(|m| m.resources.is_empty()));
+    assert!(
+        probe_mixed
+            .file_paths
+            .contains_key("src/main/java/com/example/App.java")
+    );
+    assert!(
+        probe_mixed
+            .layout
+            .modules
+            .iter()
+            .all(|m| m.module_name.is_none())
+    );
+    assert!(
+        probe_mixed
+            .layout
+            .modules
+            .iter()
+            .all(|m| m.resources.is_empty())
+    );
 }
 
 #[test]
@@ -1111,7 +1160,11 @@ already.set=99
     );
 
     let probe = probe_workspace(tmp.path());
-    assert!(probe.conflicts.is_empty(), "conflicts: {:?}", probe.conflicts);
+    assert!(
+        probe.conflicts.is_empty(),
+        "conflicts: {:?}",
+        probe.conflicts
+    );
     assert_eq!(probe.resolved_build, BuildToolKind::Ant);
     assert_eq!(
         probe.resolved_level,
@@ -1214,10 +1267,7 @@ fn ant_fileset_scoped_to_path_and_classpath_and_ignores_macrodef_placeholders() 
         root_mod.dependencies
     );
     assert!(
-        !root_mod
-            .sources
-            .iter()
-            .any(|s| s.rel_path.contains("@{")),
+        !root_mod.sources.iter().any(|s| s.rel_path.contains("@{")),
         "macrodef @{{...}} srcdir must be ignored: {:?}",
         root_mod.sources
     );
@@ -1241,10 +1291,7 @@ fn scan_respects_gitignore_and_ignore_files_while_keeping_hidden_sources() {
         "scratch/Keep.java",
         "package scratch;\npublic class Keep {}\n",
     );
-    tmp.write(
-        ".bach/src/run.bach/Main.java",
-        "public class Main {}\n",
-    );
+    tmp.write(".bach/src/run.bach/Main.java", "public class Main {}\n");
 
     let probe = probe_workspace(tmp.path());
     assert!(
@@ -1265,7 +1312,9 @@ fn scan_respects_gitignore_and_ignore_files_while_keeping_hidden_sources() {
         probe.file_paths
     );
     assert!(
-        probe.file_paths.contains_key(".bach/src/run.bach/Main.java"),
+        probe
+            .file_paths
+            .contains_key(".bach/src/run.bach/Main.java"),
         "intentional hidden dot-directory sources must still be scanned: {:?}",
         probe.file_paths
     );
@@ -1380,13 +1429,15 @@ fn xml_tags_with_attributes_namespaces_doctype_and_comments_parse_cleanly() {
         ant_probe.resolved_level,
         LanguageLevel::new(Release::JAVA_21, true)
     );
-    assert!(ant_probe.layout.modules[0]
-        .dependencies
-        .contains(&ModuleDependency::Maven {
-            group: "com.google.guava".to_string(),
-            artifact: "guava".to_string(),
-            version: "33.2.1-jre".to_string(),
-            classifier: None,
-            scope: RootScope::Main,
-        }));
+    assert!(
+        ant_probe.layout.modules[0]
+            .dependencies
+            .contains(&ModuleDependency::Maven {
+                group: "com.google.guava".to_string(),
+                artifact: "guava".to_string(),
+                version: "33.2.1-jre".to_string(),
+                classifier: None,
+                scope: RootScope::Main,
+            })
+    );
 }

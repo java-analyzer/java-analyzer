@@ -4,7 +4,7 @@
 //! Every scan stops after [`MAX_SCAN`] tokens, which keeps the cost of a single decision bounded
 //! and keeps pathological input (`a<a<a<a<...`) from looking like a parser that is stuck.
 
-use super::{grammar::is_primitive_kw, Parser};
+use super::{Parser, grammar::is_primitive_kw};
 use crate::syntax_kind::SyntaxKind::*;
 
 /// How far ahead a scan looks at most.
@@ -51,13 +51,12 @@ pub(super) fn skip_type(p: &Parser<'_, '_>, mut n: usize) -> Option<usize> {
             if p.nth_at(n, L_ANGLE) {
                 n = skip_type_args(p, n)?;
             }
-            if p.nth_at(n, DOT) {
-                if let Some(after_annos) = skip_annotations(p, n + 1) {
-                    if p.nth_at(after_annos, IDENT) {
-                        n = after_annos;
-                        continue;
-                    }
-                }
+            if p.nth_at(n, DOT)
+                && let Some(after_annos) = skip_annotations(p, n + 1)
+                && p.nth_at(after_annos, IDENT)
+            {
+                n = after_annos;
+                continue;
             }
             break;
         }

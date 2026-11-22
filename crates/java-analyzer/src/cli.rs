@@ -3,9 +3,9 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
-use ide::{normalize_rel_path, Release};
+use ide::{Release, normalize_rel_path};
 
-use crate::workspace_config::{parse_build_tool_kind, parse_version_string, BuildToolKind};
+use crate::workspace_config::{BuildToolKind, parse_build_tool_kind, parse_version_string};
 
 #[derive(Debug, Parser)]
 #[command(

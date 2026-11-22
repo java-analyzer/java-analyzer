@@ -2,7 +2,7 @@ use std::path::Path;
 
 use ide::{ModuleDependency, RootScope};
 
-use super::{parse_version_string, DetectedVersionSpec, ManifestMetadata};
+use super::{DetectedVersionSpec, ManifestMetadata, parse_version_string};
 
 pub(super) fn introspect_gradle_build(
     content: &str,
@@ -49,9 +49,10 @@ pub(super) fn introspect_gradle_build(
     // Extract compile-time dependencies (implementation, api, compileOnly, testImplementation, testCompileOnly)
     for line in content.lines() {
         let trimmed = line.trim();
-        let (scope, after_conf) = if let Some(r) =
-            strip_gradle_conf(trimmed, &["implementation", "api", "compileOnly", "compile"])
-        {
+        let (scope, after_conf) = if let Some(r) = strip_gradle_conf(
+            trimmed,
+            &["implementation", "api", "compileOnly", "compile"],
+        ) {
             (RootScope::Main, r)
         } else if let Some(r) = strip_gradle_conf(
             trimmed,

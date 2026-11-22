@@ -1,12 +1,11 @@
 use std::{collections::BTreeMap, path::Path};
 
-use ide::{normalize_rel_path, ModuleDependency, Release, RootScope};
+use ide::{ModuleDependency, Release, RootScope, normalize_rel_path};
 use roxmltree::{Document, Node};
 
 use super::{
-    parse_version_string,
+    DetectedVersionSpec, ManifestMetadata, parse_version_string,
     xml::{child_text, direct_child_text, expand_props, has_any_ancestor, is_tag, parse_xml},
-    DetectedVersionSpec, ManifestMetadata,
 };
 
 #[derive(Default)]

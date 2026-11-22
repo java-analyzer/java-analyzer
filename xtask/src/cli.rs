@@ -109,10 +109,9 @@ fn source_ids(sources: &[(Kind, PathBuf)]) -> Vec<String> {
 
 pub fn to_config(args: &ConfigArgs) -> Config {
     let ids = source_ids(&args.sources);
-    let known_divergences = conformance::parse_known_divergences(include_str!(
-        "../conformance/known-divergences.toml"
-    ))
-    .expect("embedded known-divergences.toml is valid");
+    let known_divergences =
+        conformance::parse_known_divergences(include_str!("../conformance/known-divergences.toml"))
+            .expect("embedded known-divergences.toml is valid");
     Config {
         sources: args
             .sources

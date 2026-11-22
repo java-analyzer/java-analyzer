@@ -10,7 +10,7 @@ use std::mem;
 use rowan::{GreenNode, GreenNodeBuilder, Language, TextRange, TextSize};
 
 use super::{Event, TOMBSTONE};
-use crate::{lexer::Token, syntax_kind::SyntaxKind, JavaLanguage, SyntaxError};
+use crate::{JavaLanguage, SyntaxError, lexer::Token, syntax_kind::SyntaxKind};
 
 pub(crate) fn build(
     text: &str,

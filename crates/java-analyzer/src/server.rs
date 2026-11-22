@@ -3,29 +3,29 @@ use std::{
     borrow::Cow,
     collections::BTreeMap,
     fs,
-    panic::{catch_unwind, AssertUnwindSafe},
+    panic::{AssertUnwindSafe, catch_unwind},
     path::Path,
     sync::Arc,
     thread::{self, JoinHandle},
 };
 
 use ide::{
-    is_path_within, normalize_rel_path, Analysis, AnalysisHost, Cancellable, Cancelled, FileId,
-    LanguageLevel, ModuleId,
+    Analysis, AnalysisHost, Cancellable, Cancelled, FileId, LanguageLevel, ModuleId,
+    is_path_within, normalize_rel_path,
 };
 use line_index::LineIndex;
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::{
-    notification::{
-        DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
-        PublishDiagnostics,
-    },
-    request::{DocumentSymbolRequest, GotoDefinition, HoverRequest, Request as _},
     DiagnosticSeverity, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
     HoverProviderCapability, InitializeParams, Location, MarkupContent, MarkupKind, OneOf,
     PublishDiagnosticsParams, ServerCapabilities, SymbolKind, TextDocumentSyncCapability,
     TextDocumentSyncKind, Uri,
+    notification::{
+        DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
+        PublishDiagnostics,
+    },
+    request::{DocumentSymbolRequest, GotoDefinition, HoverRequest, Request as _},
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -33,7 +33,7 @@ use crate::{
     convert::{
         path_to_uri, position_to_offset_with_index, text_range_to_range_with_index, uri_to_path,
     },
-    workspace_config::{parse_shebang_level, probe_workspace, WorkspaceProbe},
+    workspace_config::{WorkspaceProbe, parse_shebang_level, probe_workspace},
 };
 
 /// Maximum number of concurrent read-only LSP request worker threads.
@@ -243,13 +243,13 @@ impl GlobalState {
             return;
         };
 
-        if let Some(path) = uri_to_path(uri) {
-            if let Ok(disk_text) = fs::read_to_string(&path) {
-                let level = self.language_level_for(uri, &disk_text);
-                self.host.set_file_language_level(file_id, level);
-                self.set_file_text(file_id, Arc::new(disk_text));
-                return;
-            }
+        if let Some(path) = uri_to_path(uri)
+            && let Ok(disk_text) = fs::read_to_string(&path)
+        {
+            let level = self.language_level_for(uri, &disk_text);
+            self.host.set_file_language_level(file_id, level);
+            self.set_file_text(file_id, Arc::new(disk_text));
+            return;
         }
 
         // Non-disk / deleted file: drop it from the workspace index and clean up its database entry.
@@ -528,9 +528,7 @@ fn finish_pending_probe(
 fn notification_needs_workspace(method: &str) -> bool {
     matches!(
         method,
-        DidOpenTextDocument::METHOD
-            | DidChangeTextDocument::METHOD
-            | DidCloseTextDocument::METHOD
+        DidOpenTextDocument::METHOD | DidChangeTextDocument::METHOD | DidCloseTextDocument::METHOD
     )
 }
 
@@ -549,10 +547,10 @@ pub fn run(connection: Connection) -> anyhow::Result<()> {
                 .and_then(|folders| folders.first())
                 .map(|f| &f.uri)
                 .or(init_params.root_uri.as_ref());
-            if let Some(uri) = workspace_url {
-                if let Some(dir) = uri_to_path(uri) {
-                    pending_probe = Some(thread::spawn(move || probe_workspace(&dir)));
-                }
+            if let Some(uri) = workspace_url
+                && let Some(dir) = uri_to_path(uri)
+            {
+                pending_probe = Some(thread::spawn(move || probe_workspace(&dir)));
             }
         }
         Err(err) => {
@@ -786,7 +784,10 @@ mod tests {
         let dir = TestDir::new();
         dir.write(".java-version", "17\n");
         dir.write(".sdkmanrc", "java=21.0.2-tem\n");
-        dir.write("src/com/example/package-info.java", "package com.example;\n");
+        dir.write(
+            "src/com/example/package-info.java",
+            "package com.example;\n",
+        );
         let bad_text = "package wrong.pkg;\npublic class Broken {}\n";
         let bad_file = dir.write("src/com/example/Broken.java", bad_text);
 
@@ -800,7 +801,8 @@ mod tests {
                 .diagnostics
                 .iter()
                 .any(|d| d.severity == Some(DiagnosticSeverity::WARNING)
-                    && d.message.contains("Conflicting Java release specifications")),
+                    && d.message
+                        .contains("Conflicting Java release specifications")),
             "Expected release conflict warning diagnostic, got: {:?}",
             pub_diags.diagnostics
         );
@@ -818,7 +820,10 @@ mod tests {
     #[test]
     fn package_mismatch_updates_live_without_disk_writes_or_reprobing() {
         let dir = TestDir::new();
-        let pkg_info = dir.write("src/com/example/package-info.java", "package com.example;\n");
+        let pkg_info = dir.write(
+            "src/com/example/package-info.java",
+            "package com.example;\n",
+        );
         let bad_text = "package wrong.pkg;\npublic class Live {}\n";
         let file_path = dir.write("src/com/example/Live.java", bad_text);
 
@@ -842,7 +847,10 @@ mod tests {
         );
 
         // 2. Fix package in memory (disk still has `wrong.pkg`) -> diagnostic clears immediately.
-        state.set_text(&uri, "package com.example;\npublic class Live {}\n".to_string());
+        state.set_text(
+            &uri,
+            "package com.example;\npublic class Live {}\n".to_string(),
+        );
         let diags = state.diagnostics(&uri, Some(2));
         assert!(
             diags.diagnostics.is_empty(),
@@ -851,7 +859,10 @@ mod tests {
         );
 
         // 3. Introduce a new mismatch in memory -> diagnostic reflects the live buffer.
-        state.set_text(&uri, "package other.bad;\npublic class Live {}\n".to_string());
+        state.set_text(
+            &uri,
+            "package other.bad;\npublic class Live {}\n".to_string(),
+        );
         let diags = state.diagnostics(&uri, Some(3));
         assert!(
             diags.diagnostics.iter().any(|d| {
@@ -878,7 +889,10 @@ mod tests {
         assert!(state.line_indexes.contains_key(&temp_id));
 
         // Editing updates cached LineIndex.
-        state.set_text(&disk_uri, "class Disk {\n    int x;\n    int y;\n}\n".to_string());
+        state.set_text(
+            &disk_uri,
+            "class Disk {\n    int x;\n    int y;\n}\n".to_string(),
+        );
         assert_eq!(
             *state.line_indexes[&disk_id],
             LineIndex::new("class Disk {\n    int x;\n    int y;\n}\n")

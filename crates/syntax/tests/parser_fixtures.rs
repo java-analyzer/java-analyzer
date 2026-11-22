@@ -18,7 +18,7 @@
 mod support;
 
 use rowan::NodeOrToken;
-use support::{line_col, sexp::Sexp, PairCase};
+use support::{PairCase, line_col, sexp::Sexp};
 use syntax::SyntaxNode;
 
 fn node_to_sexp(node: &SyntaxNode, include_trivia: bool) -> Sexp {
@@ -122,10 +122,7 @@ fn every_feature_table_entry_is_gated_at_its_boundary_levels() {
             "pattern-matching-switch",
             "class A { void f(Object o) { switch (o) { case String s when true -> {} default -> {} } } }",
         ),
-        (
-            "unnamed-variables",
-            "class A { void f() { int _ = 1; } }",
-        ),
+        ("unnamed-variables", "class A { void f() { int _ = 1; } }"),
         ("module-imports", "import module java.base;\nclass A {}"),
         ("compact-source-files", "int count = 1;\nvoid main() {}"),
     ];
@@ -143,9 +140,14 @@ fn every_feature_table_entry_is_gated_at_its_boundary_levels() {
         let last_preview = feature.preview_in.last().copied().unwrap_or(stable);
 
         // Before the preview window: requires stable_in.
-        let before = syntax::LanguageLevel::new(syntax::Release::new(first_preview.number() - 1), false);
+        let before =
+            syntax::LanguageLevel::new(syntax::Release::new(first_preview.number() - 1), false);
         let errors = syntax::parse_with_level(source, before).errors().to_vec();
-        let expected_before = format!("{} require language level {}", feature.plural, stable.number());
+        let expected_before = format!(
+            "{} require language level {}",
+            feature.plural,
+            stable.number()
+        );
         assert!(
             errors.iter().any(|e| e.message == expected_before),
             "{id} at {before:?}: expected {expected_before:?}, got {errors:?}"
@@ -185,7 +187,9 @@ fn every_feature_table_entry_is_gated_at_its_boundary_levels() {
 
         // At stable_in without preview: accepted.
         let at_stable = syntax::LanguageLevel::new(stable, false);
-        let errors_stable = syntax::parse_with_level(source, at_stable).errors().to_vec();
+        let errors_stable = syntax::parse_with_level(source, at_stable)
+            .errors()
+            .to_vec();
         assert!(
             errors_stable.is_empty(),
             "{id} at {at_stable:?}: expected no errors, got {errors_stable:?}"

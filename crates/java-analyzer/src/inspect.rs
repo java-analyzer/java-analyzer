@@ -11,7 +11,7 @@ use ide::{AnalysisHost, FileId, ModuleDependency, ModuleTarget};
 use crate::{
     cli::InspectArgs,
     configure::{format_build_specs, format_version_specs, render_module_tree, scope_label},
-    workspace_config::{build_tool_name, probe_workspace, Conflict, WorkspaceProbe},
+    workspace_config::{Conflict, WorkspaceProbe, build_tool_name, probe_workspace},
 };
 
 pub fn run(args: InspectArgs) -> io::Result<()> {
@@ -53,9 +53,8 @@ pub fn run_with_io<W: Write>(args: InspectArgs, out: &mut W) -> io::Result<()> {
         }
     }
 
-    let (indexed_packages, indexed_types) = analysis
-        .workspace_index_stats()
-        .map_err(io::Error::other)?;
+    let (indexed_packages, indexed_types) =
+        analysis.workspace_index_stats().map_err(io::Error::other)?;
 
     if args.json {
         render_inspect_json(
@@ -370,7 +369,10 @@ mod tests {
             text.contains("src/test/java [test] (1 .java file)"),
             "output:\n{text}"
         );
-        assert!(text.contains("src/main/resources [main]"), "output:\n{text}");
+        assert!(
+            text.contains("src/main/resources [main]"),
+            "output:\n{text}"
+        );
         assert!(
             text.contains("maven:com.google.guava:guava:33.2.1-jre [main]"),
             "output:\n{text}"

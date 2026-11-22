@@ -1,19 +1,17 @@
 use std::sync::Arc;
 
-use hir::{
-    DefDatabase, ResolvedSymbol, ResolvedSymbolKind, SourceDatabase, SymbolDetail,
-};
+use hir::{DefDatabase, ResolvedSymbol, ResolvedSymbolKind, SourceDatabase, SymbolDetail};
 use syntax::{
+    SyntaxNode,
     ext::{collapsed_text, name_child, type_child},
     syntax_kind::SyntaxKind::*,
-    SyntaxNode,
 };
 
 pub use hir::{
-    infer_workspace_layout_from_sources, is_path_within, normalize_rel_path, parse_shebang_level,
     Cancellable, Cancelled, DeltaSet, FileId, LanguageLevel, ModuleData, ModuleDelta,
     ModuleDependency, ModuleId, ModuleTarget, Release, ResourceRoot, RootScope, SourceRoot,
-    WorkspaceDelta, WorkspaceLayout,
+    WorkspaceDelta, WorkspaceLayout, infer_workspace_layout_from_sources, is_path_within,
+    normalize_rel_path, parse_shebang_level,
 };
 pub use syntax::TextRange;
 
@@ -506,7 +504,10 @@ public class App<E extends Number> {
         );
 
         let own_field_hover = hover(&db, app_id, cursor(app, "/*field*/")).unwrap();
-        assert_eq!(own_field_hover.content, "```java\nint com.app.App.count\n```");
+        assert_eq!(
+            own_field_hover.content,
+            "```java\nint com.app.App.count\n```"
+        );
     }
 
     #[test]
@@ -521,10 +522,7 @@ class C {
         let (db, file_id) = db_with(text);
 
         let h1 = hover(&db, file_id, cursor(text, "/*m1*/")).unwrap();
-        assert_eq!(
-            h1.content,
-            "```java\n@Anno(\"x\") String C.foo(int a)\n```"
-        );
+        assert_eq!(h1.content, "```java\n@Anno(\"x\") String C.foo(int a)\n```");
 
         let h2 = hover(&db, file_id, cursor(text, "/*m2*/")).unwrap();
         assert_eq!(
@@ -847,9 +845,9 @@ Method main (String[] args)
         );
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].severity, Severity::Error);
-        assert!(diags[0]
-            .message
-            .contains("declared package 'wrong.pkg' does not match package-info.java package 'com.example'"));
+        assert!(diags[0].message.contains(
+            "declared package 'wrong.pkg' does not match package-info.java package 'com.example'"
+        ));
     }
 
     #[test]
@@ -857,7 +855,10 @@ Method main (String[] args)
         let mut host = AnalysisHost::new();
         let file1 = FileId(1);
         let file2 = FileId(2);
-        host.set_file_text(file1, Arc::new("package p1;\nclass Before { int x; }".to_string()));
+        host.set_file_text(
+            file1,
+            Arc::new("package p1;\nclass Before { int x; }".to_string()),
+        );
         host.set_workspace_files(Arc::new(vec![file1]));
 
         let snap1 = host.analysis();
@@ -871,7 +872,10 @@ Method main (String[] args)
 
         // Mutating the host updates subsequent snapshots without invalidating results already
         // obtained from `snap1`.
-        host.set_file_text(file1, Arc::new("package p1;\nclass After { int y }".to_string()));
+        host.set_file_text(
+            file1,
+            Arc::new("package p1;\nclass After { int y }".to_string()),
+        );
         host.set_file_text(file2, Arc::new("package p2;\nclass Helper {}".to_string()));
         host.set_workspace_files(Arc::new(vec![file1, file2]));
 

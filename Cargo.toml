@@ -5,11 +5,11 @@ members = [
 ]
 # `xtask` is development tooling: plain `cargo build` / `cargo test` at the root skip it.
 default-members = ["crates/*"]
-resolver = "2"
+resolver = "3"
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 authors = ["Roland Tepp"]
 license = "MIT OR Apache-2.0"
 description = "A Java Language Server Protocol implementation in Rust"

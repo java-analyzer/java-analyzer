@@ -2,7 +2,7 @@ mod common;
 
 use common::TempWorkspace;
 use ide::{LanguageLevel, ModuleDependency, ModuleTarget, Release, RootScope};
-use java_analyzer::workspace_config::{probe_workspace, BuildToolKind, Conflict};
+use java_analyzer::workspace_config::{BuildToolKind, Conflict, probe_workspace};
 
 #[test]
 fn fixture_maven_single_module() {
@@ -72,7 +72,11 @@ fn fixture_maven_single_module() {
 
     let probe = probe_workspace(dir.path());
 
-    assert!(probe.conflicts.is_empty(), "conflicts: {:?}", probe.conflicts);
+    assert!(
+        probe.conflicts.is_empty(),
+        "conflicts: {:?}",
+        probe.conflicts
+    );
     assert!(
         probe.layout.package_mismatches.is_empty(),
         "package mismatches: {:?}",
@@ -88,14 +92,18 @@ fn fixture_maven_single_module() {
     let root_mod = &probe.layout.modules[0];
     assert_eq!(root_mod.rel_path, ".");
 
-    assert!(root_mod
-        .sources
-        .iter()
-        .any(|s| s.rel_path == "src/main/java" && s.scope == RootScope::Main));
-    assert!(root_mod
-        .sources
-        .iter()
-        .any(|s| s.rel_path == "src/test/java" && s.scope == RootScope::Test));
+    assert!(
+        root_mod
+            .sources
+            .iter()
+            .any(|s| s.rel_path == "src/main/java" && s.scope == RootScope::Main)
+    );
+    assert!(
+        root_mod
+            .sources
+            .iter()
+            .any(|s| s.rel_path == "src/test/java" && s.scope == RootScope::Test)
+    );
     assert!(
         !root_mod
             .sources
@@ -105,14 +113,18 @@ fn fixture_maven_single_module() {
         root_mod.sources
     );
 
-    assert!(root_mod
-        .resources
-        .iter()
-        .any(|r| r.rel_path == "src/main/resources" && r.scope == RootScope::Main));
-    assert!(root_mod
-        .resources
-        .iter()
-        .any(|r| r.rel_path == "src/test/resources" && r.scope == RootScope::Test));
+    assert!(
+        root_mod
+            .resources
+            .iter()
+            .any(|r| r.rel_path == "src/main/resources" && r.scope == RootScope::Main)
+    );
+    assert!(
+        root_mod
+            .resources
+            .iter()
+            .any(|r| r.rel_path == "src/test/resources" && r.scope == RootScope::Test)
+    );
     assert!(
         !root_mod
             .resources
@@ -168,7 +180,11 @@ fn fixture_jpms_multi_module() {
 
     let probe = probe_workspace(dir.path());
 
-    assert!(probe.conflicts.is_empty(), "conflicts: {:?}", probe.conflicts);
+    assert!(
+        probe.conflicts.is_empty(),
+        "conflicts: {:?}",
+        probe.conflicts
+    );
     assert!(
         probe.layout.package_mismatches.is_empty(),
         "package mismatches: {:?}",
@@ -188,14 +204,18 @@ fn fixture_jpms_multi_module() {
     assert_eq!(core_mod.module_name.as_deref(), Some("com.example.core"));
     assert_eq!(app_mod.module_name.as_deref(), Some("com.example.app"));
 
-    assert!(core_mod
-        .sources
-        .iter()
-        .any(|s| s.rel_path == "core/src/main/java" && s.scope == RootScope::Main));
-    assert!(app_mod
-        .sources
-        .iter()
-        .any(|s| s.rel_path == "app/src/main/java" && s.scope == RootScope::Main));
+    assert!(
+        core_mod
+            .sources
+            .iter()
+            .any(|s| s.rel_path == "core/src/main/java" && s.scope == RootScope::Main)
+    );
+    assert!(
+        app_mod
+            .sources
+            .iter()
+            .any(|s| s.rel_path == "app/src/main/java" && s.scope == RootScope::Main)
+    );
 
     assert!(app_mod.dependencies.contains(&ModuleDependency::Module {
         target: ModuleTarget::Workspace(core_mod.id),
@@ -241,7 +261,11 @@ fn fixture_gradle_kotlin_dsl() {
 
     let probe = probe_workspace(dir.path());
 
-    assert!(probe.conflicts.is_empty(), "conflicts: {:?}", probe.conflicts);
+    assert!(
+        probe.conflicts.is_empty(),
+        "conflicts: {:?}",
+        probe.conflicts
+    );
     assert!(
         probe.layout.package_mismatches.is_empty(),
         "package mismatches: {:?}",
@@ -255,14 +279,18 @@ fn fixture_gradle_kotlin_dsl() {
     assert_eq!(probe.layout.modules.len(), 1);
 
     let root_mod = &probe.layout.modules[0];
-    assert!(root_mod
-        .sources
-        .iter()
-        .any(|s| s.rel_path == "src/main/java" && s.scope == RootScope::Main));
-    assert!(root_mod
-        .sources
-        .iter()
-        .any(|s| s.rel_path == "src/test/java" && s.scope == RootScope::Test));
+    assert!(
+        root_mod
+            .sources
+            .iter()
+            .any(|s| s.rel_path == "src/main/java" && s.scope == RootScope::Main)
+    );
+    assert!(
+        root_mod
+            .sources
+            .iter()
+            .any(|s| s.rel_path == "src/test/java" && s.scope == RootScope::Test)
+    );
     assert!(root_mod.dependencies.contains(&ModuleDependency::Maven {
         group: "com.google.guava".to_string(),
         artifact: "guava".to_string(),
@@ -324,7 +352,11 @@ fn fixture_ant_and_ivy_pair() {
 
     let probe = probe_workspace(dir.path());
 
-    assert!(probe.conflicts.is_empty(), "conflicts: {:?}", probe.conflicts);
+    assert!(
+        probe.conflicts.is_empty(),
+        "conflicts: {:?}",
+        probe.conflicts
+    );
     assert!(
         probe.layout.package_mismatches.is_empty(),
         "package mismatches: {:?}",
@@ -337,14 +369,18 @@ fn fixture_ant_and_ivy_pair() {
     );
 
     let root_mod = &probe.layout.modules[0];
-    assert!(root_mod
-        .sources
-        .iter()
-        .any(|s| s.rel_path == "src" && s.scope == RootScope::Main));
-    assert!(root_mod
-        .sources
-        .iter()
-        .any(|s| s.rel_path == "test" && s.scope == RootScope::Test));
+    assert!(
+        root_mod
+            .sources
+            .iter()
+            .any(|s| s.rel_path == "src" && s.scope == RootScope::Main)
+    );
+    assert!(
+        root_mod
+            .sources
+            .iter()
+            .any(|s| s.rel_path == "test" && s.scope == RootScope::Test)
+    );
     assert!(root_mod.dependencies.contains(&ModuleDependency::Maven {
         group: "com.google.guava".to_string(),
         artifact: "guava".to_string(),
@@ -379,7 +415,11 @@ fn fixture_zero_config_jbang_compact_source() {
 
     let probe = probe_workspace(dir.path());
 
-    assert!(probe.conflicts.is_empty(), "conflicts: {:?}", probe.conflicts);
+    assert!(
+        probe.conflicts.is_empty(),
+        "conflicts: {:?}",
+        probe.conflicts
+    );
     assert!(
         probe.layout.package_mismatches.is_empty(),
         "package mismatches: {:?}",
@@ -394,10 +434,12 @@ fn fixture_zero_config_jbang_compact_source() {
 
     let root_mod = &probe.layout.modules[0];
     assert_eq!(root_mod.rel_path, ".");
-    assert!(root_mod
-        .sources
-        .iter()
-        .any(|s| s.rel_path == "." && s.scope == RootScope::Main));
+    assert!(
+        root_mod
+            .sources
+            .iter()
+            .any(|s| s.rel_path == "." && s.scope == RootScope::Main)
+    );
     assert!(root_mod.dependencies.contains(&ModuleDependency::Maven {
         group: "com.google.guava".to_string(),
         artifact: "guava".to_string(),
@@ -434,14 +476,18 @@ fn fixture_intentional_conflicts_and_tier1_disambiguation() {
     );
 
     let probe = probe_workspace(dir.path());
-    assert!(probe
-        .conflicts
-        .iter()
-        .any(|c| matches!(c, Conflict::BuildTool(_))));
-    assert!(probe
-        .conflicts
-        .iter()
-        .any(|c| matches!(c, Conflict::Release(_))));
+    assert!(
+        probe
+            .conflicts
+            .iter()
+            .any(|c| matches!(c, Conflict::BuildTool(_)))
+    );
+    assert!(
+        probe
+            .conflicts
+            .iter()
+            .any(|c| matches!(c, Conflict::Release(_)))
+    );
     assert_eq!(probe.layout.package_mismatches.len(), 1);
     assert_eq!(
         probe.layout.package_mismatches[0].path,
@@ -615,7 +661,11 @@ fn fixture_maven_multi_module_gson_style() {
 
     let probe = probe_workspace(dir.path());
 
-    assert!(probe.conflicts.is_empty(), "conflicts: {:?}", probe.conflicts);
+    assert!(
+        probe.conflicts.is_empty(),
+        "conflicts: {:?}",
+        probe.conflicts
+    );
     assert!(
         probe.layout.package_mismatches.is_empty(),
         "package mismatches: {:?}",
@@ -713,19 +763,23 @@ fn fixture_maven_multi_module_gson_style() {
     );
 
     assert_eq!(
-        probe.language_level_for_path(&dir.path().join("gson/src/main/java/com/google/gson/Gson.java")),
+        probe.language_level_for_path(
+            &dir.path()
+                .join("gson/src/main/java/com/google/gson/Gson.java")
+        ),
+        LanguageLevel::new(Release::JAVA_8, false)
+    );
+    assert_eq!(
+        probe
+            .language_level_for_path(&dir.path().join(
+                "gson/src/main/java-templates/com/google/gson/internal/GsonBuildConfig.java"
+            )),
         LanguageLevel::new(Release::JAVA_8, false)
     );
     assert_eq!(
         probe.language_level_for_path(
             &dir.path()
-                .join("gson/src/main/java-templates/com/google/gson/internal/GsonBuildConfig.java")
-        ),
-        LanguageLevel::new(Release::JAVA_8, false)
-    );
-    assert_eq!(
-        probe.language_level_for_path(
-            &dir.path().join("gson/src/test/java/com/google/gson/GsonTest.java")
+                .join("gson/src/test/java/com/google/gson/GsonTest.java")
         ),
         LanguageLevel::new(Release::JAVA_17, false)
     );

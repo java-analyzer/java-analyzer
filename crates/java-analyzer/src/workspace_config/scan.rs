@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, fs, path::Path};
 
 use ide::normalize_rel_path;
-use ignore::{overrides::OverrideBuilder, WalkBuilder};
+use ignore::{WalkBuilder, overrides::OverrideBuilder};
 
 /// Default fallback directory/path exclusions when scanning a workspace.
 const DEFAULT_IGNORED_GLOBS: &[&str] = &[
@@ -115,10 +115,9 @@ pub(super) fn scan_workspace_fs(
         } else if !in_skipped_root
             && name_str.ends_with(".java")
             && (entry.file_type().is_some_and(|ft| ft.is_file()) || path.is_file())
+            && let Ok(text) = fs::read_to_string(path)
         {
-            if let Ok(text) = fs::read_to_string(path) {
-                java_files.push((rel_norm, text));
-            }
+            java_files.push((rel_norm, text));
         }
     }
 }

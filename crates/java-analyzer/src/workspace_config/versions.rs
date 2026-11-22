@@ -12,15 +12,15 @@ pub(super) fn detect_version_specs(workspace_dir: &Path) -> Vec<DetectedVersionS
 
     // 1. .java-version
     let java_version_path = workspace_dir.join(".java-version");
-    if let Ok(content) = fs::read_to_string(&java_version_path) {
-        if let Some(release) = parse_version_string(&content) {
-            specs.push(DetectedVersionSpec {
-                source: ".java-version".to_string(),
-                path: java_version_path,
-                release,
-                preview: false,
-            });
-        }
+    if let Ok(content) = fs::read_to_string(&java_version_path)
+        && let Some(release) = parse_version_string(&content)
+    {
+        specs.push(DetectedVersionSpec {
+            source: ".java-version".to_string(),
+            path: java_version_path,
+            release,
+            preview: false,
+        });
     }
 
     // 2. .sdkmanrc
@@ -31,17 +31,16 @@ pub(super) fn detect_version_specs(workspace_dir: &Path) -> Vec<DetectedVersionS
             if line.starts_with('#') || line.is_empty() {
                 continue;
             }
-            if let Some((k, v)) = line.split_once('=') {
-                if k.trim() == "java" {
-                    if let Some(release) = parse_version_string(v) {
-                        specs.push(DetectedVersionSpec {
-                            source: ".sdkmanrc".to_string(),
-                            path: sdkman_path.clone(),
-                            release,
-                            preview: false,
-                        });
-                    }
-                }
+            if let Some((k, v)) = line.split_once('=')
+                && k.trim() == "java"
+                && let Some(release) = parse_version_string(v)
+            {
+                specs.push(DetectedVersionSpec {
+                    source: ".sdkmanrc".to_string(),
+                    path: sdkman_path.clone(),
+                    release,
+                    preview: false,
+                });
             }
         }
     }
@@ -55,17 +54,16 @@ pub(super) fn detect_version_specs(workspace_dir: &Path) -> Vec<DetectedVersionS
                 continue;
             }
             let mut parts = line.split_whitespace();
-            if parts.next() == Some("java") {
-                if let Some(ver) = parts.next() {
-                    if let Some(release) = parse_version_string(ver) {
-                        specs.push(DetectedVersionSpec {
-                            source: ".tool-versions".to_string(),
-                            path: tool_versions_path.clone(),
-                            release,
-                            preview: false,
-                        });
-                    }
-                }
+            if parts.next() == Some("java")
+                && let Some(ver) = parts.next()
+                && let Some(release) = parse_version_string(ver)
+            {
+                specs.push(DetectedVersionSpec {
+                    source: ".tool-versions".to_string(),
+                    path: tool_versions_path.clone(),
+                    release,
+                    preview: false,
+                });
             }
         }
     }
@@ -79,17 +77,16 @@ pub(super) fn detect_version_specs(workspace_dir: &Path) -> Vec<DetectedVersionS
                 if line.starts_with('#') {
                     continue;
                 }
-                if let Some((k, v)) = line.split_once('=') {
-                    if k.trim() == "java" {
-                        if let Some(release) = parse_version_string(v) {
-                            specs.push(DetectedVersionSpec {
-                                source: mise_name.to_string(),
-                                path: mise_path.clone(),
-                                release,
-                                preview: false,
-                            });
-                        }
-                    }
+                if let Some((k, v)) = line.split_once('=')
+                    && k.trim() == "java"
+                    && let Some(release) = parse_version_string(v)
+                {
+                    specs.push(DetectedVersionSpec {
+                        source: mise_name.to_string(),
+                        path: mise_path.clone(),
+                        release,
+                        preview: false,
+                    });
                 }
             }
         }
@@ -170,19 +167,18 @@ pub fn reconcile_version_conflict(workspace_dir: &Path, target_release: Release)
         let mut changed = false;
         for line in content.lines() {
             let trimmed = line.trim();
-            if !trimmed.starts_with('#') {
-                if let Some((k, v)) = trimmed.split_once('=') {
-                    if k.trim() == "java" {
-                        let suffix = v
-                            .trim()
-                            .find('-')
-                            .map(|idx| &v.trim()[idx..])
-                            .unwrap_or("-tem");
-                        new_lines.push(format!("java={num}.0.0{suffix}"));
-                        changed = true;
-                        continue;
-                    }
-                }
+            if !trimmed.starts_with('#')
+                && let Some((k, v)) = trimmed.split_once('=')
+                && k.trim() == "java"
+            {
+                let suffix = v
+                    .trim()
+                    .find('-')
+                    .map(|idx| &v.trim()[idx..])
+                    .unwrap_or("-tem");
+                new_lines.push(format!("java={num}.0.0{suffix}"));
+                changed = true;
+                continue;
             }
             new_lines.push(line.to_string());
         }

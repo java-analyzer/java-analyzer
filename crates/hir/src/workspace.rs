@@ -7,9 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use syntax::{
-    ext::path_text,
-    syntax_kind::SyntaxKind::*,
-    LanguageLevel, Release, SyntaxNode, TextRange,
+    LanguageLevel, Release, SyntaxNode, TextRange, ext::path_text, syntax_kind::SyntaxKind::*,
 };
 
 use crate::FileId;
@@ -83,10 +81,7 @@ pub enum ModuleDependency {
         exported: bool,
     },
     /// Workspace-relative or filesystem path to a `.jar` or class directory (`"lib/foo.jar"`).
-    Path {
-        path: String,
-        scope: RootScope,
-    },
+    Path { path: String, scope: RootScope },
     /// Maven or Ivy coordinate (`group:artifact:version[:classifier]`).
     Maven {
         group: String,
@@ -184,13 +179,11 @@ impl ModuleDependency {
         let norm_filter = normalize_rel_path(filter.strip_prefix("path:").unwrap_or(filter));
         match self {
             Self::Module { target, .. } => match target {
-                ModuleTarget::Workspace(id) => modules
-                    .iter()
-                    .find(|m| m.id == *id)
-                    .is_some_and(|m| {
-                        m.rel_path == norm_filter
-                            || m.module_name.as_deref() == Some(filter)
-                    }),
+                ModuleTarget::Workspace(id) => {
+                    modules.iter().find(|m| m.id == *id).is_some_and(|m| {
+                        m.rel_path == norm_filter || m.module_name.as_deref() == Some(filter)
+                    })
+                }
                 ModuleTarget::External(name) => name == filter,
             },
             Self::Path { path, .. } => path == &norm_filter || path == filter,
@@ -385,32 +378,32 @@ impl WorkspaceLayout {
                     .unwrap_or(&dir)
                     .replace('/', ".")
             };
-            if let Some(declared) = header.package {
-                if declared != expected_pkg {
-                    return Some(PackageMismatch {
-                        file_id,
-                        path,
-                        declared: Some(declared),
-                        expected: expected_pkg,
-                        authoritative_package_info: false,
-                        range: header.package_range.unwrap_or_default(),
-                    });
-                }
-            }
-            return None;
-        }
-
-        if let Some(declared) = header.package {
-            if strip_package_suffix(&dir, &declared).is_none() {
+            if let Some(declared) = header.package
+                && declared != expected_pkg
+            {
                 return Some(PackageMismatch {
                     file_id,
                     path,
                     declared: Some(declared),
-                    expected: String::new(),
+                    expected: expected_pkg,
                     authoritative_package_info: false,
                     range: header.package_range.unwrap_or_default(),
                 });
             }
+            return None;
+        }
+
+        if let Some(declared) = header.package
+            && strip_package_suffix(&dir, &declared).is_none()
+        {
+            return Some(PackageMismatch {
+                file_id,
+                path,
+                declared: Some(declared),
+                expected: String::new(),
+                authoritative_package_info: false,
+                range: header.package_range.unwrap_or_default(),
+            });
         }
 
         None
@@ -452,10 +445,7 @@ pub fn extract_file_header(root: &SyntaxNode) -> FileHeader {
     let mut shebang_level = None;
     let mut jbang_deps = Vec::new();
 
-    for token in root
-        .children_with_tokens()
-        .filter_map(|e| e.into_token())
-    {
+    for token in root.children_with_tokens().filter_map(|e| e.into_token()) {
         match token.kind() {
             SHEBANG => {
                 shebang_level = syntax::parse_shebang_level(token.text());
@@ -752,12 +742,12 @@ pub fn infer_workspace_layout(
                     module_headers_by_mod_dir.insert(mod_dir, (scope, mh.clone()));
                 }
             }
-        } else if pf.name == "package-info.java" {
-            if let Some(pkg) = &pf.header.package {
-                authoritative_dir_pkg.insert(pf.dir.clone(), pkg.clone());
-                if let Some(src_root) = strip_package_suffix(&pf.dir, pkg) {
-                    known_source_roots.insert(src_root);
-                }
+        } else if pf.name == "package-info.java"
+            && let Some(pkg) = &pf.header.package
+        {
+            authoritative_dir_pkg.insert(pf.dir.clone(), pkg.clone());
+            if let Some(src_root) = strip_package_suffix(&pf.dir, pkg) {
+                known_source_roots.insert(src_root);
             }
         }
     }
@@ -771,14 +761,14 @@ pub fn infer_workspace_layout(
         if authoritative_dir_pkg.contains_key(&pf.dir) {
             continue;
         }
-        if let Some(pkg) = &pf.header.package {
-            if let Some(root) = strip_package_suffix(&pf.dir, pkg) {
-                *dir_root_votes
-                    .entry(pf.dir.clone())
-                    .or_default()
-                    .entry(root)
-                    .or_default() += 1;
-            }
+        if let Some(pkg) = &pf.header.package
+            && let Some(root) = strip_package_suffix(&pf.dir, pkg)
+        {
+            *dir_root_votes
+                .entry(pf.dir.clone())
+                .or_default()
+                .entry(root)
+                .or_default() += 1;
         }
     }
     for votes in dir_root_votes.values() {
@@ -835,17 +825,17 @@ pub fn infer_workspace_layout(
                         .unwrap_or(&pf.dir)
                         .replace('/', ".")
                 };
-                if let Some(declared) = &pf.header.package {
-                    if *declared != expected_pkg {
-                        package_mismatches.push(PackageMismatch {
-                            file_id: pf.id,
-                            path: pf.path.clone(),
-                            declared: Some(declared.clone()),
-                            expected: expected_pkg,
-                            authoritative_package_info: false,
-                            range: pf.header.package_range.unwrap_or_default(),
-                        });
-                    }
+                if let Some(declared) = &pf.header.package
+                    && *declared != expected_pkg
+                {
+                    package_mismatches.push(PackageMismatch {
+                        file_id: pf.id,
+                        path: pf.path.clone(),
+                        declared: Some(declared.clone()),
+                        expected: expected_pkg,
+                        authoritative_package_info: false,
+                        range: pf.header.package_range.unwrap_or_default(),
+                    });
                 }
             }
             root
@@ -1084,7 +1074,9 @@ mod tests {
     fn infers_source_roots_and_modules_from_packages_and_module_info() {
         let mod_a = parse_tree("module com.example.core { exports com.example.core; }");
         let core_cls = parse_tree("package com.example.core;\npublic class Core {}");
-        let mod_b = parse_tree("module com.example.app { requires transitive com.example.core; requires java.sql; }");
+        let mod_b = parse_tree(
+            "module com.example.app { requires transitive com.example.core; requires java.sql; }",
+        );
         let app_cls = parse_tree("package com.example.app;\npublic class App {}");
         let app_test = parse_tree("package com.example.app;\npublic class AppTest {}");
 
@@ -1295,10 +1287,7 @@ mod tests {
             .iter()
             .map(|s| s.rel_path.as_str())
             .collect();
-        assert_eq!(
-            worker_srcs,
-            ["services/worker/gen", "services/worker/src"]
-        );
+        assert_eq!(worker_srcs, ["services/worker/gen", "services/worker/src"]);
         assert_eq!(worker_mod.resources[0].rel_path, "services/worker/res");
         assert_eq!(
             worker_mod.dependencies,
@@ -1358,14 +1347,8 @@ mod tests {
             RootScope::from_path("core/src/test/resources"),
             RootScope::Test
         );
-        assert_eq!(
-            RootScope::from_path("services/core/test"),
-            RootScope::Test
-        );
-        assert_eq!(
-            RootScope::from_path("services/core/tests"),
-            RootScope::Test
-        );
+        assert_eq!(RootScope::from_path("services/core/test"), RootScope::Test);
+        assert_eq!(RootScope::from_path("services/core/tests"), RootScope::Test);
         assert_eq!(
             RootScope::from_path("src/test.bach/test/java"),
             RootScope::Test
@@ -1393,8 +1376,14 @@ mod tests {
         assert_eq!(module_dir_for_root("core/src/test/java"), "core");
         assert_eq!(module_dir_for_root("core/src/main/resources"), "core");
         assert_eq!(module_dir_for_root("core/src/test/resources"), "core");
-        assert_eq!(module_dir_for_root("services/core/src/test"), "services/core");
-        assert_eq!(module_dir_for_root("services/core/resources"), "services/core");
+        assert_eq!(
+            module_dir_for_root("services/core/src/test"),
+            "services/core"
+        );
+        assert_eq!(
+            module_dir_for_root("services/core/resources"),
+            "services/core"
+        );
     }
 
     #[test]

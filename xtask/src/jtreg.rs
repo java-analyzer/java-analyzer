@@ -79,9 +79,7 @@ pub fn classify(
     let codes = extract_error_codes(&out_text);
     if codes.is_empty() {
         return JtregCase {
-            expectation: Expectation::Skipped(format!(
-                "no compiler.err.* codes in {ref_name}"
-            )),
+            expectation: Expectation::Skipped(format!("no compiler.err.* codes in {ref_name}")),
             level,
         };
     }
@@ -142,10 +140,14 @@ fn extract_compile_directives(source: &str) -> Vec<CompileDirective> {
             }
         } else if let Some(active) = &mut current {
             if raw_line.contains("*/") {
-                active.args.extend(trimmed.split_whitespace().map(str::to_string));
+                active
+                    .args
+                    .extend(trimmed.split_whitespace().map(str::to_string));
                 out.push(current.take().unwrap());
             } else if raw_line.trim_start().starts_with('*') {
-                active.args.extend(trimmed.split_whitespace().map(str::to_string));
+                active
+                    .args
+                    .extend(trimmed.split_whitespace().map(str::to_string));
             } else {
                 out.push(current.take().unwrap());
             }
@@ -173,10 +175,10 @@ fn parse_compile_level(args: &[String]) -> LanguageLevel {
                 }
             }
             arg => {
-                if let Some(ver) = arg.strip_prefix("--release=") {
-                    if let Ok(parsed) = ver.parse::<Release>() {
-                        release = parsed;
-                    }
+                if let Some(ver) = arg.strip_prefix("--release=")
+                    && let Ok(parsed) = ver.parse::<Release>()
+                {
+                    release = parsed;
                 }
             }
         }

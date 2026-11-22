@@ -7,7 +7,7 @@ use std::{
 
 use ide::Release;
 
-use super::{parse_version_string, JdkCandidate};
+use super::{JdkCandidate, parse_version_string};
 
 // ---- JDK Discovery ----
 
@@ -78,31 +78,31 @@ pub fn probe_jdk_release(jdk_home: &Path) -> Option<Release> {
     let release_file = jdk_home.join("release");
     if let Ok(content) = fs::read_to_string(&release_file) {
         for line in content.lines() {
-            if let Some(val) = line.strip_prefix("JAVA_VERSION=") {
-                if let Some(rel) = parse_version_string(val) {
-                    return Some(rel);
-                }
+            if let Some(val) = line.strip_prefix("JAVA_VERSION=")
+                && let Some(rel) = parse_version_string(val)
+            {
+                return Some(rel);
             }
         }
     }
     // Fallback: parse directory name
-    if let Some(name) = jdk_home.file_name().and_then(|n| n.to_str()) {
-        if let Some(rel) = parse_version_string(name) {
-            return Some(rel);
-        }
+    if let Some(name) = jdk_home.file_name().and_then(|n| n.to_str())
+        && let Some(rel) = parse_version_string(name)
+    {
+        return Some(rel);
     }
     // Fallback: invoke `javac -version`
     let javac = jdk_home.join("bin/javac");
-    if javac.is_file() {
-        if let Ok(out) = Command::new(javac).arg("-version").output() {
-            let text = format!(
-                "{} {}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            );
-            if let Some(rel) = parse_version_string(&text) {
-                return Some(rel);
-            }
+    if javac.is_file()
+        && let Ok(out) = Command::new(javac).arg("-version").output()
+    {
+        let text = format!(
+            "{} {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if let Some(rel) = parse_version_string(&text) {
+            return Some(rel);
         }
     }
     None

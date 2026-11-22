@@ -9,14 +9,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use ide::{normalize_rel_path, ModuleDependency, ModuleTarget, Release, RootScope};
+use ide::{ModuleDependency, ModuleTarget, Release, RootScope, normalize_rel_path};
 
 use crate::{
     cli::ConfigureArgs,
     workspace_config::{
-        build_tool_name, discover_jdks, parse_build_tool_kind, parse_version_string,
-        probe_workspace, reconcile_version_conflict, render_minimal_toml, BuildToolKind, Conflict,
-        ExplicitConfig, WorkspaceProbe,
+        BuildToolKind, Conflict, ExplicitConfig, WorkspaceProbe, build_tool_name, discover_jdks,
+        parse_build_tool_kind, parse_version_string, probe_workspace, reconcile_version_conflict,
+        render_minimal_toml,
     },
 };
 
@@ -53,9 +53,7 @@ pub fn run_with_io<R: BufRead, W: Write>(
             writeln!(
                 out,
                 "Reconciled external specification: {} -> Java {}",
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("spec"),
+                p.file_name().and_then(|n| n.to_str()).unwrap_or("spec"),
                 target_release.number()
             )?;
         }
@@ -424,7 +422,10 @@ fn run_interactive_tui<R: BufRead, W: Write>(
     for conflict in conflicts {
         match conflict {
             Conflict::Release(specs) => {
-                writeln!(out, "\n[Conflict] Multiple Java release specifications disagree:")?;
+                writeln!(
+                    out,
+                    "\n[Conflict] Multiple Java release specifications disagree:"
+                )?;
                 let mut unique_releases: Vec<Release> = Vec::new();
                 for s in &specs {
                     writeln!(out, "  - {}: Java {}", s.source, s.release.number())?;
@@ -435,7 +436,10 @@ fn run_interactive_tui<R: BufRead, W: Write>(
                 unique_releases.sort_by(|a, b| b.cmp(a));
                 let default_rel = unique_releases.first().copied().unwrap_or(Release::JAVA_25);
 
-                writeln!(out, "\nHow would you like to resolve this release conflict?")?;
+                writeln!(
+                    out,
+                    "\nHow would you like to resolve this release conflict?"
+                )?;
                 writeln!(
                     out,
                     "  [1] (Default) Reconcile external version files to a single release (keeps .java-analyzer.toml clean)"
@@ -474,9 +478,7 @@ fn run_interactive_tui<R: BufRead, W: Write>(
                         writeln!(
                             out,
                             "  -> Updated {} to Java {}",
-                            p.file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("spec"),
+                            p.file_name().and_then(|n| n.to_str()).unwrap_or("spec"),
                             chosen_rel.number()
                         )?;
                     }
@@ -523,7 +525,10 @@ fn run_interactive_tui<R: BufRead, W: Write>(
     let jdks = discover_jdks(Some(probe.resolved_level.release));
     if !jdks.is_empty() {
         writeln!(out, "\nDiscovered JDKs:")?;
-        writeln!(out, "  [0] Auto-detect (recommended - do not pin in .java-analyzer.toml)")?;
+        writeln!(
+            out,
+            "  [0] Auto-detect (recommended - do not pin in .java-analyzer.toml)"
+        )?;
         for (idx, jdk) in jdks.iter().enumerate() {
             let rel_str = jdk
                 .release
@@ -542,10 +547,10 @@ fn run_interactive_tui<R: BufRead, W: Write>(
         out.flush()?;
         let jdk_choice = read_line_trimmed(reader)?;
         if let Ok(n) = jdk_choice.parse::<usize>() {
-            if n >= 1 {
-                if let Some(chosen) = jdks.get(n - 1) {
-                    desired.jdk = Some(chosen.home.clone());
-                }
+            if n >= 1
+                && let Some(chosen) = jdks.get(n - 1)
+            {
+                desired.jdk = Some(chosen.home.clone());
             }
         } else if !jdk_choice.is_empty() && jdk_choice != "0" {
             desired.jdk = Some(PathBuf::from(jdk_choice));

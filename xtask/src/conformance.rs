@@ -10,9 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::isolate::{run_isolated, Isolated};
+use crate::isolate::{Isolated, run_isolated};
 
 /// What the files of a source are expected to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,7 +205,9 @@ impl SourceReport {
                 (&r.outcome, self.kind),
                 (Outcome::Errors { .. }, Kind::Valid) | (Outcome::Clean, Kind::Invalid)
             );
-            is_gap.then(|| self.known_reason(&r.path).map(|reason| (r, reason))).flatten()
+            is_gap
+                .then(|| self.known_reason(&r.path).map(|reason| (r, reason)))
+                .flatten()
         })
     }
 }
@@ -519,11 +521,11 @@ pub fn to_markdown(report: &Report) -> String {
 fn push_message_histogram(out: &mut String, gaps: &[&FileResult]) {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for r in gaps {
-        if let Outcome::Errors { first, .. } = &r.outcome {
-            if let Some(first) = first.first() {
-                let message = first.split_once(' ').map_or(first.as_str(), |(_, m)| m);
-                *counts.entry(message.to_string()).or_default() += 1;
-            }
+        if let Outcome::Errors { first, .. } = &r.outcome
+            && let Some(first) = first.first()
+        {
+            let message = first.split_once(' ').map_or(first.as_str(), |(_, m)| m);
+            *counts.entry(message.to_string()).or_default() += 1;
         }
     }
     let mut counts: Vec<(String, usize)> = counts.into_iter().collect();

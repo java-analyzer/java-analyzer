@@ -3,7 +3,7 @@ use std::{fs, path::Path, time::Duration};
 use xtask::{
     cli::{self, Command},
     conformance::{self, Config, Kind, KnownDivergence, Outcome, Source},
-    isolate::{run_isolated, Isolated},
+    isolate::{Isolated, run_isolated},
     jtreg::{self, Expectation, JtregCase},
 };
 
@@ -161,16 +161,20 @@ fn a_missing_or_empty_source_is_skipped_with_a_reason() {
         source("missing", &missing, Kind::Valid),
         source("empty", &empty, Kind::Valid),
     ]));
-    assert!(report.sources[0]
-        .skipped
-        .as_deref()
-        .unwrap()
-        .contains("not a directory"));
-    assert!(report.sources[1]
-        .skipped
-        .as_deref()
-        .unwrap()
-        .contains("no .java files"));
+    assert!(
+        report.sources[0]
+            .skipped
+            .as_deref()
+            .unwrap()
+            .contains("not a directory")
+    );
+    assert!(
+        report.sources[1]
+            .skipped
+            .as_deref()
+            .unwrap()
+            .contains("no .java files")
+    );
 }
 
 #[cfg(unix)]
@@ -407,7 +411,8 @@ fn jtreg_header_parsing_and_allowlist_classification() {
     );
 
     // `@compile/fail/ref=Bad.out` with only parser-phase error codes: invalid.
-    let fail_syntax = "/*\n * @test\n * @compile/fail/ref=Bad.out -XDrawDiagnostics Bad.java\n */\nclass Bad {\n";
+    let fail_syntax =
+        "/*\n * @test\n * @compile/fail/ref=Bad.out -XDrawDiagnostics Bad.java\n */\nclass Bad {\n";
     let bad_out = "Bad.java:5:12: compiler.err.premature.eof\n1 error\n";
     assert_eq!(
         jtreg::classify(
@@ -422,10 +427,8 @@ fn jtreg_header_parsing_and_allowlist_classification() {
     );
 
     // `@compile/fail/ref=Sem.out` containing a semantic error code: skipped.
-    let fail_sem =
-        "/*\n * @test\n * @compile/fail/ref=Sem.out -XDrawDiagnostics Sem.java\n */\nclass Sem {}\n";
-    let sem_out =
-        "Sem.java:2:5: compiler.err.expected: ';'\nSem.java:3:5: compiler.err.cant.resolve.location: ...\n2 errors\n";
+    let fail_sem = "/*\n * @test\n * @compile/fail/ref=Sem.out -XDrawDiagnostics Sem.java\n */\nclass Sem {}\n";
+    let sem_out = "Sem.java:2:5: compiler.err.expected: ';'\nSem.java:3:5: compiler.err.cant.resolve.location: ...\n2 errors\n";
     assert!(matches!(
         jtreg::classify(
             fail_sem,
@@ -487,7 +490,10 @@ reason = "Exceeds MAX_CHAIN limit"
         ["Unexpected.java"],
         "known divergence must be excluded from unexpected gaps"
     );
-    let known: Vec<_> = s.known_divergences().map(|(r, _)| r.path.as_str()).collect();
+    let known: Vec<_> = s
+        .known_divergences()
+        .map(|(r, _)| r.path.as_str())
+        .collect();
     assert_eq!(known, ["sub/KnownLongChain.java"]);
 
     let failures = fs::read_to_string(out.join("failures/jdk/completeness.txt")).unwrap();

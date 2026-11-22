@@ -6,13 +6,13 @@
 //! consumes input.
 
 use super::{
+    CompletedMarker, Parser,
     grammar::{
         annotation, annotations, at_param_start, binding_name, class_body, is_primitive_kw,
         lambda_param, modifiers, name, name_ref, type_, type_args, type_marker,
     },
-    lookahead::{skip_annotations, skip_parens, skip_type, MAX_SCAN},
+    lookahead::{MAX_SCAN, skip_annotations, skip_parens, skip_type},
     statements::{block, switch_expr},
-    CompletedMarker, Parser,
 };
 use crate::{
     language_level::Release,

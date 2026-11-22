@@ -23,8 +23,8 @@ use std::{
 };
 
 use ide::{
-    infer_workspace_layout_from_sources, is_path_within, normalize_rel_path, FileId, LanguageLevel,
-    ModuleDelta, ModuleDependency, Release, RootScope, WorkspaceDelta, WorkspaceLayout,
+    FileId, LanguageLevel, ModuleDelta, ModuleDependency, Release, RootScope, WorkspaceDelta,
+    WorkspaceLayout, infer_workspace_layout_from_sources, is_path_within, normalize_rel_path,
 };
 
 pub use jdk::{discover_jdks, is_valid_jdk_home, probe_jdk_release};
@@ -385,19 +385,19 @@ pub fn probe_workspace(workspace_dir: &Path) -> WorkspaceProbe {
             }
         }
 
-        if root_mod.rel_path == "." {
-            if let Some(test_rel) = manifest_meta.maven_test_release {
-                let tier1_preview = explicit_config.as_ref().and_then(|c| {
-                    c.delta
-                        .modules
-                        .get(".")
-                        .and_then(|m| m.preview)
-                        .or(c.preview)
-                });
-                let preview = tier1_preview
-                    .unwrap_or(manifest_meta.maven_preview || root_mod.language_level.preview);
-                root_mod.test_language_level = Some(LanguageLevel::new(test_rel, preview));
-            }
+        if root_mod.rel_path == "."
+            && let Some(test_rel) = manifest_meta.maven_test_release
+        {
+            let tier1_preview = explicit_config.as_ref().and_then(|c| {
+                c.delta
+                    .modules
+                    .get(".")
+                    .and_then(|m| m.preview)
+                    .or(c.preview)
+            });
+            let preview = tier1_preview
+                .unwrap_or(manifest_meta.maven_preview || root_mod.language_level.preview);
+            root_mod.test_language_level = Some(LanguageLevel::new(test_rel, preview));
         }
     }
 
@@ -608,10 +608,10 @@ impl WorkspaceProbe {
             let norm = normalize_rel_path(&rel.to_string_lossy());
 
             if let Some((module, src)) = self.layout.enclosing_source_root(&norm) {
-                if src.scope == RootScope::Test {
-                    if let Some(test_lvl) = module.test_language_level {
-                        return test_lvl;
-                    }
+                if src.scope == RootScope::Test
+                    && let Some(test_lvl) = module.test_language_level
+                {
+                    return test_lvl;
                 }
                 return module.language_level;
             }
@@ -630,10 +630,10 @@ impl WorkspaceProbe {
                 });
 
             if let Some(module) = best_module {
-                if RootScope::from_path(&norm) == RootScope::Test {
-                    if let Some(test_lvl) = module.test_language_level {
-                        return test_lvl;
-                    }
+                if RootScope::from_path(&norm) == RootScope::Test
+                    && let Some(test_lvl) = module.test_language_level
+                {
+                    return test_lvl;
                 }
                 return module.language_level;
             }

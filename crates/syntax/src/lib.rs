@@ -9,7 +9,7 @@ pub mod syntax_kind;
 
 use std::{fmt::Write as _, sync::Arc};
 
-pub use language_level::{parse_shebang_level, Feature, LanguageLevel, Release, FEATURES};
+pub use language_level::{FEATURES, Feature, LanguageLevel, Release, parse_shebang_level};
 use rowan::{NodeOrToken, WalkEvent};
 pub use rowan::{TextRange, TextSize};
 use syntax_kind::SyntaxKind;

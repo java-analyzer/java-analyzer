@@ -7,18 +7,18 @@
 use la_arena::{Arena, Idx};
 use smol_str::SmolStr;
 use syntax::{
+    SyntaxNode, TextRange,
     ext::{has_modifier, name_child, path_segments, type_child, type_text_with_dims},
     syntax_kind::SyntaxKind::*,
-    SyntaxNode, TextRange,
 };
 
 use crate::{
-    symbols::{
-        extract_import_parts, extract_params, extract_type_param_names, format_params_signature,
-        node_ident_text, FileSymbols, ImportDecl, ImportKind, MemberKind, MemberSymbol,
-        ParamSummary, TypeKind, TypeSymbol,
-    },
     FileId,
+    symbols::{
+        FileSymbols, ImportDecl, ImportKind, MemberKind, MemberSymbol, ParamSummary, TypeKind,
+        TypeSymbol, extract_import_parts, extract_params, extract_type_param_names,
+        format_params_signature, node_ident_text,
+    },
 };
 
 /// Source full and selection byte ranges for a single lowered declaration.
@@ -309,11 +309,7 @@ pub(crate) fn extract_method_or_ctor(
     Some(member_symbol_from_item(&members[id], &map))
 }
 
-fn type_symbol_from_item(
-    ty: &TypeItem,
-    members: &Arena<MemberItem>,
-    map: &AstIdMap,
-) -> TypeSymbol {
+fn type_symbol_from_item(ty: &TypeItem, members: &Arena<MemberItem>, map: &AstIdMap) -> TypeSymbol {
     let range = map.range(ty.ast_id);
     let ty_members = ty
         .members
@@ -524,10 +520,7 @@ fn lower_field_decl(
 ) {
     let base_type = type_child(node);
     let is_static = has_modifier(node, STATIC_KW)
-        || matches!(
-            owner_kind,
-            Some(TypeKind::Interface | TypeKind::Annotation)
-        );
+        || matches!(owner_kind, Some(TypeKind::Interface | TypeKind::Annotation));
 
     for declarator in node.children().filter(|n| n.kind() == VARIABLE_DECLARATOR) {
         let Some(name_node) = name_child(&declarator) else {

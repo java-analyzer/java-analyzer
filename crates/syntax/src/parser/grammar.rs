@@ -3,10 +3,10 @@
 //! live in `statements.rs`; expressions are token-run placeholders until M3.
 
 use super::{
+    CompletedMarker, Marker, Parser,
     expressions::{arg_list, initializer},
     lookahead::{skip_annotations, skip_type, skip_type_args},
     statements::block,
-    CompletedMarker, Marker, Parser,
 };
 use crate::syntax_kind::SyntaxKind::{self, *};
 
@@ -641,7 +641,7 @@ fn member(p: &mut Parser<'_, '_>) {
                     || is_primitive_kw(kind)
                     || type_decl_kind(p).is_some() =>
                 {
-                    break
+                    break;
                 }
                 _ => p.bump_any(),
             }

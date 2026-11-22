@@ -1,8 +1,8 @@
 //! Convenience helpers for inspecting and rendering `rowan` Java syntax nodes.
 
 use crate::{
-    syntax_kind::SyntaxKind::{self, *},
     SyntaxNode,
+    syntax_kind::SyntaxKind::{self, *},
 };
 
 /// Returns `true` if `kind` is a type syntax node (`PATH_TYPE`, `PRIMITIVE_TYPE`, or `ARRAY_TYPE`).

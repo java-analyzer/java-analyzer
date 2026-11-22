@@ -6,8 +6,8 @@ use std::{fmt, str::FromStr};
 use rowan::{NodeOrToken, WalkEvent};
 
 use crate::{
-    syntax_kind::SyntaxKind::{self, *},
     SyntaxError, SyntaxNode,
+    syntax_kind::SyntaxKind::{self, *},
 };
 
 /// A Java feature release version, clamped to [`Release::FLOOR`] (`8`) at the bottom.
@@ -173,15 +173,15 @@ impl Feature {
     }
 
     pub fn is_available(&self, level: LanguageLevel) -> bool {
-        if let Some(withdrawn) = self.withdrawn_in {
-            if level.release >= withdrawn {
-                return false;
-            }
+        if let Some(withdrawn) = self.withdrawn_in
+            && level.release >= withdrawn
+        {
+            return false;
         }
-        if let Some(stable) = self.stable_in {
-            if level.release >= stable {
-                return true;
-            }
+        if let Some(stable) = self.stable_in
+            && level.release >= stable
+        {
+            return true;
         }
         level.preview && self.preview_in.contains(&level.release)
     }
@@ -192,14 +192,14 @@ impl Feature {
         if self.is_available(level) {
             return None;
         }
-        if let Some(withdrawn) = self.withdrawn_in {
-            if level.release >= withdrawn {
-                return Some(format!(
-                    "{} were removed in language level {}",
-                    self.plural,
-                    withdrawn.number()
-                ));
-            }
+        if let Some(withdrawn) = self.withdrawn_in
+            && level.release >= withdrawn
+        {
+            return Some(format!(
+                "{} were removed in language level {}",
+                self.plural,
+                withdrawn.number()
+            ));
         }
         if self.preview_in.contains(&level.release) {
             return Some(format!(
@@ -373,9 +373,7 @@ pub(crate) fn check_feature_gates(
                 NON_SEALED_KW => report(&SEALED_CLASSES, token.text_range()),
                 IDENT
                     if token.text() == "sealed"
-                        && token
-                            .parent()
-                            .is_some_and(|p| p.kind() == MODIFIER_LIST) =>
+                        && token.parent().is_some_and(|p| p.kind() == MODIFIER_LIST) =>
                 {
                     report(&SEALED_CLASSES, token.text_range());
                 }
@@ -443,17 +441,12 @@ fn is_module_import(import_decl: &SyntaxNode) -> bool {
 /// First `SWITCH_LABEL` of a `SWITCH_STMT` that uses Java 14 switch-expression syntax (`->` or
 /// comma-separated case items).
 fn first_enhanced_switch_label(switch_stmt: &SyntaxNode) -> Option<SyntaxNode> {
-    let body = switch_stmt
-        .children()
-        .find(|c| c.kind() == SWITCH_BODY)?;
+    let body = switch_stmt.children().find(|c| c.kind() == SWITCH_BODY)?;
     for case in body.children().filter(|c| c.kind() == SWITCH_CASE) {
         if let Some(label) = case.children().find(|c| c.kind() == SWITCH_LABEL) {
-            let enhanced = label.children_with_tokens().any(|e| {
-                matches!(
-                    e.kind(),
-                    SyntaxKind::ARROW | SyntaxKind::COMMA
-                )
-            });
+            let enhanced = label
+                .children_with_tokens()
+                .any(|e| matches!(e.kind(), SyntaxKind::ARROW | SyntaxKind::COMMA));
             if enhanced {
                 return Some(label);
             }
@@ -475,10 +468,7 @@ fn is_pattern_switch_label(label: &SyntaxNode) -> bool {
             },
             NodeOrToken::Node(n) => match n.kind() {
                 TYPE_PATTERN | RECORD_PATTERN | UNNAMED_PATTERN | GUARD => return true,
-                LITERAL
-                    if n.children_with_tokens()
-                        .any(|e| e.kind() == NULL_KW) =>
-                {
+                LITERAL if n.children_with_tokens().any(|e| e.kind() == NULL_KW) => {
                     return true;
                 }
                 _ => {}
@@ -522,19 +512,19 @@ mod tests {
     #[test]
     fn feature_availability_and_diagnostics_at_boundaries() {
         for f in FEATURES {
-            let stable = f.stable_in.expect("all current features have a stable release");
-            let before_preview = f
-                .preview_in
-                .first()
-                .copied()
-                .unwrap_or(stable)
-                .number()
-                - 1;
+            let stable = f
+                .stable_in
+                .expect("all current features have a stable release");
+            let before_preview = f.preview_in.first().copied().unwrap_or(stable).number() - 1;
             let pre_level = LanguageLevel::new(Release::new(before_preview), false);
             assert!(!f.is_available(pre_level));
             assert_eq!(
                 f.diagnostic(pre_level),
-                Some(format!("{} require language level {}", f.plural, stable.number()))
+                Some(format!(
+                    "{} require language level {}",
+                    f.plural,
+                    stable.number()
+                ))
             );
 
             for &p in f.preview_in {
@@ -569,10 +559,7 @@ mod tests {
             parse_shebang_level("#!/usr/bin/java --release=21 --enable-preview\nclass Main {}\n"),
             Some(LanguageLevel::new(Release::JAVA_21, true))
         );
-        assert_eq!(
-            parse_shebang_level("// --source 25\nclass Main {}\n"),
-            None
-        );
+        assert_eq!(parse_shebang_level("// --source 25\nclass Main {}\n"), None);
         assert_eq!(
             parse_shebang_level("#!/usr/bin/env java\n// --source 25\nvoid main() {}\n"),
             None

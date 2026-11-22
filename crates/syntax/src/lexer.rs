@@ -31,10 +31,7 @@ pub fn lex_with_errors(input: &str) -> (Vec<Token>, Vec<LexError>) {
     let mut pos = 0;
     if input.starts_with("#!") {
         let len = input.find(['\n', '\r']).unwrap_or(input.len());
-        tokens.push(Token {
-            kind: SHEBANG,
-            len,
-        });
+        tokens.push(Token { kind: SHEBANG, len });
         pos = len;
     }
     while pos < input.len() {
@@ -118,10 +115,11 @@ fn quoted(rest: &str, quote: char, kind: SyntaxKind, unterminated: &'static str)
     while let Some((i, c)) = chars.next() {
         match c {
             '\\' => {
-                if let Some(&(_, next)) = chars.peek() {
-                    if next != '\n' && next != '\r' {
-                        chars.next();
-                    }
+                if let Some(&(_, next)) = chars.peek()
+                    && next != '\n'
+                    && next != '\r'
+                {
+                    chars.next();
                 }
             }
             '\n' | '\r' => return (kind, i, Some(unterminated)),

@@ -3,7 +3,7 @@
 
 use std::{
     any::Any,
-    panic::{catch_unwind, AssertUnwindSafe},
+    panic::{AssertUnwindSafe, catch_unwind},
     sync::mpsc,
     thread,
     time::Duration,

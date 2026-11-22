@@ -99,7 +99,7 @@ impl Reader<'_> {
                     self.skip_trivia();
                     match self.chars.peek() {
                         None => {
-                            return Err(format!("unclosed '(' opened at {}", self.position(start)))
+                            return Err(format!("unclosed '(' opened at {}", self.position(start)));
                         }
                         Some(&(_, ')')) => {
                             self.chars.next();
@@ -152,7 +152,7 @@ impl Reader<'_> {
                             "invalid escape \\{} in string starting at {}",
                             other.map(String::from).unwrap_or_default(),
                             self.position(start)
-                        ))
+                        ));
                     }
                 },
                 c => out.push(c),

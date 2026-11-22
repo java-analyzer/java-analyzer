@@ -3,11 +3,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use ide::{normalize_rel_path, DeltaSet, Release, WorkspaceDelta};
+use ide::{DeltaSet, Release, WorkspaceDelta, normalize_rel_path};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    build_tool_name, parse_build_tool_kind, parse_version_string, ExplicitConfig, WorkspaceProbe,
+    ExplicitConfig, WorkspaceProbe, build_tool_name, parse_build_tool_kind, parse_version_string,
 };
 
 pub const JAVA_ANALYZER_DOT_CONFIG_FILE: &str = ".java-analyzer.toml";
@@ -424,10 +424,7 @@ exclude = ["com.example:bad"]
         let b = parse_config_toml(subtable_toml);
         assert_eq!(a, b);
         assert_eq!(a.delta.include, vec!["services/core", "apps/api"]);
-        assert_eq!(
-            a.delta.modules["."].sources.include,
-            vec!["generated/src"]
-        );
+        assert_eq!(a.delta.modules["."].sources.include, vec!["generated/src"]);
         assert_eq!(a.delta.modules["."].sources.exclude, vec!["src/legacy"]);
         assert_eq!(
             a.delta.modules["."].dependencies.include,

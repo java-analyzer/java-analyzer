@@ -1,11 +1,10 @@
 use std::{collections::BTreeMap, fs, path::Path};
 
-use ide::{normalize_rel_path, ModuleDependency, RootScope};
+use ide::{ModuleDependency, RootScope, normalize_rel_path};
 
 use super::{
-    parse_version_string,
+    DetectedVersionSpec, ManifestMetadata, parse_version_string,
     xml::{expand_props, has_any_ancestor, is_tag, parse_xml},
-    DetectedVersionSpec, ManifestMetadata,
 };
 
 fn load_ant_properties_file(content: &str, props: &mut BTreeMap<String, String>) {
@@ -41,11 +40,13 @@ pub(super) fn introspect_ant_build_xml(
     props.insert("basedir".to_string(), ".".to_string());
     for node in doc.descendants().filter(|n| is_tag(*n, "property")) {
         if let Some(name) = node.attribute("name") {
-            if let Some(val) = node.attribute("value").or_else(|| node.attribute("location")) {
-                if !props.contains_key(name) {
-                    let resolved = expand_props(val, &props);
-                    props.insert(name.to_string(), resolved);
-                }
+            if let Some(val) = node
+                .attribute("value")
+                .or_else(|| node.attribute("location"))
+                && !props.contains_key(name)
+            {
+                let resolved = expand_props(val, &props);
+                props.insert(name.to_string(), resolved);
             }
         } else if let Some(file_attr) = node.attribute("file") {
             let expanded_path = expand_props(file_attr, &props);
@@ -208,18 +209,18 @@ pub(super) fn introspect_ivy_xml(
             .unwrap_or_else(|| "*".to_string());
         let conf = dep_node.attribute("conf").unwrap_or_default();
 
-        if let (Some(org), Some(name)) = (org, name) {
-            if let Some(scope) = classify_ivy_conf(conf) {
-                let dep = ModuleDependency::Maven {
-                    group: org,
-                    artifact: name,
-                    version: rev,
-                    classifier: None,
-                    scope,
-                };
-                if !meta.dependencies.contains(&dep) {
-                    meta.dependencies.push(dep);
-                }
+        if let (Some(org), Some(name)) = (org, name)
+            && let Some(scope) = classify_ivy_conf(conf)
+        {
+            let dep = ModuleDependency::Maven {
+                group: org,
+                artifact: name,
+                version: rev,
+                classifier: None,
+                scope,
+            };
+            if !meta.dependencies.contains(&dep) {
+                meta.dependencies.push(dep);
             }
         }
     }

@@ -1,7 +1,7 @@
 mod common;
 
-use common::{shutdown, start_server, start_server_with_root, TempWorkspace, URI};
-use serde_json::{json, Value};
+use common::{TempWorkspace, URI, shutdown, start_server, start_server_with_root};
+use serde_json::{Value, json};
 
 const PUBLISH: &str = "textDocument/publishDiagnostics";
 
@@ -207,7 +207,10 @@ public class Helper {
     );
     let helper_change_diag = client.next_notification(PUBLISH);
     assert_eq!(helper_change_diag["uri"], json!(helper_uri));
-    assert_eq!(helper_change_diag["diagnostics"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        helper_change_diag["diagnostics"].as_array().unwrap().len(),
+        1
+    );
 
     assert_eq!(
         client.definition_uri(&app_uri, 5, 18),

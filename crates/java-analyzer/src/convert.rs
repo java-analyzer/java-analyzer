@@ -83,7 +83,9 @@ pub fn position_to_offset(text: &str, position: Position) -> Option<u32> {
 /// An offset past the end of `text` is clamped to the end; an offset inside a multi-byte
 /// character is rounded down to the start of that character.
 pub fn offset_to_position_with_index(index: &LineIndex, text: &str, offset: u32) -> Position {
-    let mut off = (offset as usize).min(text.len()).min(usize::from(index.len()));
+    let mut off = (offset as usize)
+        .min(text.len())
+        .min(usize::from(index.len()));
     while !text.is_char_boundary(off) {
         off -= 1;
     }
@@ -229,9 +231,18 @@ mod tests {
     fn path_to_uri_and_uri_to_path_round_trip_windows() {
         let cases = [
             (r"C:\", "file:///C:/"),
-            (r"C:\Users\my name\Main.java", "file:///C:/Users/my%20name/Main.java"),
-            (r"C:\Users\Café 😀.java", "file:///C:/Users/Caf%C3%A9%20%F0%9F%98%80.java"),
-            (r"\\server\share\dir\Main.java", "file://server/share/dir/Main.java"),
+            (
+                r"C:\Users\my name\Main.java",
+                "file:///C:/Users/my%20name/Main.java",
+            ),
+            (
+                r"C:\Users\Café 😀.java",
+                "file:///C:/Users/Caf%C3%A9%20%F0%9F%98%80.java",
+            ),
+            (
+                r"\\server\share\dir\Main.java",
+                "file://server/share/dir/Main.java",
+            ),
         ];
         for (raw, expected_uri) in cases {
             let path = PathBuf::from(raw);
@@ -241,20 +252,32 @@ mod tests {
         }
 
         let encoded_colon: Uri = "file:///c%3A/Users/Main.java".parse().unwrap();
-        assert_eq!(uri_to_path(&encoded_colon), Some(PathBuf::from(r"c:\Users\Main.java")));
+        assert_eq!(
+            uri_to_path(&encoded_colon),
+            Some(PathBuf::from(r"c:\Users\Main.java"))
+        );
     }
 
     #[cfg(unix)]
     #[test]
     fn uri_to_path_handles_localhost_single_slash_and_lowercase_hex() {
         let localhost: Uri = "file://localhost/tmp/Main.java".parse().unwrap();
-        assert_eq!(uri_to_path(&localhost), Some(PathBuf::from("/tmp/Main.java")));
+        assert_eq!(
+            uri_to_path(&localhost),
+            Some(PathBuf::from("/tmp/Main.java"))
+        );
 
         let single_slash: Uri = "file:/tmp/Main.java".parse().unwrap();
-        assert_eq!(uri_to_path(&single_slash), Some(PathBuf::from("/tmp/Main.java")));
+        assert_eq!(
+            uri_to_path(&single_slash),
+            Some(PathBuf::from("/tmp/Main.java"))
+        );
 
         let lower_hex: Uri = "file:///tmp/a%20b/caf%c3%a9.java".parse().unwrap();
-        assert_eq!(uri_to_path(&lower_hex), Some(PathBuf::from("/tmp/a b/café.java")));
+        assert_eq!(
+            uri_to_path(&lower_hex),
+            Some(PathBuf::from("/tmp/a b/café.java"))
+        );
     }
 
     #[test]
@@ -293,9 +316,15 @@ mod tests {
         let index = LineIndex::new(text);
         let offset = position_to_offset_with_index(&index, text, pos(1, 16)).unwrap();
         assert_eq!(offset, 28);
-        assert_eq!(offset_to_position_with_index(&index, text, offset), pos(1, 16));
+        assert_eq!(
+            offset_to_position_with_index(&index, text, offset),
+            pos(1, 16)
+        );
         // Mid-surrogate UTF-16 column rounds down to the start of the scalar value.
-        assert_eq!(position_to_offset_with_index(&index, text, pos(1, 15)), Some(24));
+        assert_eq!(
+            position_to_offset_with_index(&index, text, pos(1, 15)),
+            Some(24)
+        );
         let range = text_range_to_range_with_index(&index, text, 10, offset);
         assert_eq!(range.start, pos(1, 0));
         assert_eq!(range.end, pos(1, 16));

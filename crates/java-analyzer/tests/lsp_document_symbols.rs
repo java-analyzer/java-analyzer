@@ -1,7 +1,7 @@
 mod common;
 
-use common::{shutdown, start_server, URI};
-use serde_json::{json, Value};
+use common::{URI, shutdown, start_server};
+use serde_json::{Value, json};
 
 fn symbols(client: &mut common::Client) -> Value {
     client.request(

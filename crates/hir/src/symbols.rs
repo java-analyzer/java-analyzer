@@ -5,14 +5,14 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use smol_str::SmolStr;
 use syntax::{
+    SyntaxNode, TextRange,
     ext::{has_direct_token, name_child, path_segments, type_child, type_text_with_dims},
     syntax_kind::SyntaxKind::{self, *},
-    SyntaxNode, TextRange,
 };
 
 use crate::{
-    item_tree::{FileItemTree, TypeId},
     FileId,
+    item_tree::{FileItemTree, TypeId},
 };
 
 /// Extracts the identifier text of a `NAME` or `NAME_REF` node without heap allocation for short
