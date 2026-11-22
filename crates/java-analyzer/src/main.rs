@@ -24,7 +24,7 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some(Command::Configure(args)) => {
-            java_analyzer::configure::run(args)?;
+            java_analyzer::configure::run(*args)?;
             Ok(())
         }
     }

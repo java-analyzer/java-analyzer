@@ -64,10 +64,7 @@ pub(super) fn skip_type(p: &Parser<'_, '_>, mut n: usize) -> Option<usize> {
     } else {
         return None;
     }
-    loop {
-        let Some(after_annos) = skip_annotations(p, n) else {
-            break;
-        };
+    while let Some(after_annos) = skip_annotations(p, n) {
         if p.nth_at(after_annos, L_BRACK) && p.nth_at(after_annos + 1, R_BRACK) {
             n = after_annos + 2;
             if n > limit {

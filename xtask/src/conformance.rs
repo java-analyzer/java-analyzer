@@ -177,10 +177,11 @@ impl SourceReport {
     pub fn conforming(&self) -> usize {
         self.results
             .iter()
-            .filter(|r| match (&r.outcome, self.kind) {
-                (Outcome::Clean, Kind::Valid) => true,
-                (Outcome::Errors { .. }, Kind::Invalid) => true,
-                _ => false,
+            .filter(|r| {
+                matches!(
+                    (&r.outcome, self.kind),
+                    (Outcome::Clean, Kind::Valid) | (Outcome::Errors { .. }, Kind::Invalid)
+                )
             })
             .count()
     }
@@ -189,11 +190,10 @@ impl SourceReport {
     /// `known-divergences.toml`. Critical findings are counted separately.
     pub fn gaps(&self) -> impl Iterator<Item = &FileResult> {
         self.results.iter().filter(move |r| {
-            let is_gap = match (&r.outcome, self.kind) {
-                (Outcome::Errors { .. }, Kind::Valid) => true,
-                (Outcome::Clean, Kind::Invalid) => true,
-                _ => false,
-            };
+            let is_gap = matches!(
+                (&r.outcome, self.kind),
+                (Outcome::Errors { .. }, Kind::Valid) | (Outcome::Clean, Kind::Invalid)
+            );
             is_gap && self.known_reason(&r.path).is_none()
         })
     }
@@ -201,11 +201,10 @@ impl SourceReport {
     /// Gaps that match an entry in `known-divergences.toml`, paired with their justification.
     pub fn known_divergences(&self) -> impl Iterator<Item = (&FileResult, &str)> {
         self.results.iter().filter_map(move |r| {
-            let is_gap = match (&r.outcome, self.kind) {
-                (Outcome::Errors { .. }, Kind::Valid) => true,
-                (Outcome::Clean, Kind::Invalid) => true,
-                _ => false,
-            };
+            let is_gap = matches!(
+                (&r.outcome, self.kind),
+                (Outcome::Errors { .. }, Kind::Valid) | (Outcome::Clean, Kind::Invalid)
+            );
             is_gap.then(|| self.known_reason(&r.path).map(|reason| (r, reason))).flatten()
         })
     }

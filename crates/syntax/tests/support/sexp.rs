@@ -77,7 +77,7 @@ impl Reader<'_> {
             if c.is_whitespace() {
                 self.chars.next();
             } else if c == ';' {
-                while let Some((_, c)) = self.chars.next() {
+                for (_, c) in self.chars.by_ref() {
                     if c == '\n' {
                         break;
                     }

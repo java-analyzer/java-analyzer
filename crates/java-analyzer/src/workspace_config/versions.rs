@@ -159,10 +159,8 @@ pub fn reconcile_version_conflict(workspace_dir: &Path, target_release: Release)
 
     // 1. .java-version
     let java_ver = workspace_dir.join(".java-version");
-    if java_ver.is_file() {
-        if fs::write(&java_ver, format!("{num}\n")).is_ok() {
-            modified.push(java_ver);
-        }
+    if java_ver.is_file() && fs::write(&java_ver, format!("{num}\n")).is_ok() {
+        modified.push(java_ver);
     }
 
     // 2. .sdkmanrc

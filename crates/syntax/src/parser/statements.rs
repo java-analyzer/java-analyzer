@@ -147,7 +147,7 @@ fn is_bare_primitive(p: &Parser<'_, '_>) -> bool {
 /// expressions are not available, `yield(...)` is a method call rather than a yield statement.
 fn is_yield_stmt(p: &Parser<'_, '_>) -> bool {
     p.at_contextual_kw("yield")
-        && !(p.nth_at(1, L_PAREN) && !p.level.is_available(&SWITCH_EXPRESSIONS))
+        && (!p.nth_at(1, L_PAREN) || p.level.is_available(&SWITCH_EXPRESSIONS))
         && !matches!(
             p.nth(1),
             EQ | DOT

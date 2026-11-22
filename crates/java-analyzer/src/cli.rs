@@ -29,7 +29,7 @@ pub enum Command {
     /// Inspect inferred workspace structure, parse health, and symbol index
     Inspect(InspectArgs),
     /// Inspect, disambiguate, and configure a Java workspace
-    Configure(ConfigureArgs),
+    Configure(Box<ConfigureArgs>),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Args)]

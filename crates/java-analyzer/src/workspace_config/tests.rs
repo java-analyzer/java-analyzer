@@ -127,9 +127,11 @@ fn detects_build_and_release_conflicts_and_disambiguates_via_tier1_or_reconcile(
     );
 
     // Now disambiguate the remaining build tool conflict with a minimal .java-analyzer.toml
-    let mut cfg = ExplicitConfig::default();
-    cfg.build = Some(BuildToolKind::Gradle);
-    cfg.release = Some(Release::JAVA_21); // Matches uniquely inferred release -> must be omitted!
+    let cfg = ExplicitConfig {
+        build: Some(BuildToolKind::Gradle),
+        release: Some(Release::JAVA_21), // Matches uniquely inferred release -> must be omitted!
+        ..ExplicitConfig::default()
+    };
     let toml_text = render_minimal_toml(&probe_after_reconcile, &cfg);
     assert_eq!(toml_text, "build = \"gradle\"\n");
 

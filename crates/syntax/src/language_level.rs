@@ -398,15 +398,13 @@ pub(crate) fn check_feature_gates(
                 _ => {}
             },
             NodeOrToken::Node(node) => match node.kind() {
-                IMPORT_DECL => {
-                    if is_module_import(&node) {
-                        report(&MODULE_IMPORTS, node.text_range());
-                    }
+                IMPORT_DECL if is_module_import(&node) => {
+                    report(&MODULE_IMPORTS, node.text_range());
                 }
-                FIELD_DECL | METHOD_DECL | INITIALIZER => {
-                    if node.parent().is_some_and(|p| p.kind() == SOURCE_FILE) {
-                        report(&COMPACT_SOURCE_FILES, node.text_range());
-                    }
+                FIELD_DECL | METHOD_DECL | INITIALIZER
+                    if node.parent().is_some_and(|p| p.kind() == SOURCE_FILE) =>
+                {
+                    report(&COMPACT_SOURCE_FILES, node.text_range());
                 }
                 RECORD_DECL => report(&RECORDS, node.text_range()),
                 PERMITS_CLAUSE => report(&SEALED_CLASSES, node.text_range()),
@@ -416,18 +414,15 @@ pub(crate) fn check_feature_gates(
                         report(&SWITCH_EXPRESSIONS, label.text_range());
                     }
                 }
-                SWITCH_LABEL => {
-                    if is_pattern_switch_label(&node) {
-                        report(&PATTERN_MATCHING_SWITCH, node.text_range());
-                    }
+                SWITCH_LABEL if is_pattern_switch_label(&node) => {
+                    report(&PATTERN_MATCHING_SWITCH, node.text_range());
                 }
-                INSTANCEOF_EXPR => {
+                INSTANCEOF_EXPR
                     if node
                         .children()
-                        .any(|c| matches!(c.kind(), TYPE_PATTERN | RECORD_PATTERN))
-                    {
-                        report(&PATTERN_MATCHING_INSTANCEOF, node.text_range());
-                    }
+                        .any(|c| matches!(c.kind(), TYPE_PATTERN | RECORD_PATTERN)) =>
+                {
+                    report(&PATTERN_MATCHING_INSTANCEOF, node.text_range());
                 }
                 RECORD_PATTERN => report(&RECORD_PATTERNS, node.text_range()),
                 _ => {}
