@@ -1,5 +1,6 @@
 pub mod classfile;
 pub mod classpath;
+pub mod hierarchy;
 pub(crate) mod item_tree;
 pub mod resolve;
 pub(crate) mod symbols;
@@ -17,12 +18,18 @@ pub use classpath::{
     BinaryMemberSymbol, BinaryModuleInfo, BinaryOrigin, BinaryTarget, BinaryTypeSymbol,
     ClasspathIndex, parse_manifest_multi_release, select_mrjar_entries,
 };
-
+pub use hierarchy::{
+    DirectSupertypes, WorkspaceHierarchyIndex, all_subtypes, direct_subtypes, direct_supertypes,
+    find_overridden_method, find_overriding_methods, linearized_supertypes,
+};
 pub use item_tree::{
     AstId, AstIdMap, AstRange, FileItemTree, ImportId, ImportTree, MemberId, MemberItem, TypeId,
     TypeItem,
 };
-pub use resolve::{LocalKind, ResolvedSymbol, ResolvedSymbolKind, SymbolDetail, resolve_at_offset};
+pub use resolve::{
+    LocalKind, ResolvedSymbol, ResolvedSymbolKind, SymbolDetail, resolve_at_offset,
+    resolve_type_of_symbol_at_offset,
+};
 pub use smol_str::SmolStr;
 pub use symbols::{
     FileSymbols, ImportDecl, ImportKind, MemberKind, MemberSymbol, ModuleIndex, ParamSummary,
@@ -119,6 +126,32 @@ fn build_workspace_index_query(
     Arc::new(symbols::merge_module_indexes(&per_module))
 }
 
+#[salsa::tracked]
+fn build_workspace_hierarchy_query(
+    db: &dyn salsa::Database,
+    workspace: WorkspaceModules,
+    classpath: Option<ClasspathInput>,
+) -> Arc<WorkspaceHierarchyIndex> {
+    let workspace_index = build_workspace_index_query(db, workspace);
+    let modules = workspace.modules(db);
+    let mut per_file = Vec::new();
+    for &module in modules.iter() {
+        for &file in module.files(db).iter() {
+            per_file.push(file_item_tree(db, file).clone());
+        }
+    }
+    let empty_cp = ClasspathIndex::default();
+    let cp_ref = match classpath {
+        Some(cp) => cp.index(db).as_ref(),
+        None => &empty_cp,
+    };
+    Arc::new(hierarchy::build_workspace_hierarchy_index(
+        &per_file,
+        workspace_index,
+        cp_ref,
+    ))
+}
+
 pub trait SourceDatabase: salsa::Database {
     fn file_text(&self, file_id: FileId) -> Arc<String>;
 
@@ -153,6 +186,9 @@ pub trait DefDatabase: SourceDatabase {
 
     /// Aggregated workspace-wide lookup index over `workspace_files`.
     fn workspace_index(&self) -> Arc<WorkspaceIndex>;
+
+    /// Position-independent workspace type hierarchy index.
+    fn workspace_hierarchy_index(&self) -> Arc<WorkspaceHierarchyIndex>;
 
     /// Indexed JDK and external JAR binary symbols.
     fn classpath_index(&self) -> Arc<ClasspathIndex>;
@@ -361,6 +397,13 @@ impl DefDatabase for RootDatabase {
         match self.workspace_modules {
             Some(ws) => build_workspace_index_query(self, ws).clone(),
             None => Arc::new(WorkspaceIndex::default()),
+        }
+    }
+
+    fn workspace_hierarchy_index(&self) -> Arc<WorkspaceHierarchyIndex> {
+        match self.workspace_modules {
+            Some(ws) => build_workspace_hierarchy_query(self, ws, self.classpath_input).clone(),
+            None => Arc::new(WorkspaceHierarchyIndex::default()),
         }
     }
 
@@ -1722,5 +1765,410 @@ class Use2 {
         assert_eq!(res2.qualified_name, "com.app.String");
         assert_eq!(res2.file_id, Some(FileId(1)));
         assert!(res2.binary_target.is_none());
+    }
+
+    #[test]
+    fn variable_length_body_edit_preserves_workspace_hierarchy_index_via_early_cutoff() {
+        let initial = "\
+package p;
+interface Greet {
+    void greet(String name);
+}
+class Base implements Greet {
+    @Override
+    public void greet(String name) {
+        int x = 1;
+    }
+}
+class Sub extends Base {
+    @Override
+    public void greet(String name) {
+        int y = 2;
+    }
+}
+";
+        let edited = "\
+package p;
+interface Greet {
+    void greet(String name);
+}
+class Base implements Greet {
+    @Override
+    public void greet(String name) {
+        int x = 1;
+        int z = x + 42;
+        String msg = \"much longer method body\";
+    }
+}
+class Sub extends Base {
+    @Override
+    public void greet(String name) {
+        int y = 2;
+        int w = y * 10;
+    }
+}
+";
+        let (mut db, file_id) = db_with(initial);
+        let hier_before = db.workspace_hierarchy_index();
+        assert_eq!(
+            direct_subtypes(&db, "p.Base"),
+            vec!["p.Sub".to_string()]
+        );
+
+        db.set_file_text(file_id, Arc::new(edited.to_string()));
+        let hier_after = db.workspace_hierarchy_index();
+        assert!(
+            Arc::ptr_eq(&hier_before, &hier_after),
+            "variable-length body edit must preserve WorkspaceHierarchyIndex via Salsa early-cutoff"
+        );
+    }
+
+    #[test]
+    fn resolve_inherited_members_interface_methods_super_and_type_definition() {
+        let base_src = "\
+package com.example;
+
+public interface Greeter {
+    int GREET_CODE = 7;
+    default String defaultGreet() { return \"hi\"; }
+    static void helper() {}
+}
+
+public class Base implements Greeter {
+    public int baseField = 10;
+    public Base() {}
+    public Base(int x) {}
+    public Base(String... parts) {}
+    public void greet(String who) {}
+    public void overloaded(int a) {}
+    public static class NestedInBase {}
+}
+";
+        let sub_src = "\
+package com.example;
+import java.util.List;
+
+public class Sub extends Base implements List<String> {
+    public int baseField = 99;
+    record Holder(Base owner) {}
+    private Base myBase;
+
+    public Sub() {
+        /*sup_ctor_0*/super();
+    }
+    public Sub(int x) {
+        /*sup_ctor_1*/super(x);
+    }
+    public Sub(String a, String b) {
+        /*sup_ctor_varargs*/super(a, b);
+    }
+
+    @Override
+    public void /*decl_greet*/greet(String who) {
+        int f = /*sup_field*/super.baseField;
+        /*sup_method*/super.greet(who);
+        /*iface_sup_method*/Greeter.super.defaultGreet();
+        /*unqual_base_method*/overloaded(1);
+        int c = /*unqual_iface_const*/GREET_CODE;
+        /*nested_type_ref*/NestedInBase nb = null;
+    }
+
+    public void overloaded() {}
+
+    public Base getBase() { return myBase; }
+
+    void demo(/*param_list*/List<String> items, Holder h) {
+        /*local_sub*/Sub s = new Sub();
+        int a = s./*inh_field*/baseField;
+        s./*call_greet*/greet(\"world\");
+        s./*call_overloaded_base*/overloaded(1);
+        s./*call_overloaded_sub*/overloaded();
+        String dg = s./*call_default*/defaultGreet();
+        s./*call_iface_static_on_sub*/helper();
+        Greeter./*call_iface_static_on_iface*/helper();
+        int sz = /*var_items*/items./*call_bin_iface*/size();
+        String ts = s./*call_obj_to_string*/toString();
+        /*call_get_base*/getBase();
+        Base fRef = this./*field_my_base*/myBase;
+        Base rComp = h./*rec_comp_owner*/owner;
+    }
+}
+";
+        let mut db = db_with_files(&[(1, base_src), (2, sub_src)]);
+
+        let mut cp = ClasspathIndex::default();
+        let jdk_origin = BinaryOrigin::Jdk {
+            module_name: Some(SmolStr::new("java.base")),
+        };
+        cp.insert_type(BinaryTypeSymbol {
+            name: SmolStr::new("Object"),
+            qualified_name: "java.lang.Object".to_string(),
+            internal_name: "java/lang/Object".to_string(),
+            package: "java.lang".to_string(),
+            enclosing_type: None,
+            kind: TypeKind::Class,
+            is_public: true,
+            is_static: false,
+            is_final: false,
+            is_abstract: false,
+            type_params: vec![],
+            super_class: None,
+            interfaces: vec![],
+            permitted_subclasses: vec![],
+            members: vec![BinaryMemberSymbol {
+                owner_type: "java.lang.Object".to_string(),
+                name: SmolStr::new("toString"),
+                kind: MemberKind::Method,
+                is_public: true,
+                is_static: false,
+                type_ref: Some("java.lang.String".to_string()),
+                params: vec![],
+                is_varargs: false,
+            }],
+            nested_types: vec![],
+            origin: jdk_origin.clone(),
+        });
+        cp.insert_type(BinaryTypeSymbol {
+            name: SmolStr::new("String"),
+            qualified_name: "java.lang.String".to_string(),
+            internal_name: "java/lang/String".to_string(),
+            package: "java.lang".to_string(),
+            enclosing_type: None,
+            kind: TypeKind::Class,
+            is_public: true,
+            is_static: false,
+            is_final: true,
+            is_abstract: false,
+            type_params: vec![],
+            super_class: Some("java.lang.Object".to_string()),
+            interfaces: vec![],
+            permitted_subclasses: vec![],
+            members: vec![],
+            nested_types: vec![],
+            origin: jdk_origin.clone(),
+        });
+        cp.insert_type(BinaryTypeSymbol {
+            name: SmolStr::new("Collection"),
+            qualified_name: "java.util.Collection".to_string(),
+            internal_name: "java/util/Collection".to_string(),
+            package: "java.util".to_string(),
+            enclosing_type: None,
+            kind: TypeKind::Interface,
+            is_public: true,
+            is_static: false,
+            is_final: false,
+            is_abstract: true,
+            type_params: vec![SmolStr::new("E")],
+            super_class: Some("java.lang.Object".to_string()),
+            interfaces: vec![],
+            permitted_subclasses: vec![],
+            members: vec![BinaryMemberSymbol {
+                owner_type: "java.util.Collection".to_string(),
+                name: SmolStr::new("size"),
+                kind: MemberKind::Method,
+                is_public: true,
+                is_static: false,
+                type_ref: Some("int".to_string()),
+                params: vec![],
+                is_varargs: false,
+            }],
+            nested_types: vec![],
+            origin: jdk_origin.clone(),
+        });
+        cp.insert_type(BinaryTypeSymbol {
+            name: SmolStr::new("List"),
+            qualified_name: "java.util.List".to_string(),
+            internal_name: "java/util/List".to_string(),
+            package: "java.util".to_string(),
+            enclosing_type: None,
+            kind: TypeKind::Interface,
+            is_public: true,
+            is_static: false,
+            is_final: false,
+            is_abstract: true,
+            type_params: vec![SmolStr::new("E")],
+            super_class: Some("java.lang.Object".to_string()),
+            interfaces: vec!["java.util.Collection".to_string()],
+            permitted_subclasses: vec![],
+            members: vec![],
+            nested_types: vec![],
+            origin: jdk_origin,
+        });
+        cp.finalize();
+        db.set_classpath_index(Arc::new(cp));
+
+        let sub_id = FileId(2);
+
+        // super(...) constructor resolution by arity & varargs.
+        let sup0 = resolve_at_offset(&db, sub_id, cursor(sub_src, "/*sup_ctor_0*/")).unwrap();
+        assert_eq!(sup0.kind, ResolvedSymbolKind::Constructor);
+        assert_eq!(sup0.qualified_name, "com.example.Base.Base");
+        assert_eq!(
+            sup0.detail,
+            Some(SymbolDetail::Constructor {
+                params: "()".to_string()
+            })
+        );
+
+        let sup1 = resolve_at_offset(&db, sub_id, cursor(sub_src, "/*sup_ctor_1*/")).unwrap();
+        assert_eq!(sup1.kind, ResolvedSymbolKind::Constructor);
+        assert_eq!(
+            sup1.detail,
+            Some(SymbolDetail::Constructor {
+                params: "(int x)".to_string()
+            })
+        );
+
+        let sup_v =
+            resolve_at_offset(&db, sub_id, cursor(sub_src, "/*sup_ctor_varargs*/")).unwrap();
+        assert_eq!(sup_v.kind, ResolvedSymbolKind::Constructor);
+        assert_eq!(
+            sup_v.detail,
+            Some(SymbolDetail::Constructor {
+                params: "(String... parts)".to_string()
+            })
+        );
+
+        // Overriding method declaration and call site carry `overrides`.
+        let decl_greet = resolve_at_offset(&db, sub_id, cursor(sub_src, "/*decl_greet*/")).unwrap();
+        assert_eq!(
+            decl_greet.overrides.as_deref(),
+            Some("com.example.Base.greet(String)")
+        );
+        let call_greet = resolve_at_offset(&db, sub_id, cursor(sub_src, "/*call_greet*/")).unwrap();
+        assert_eq!(call_greet.qualified_name, "com.example.Sub.greet");
+        assert_eq!(
+            call_greet.overrides.as_deref(),
+            Some("com.example.Base.greet(String)")
+        );
+
+        // `super.field`, `super.method(...)`, and `Interface.super.defaultMethod()`.
+        let sup_field_off = cursor(sub_src, "/*sup_field*/super.");
+        let sup_field = resolve_at_offset(&db, sub_id, sup_field_off).unwrap();
+        assert_eq!(sup_field.qualified_name, "com.example.Base.baseField");
+
+        let sup_method_off = cursor(sub_src, "/*sup_method*/super.");
+        let sup_method = resolve_at_offset(&db, sub_id, sup_method_off).unwrap();
+        assert_eq!(sup_method.qualified_name, "com.example.Base.greet");
+        assert!(sup_method.overrides.is_none());
+
+        let iface_sup_off = cursor(sub_src, "/*iface_sup_method*/Greeter.super.");
+        let iface_sup = resolve_at_offset(&db, sub_id, iface_sup_off).unwrap();
+        assert_eq!(iface_sup.qualified_name, "com.example.Greeter.defaultGreet");
+
+        // Unqualified inherited members & nested types inside Sub.
+        let unq_m =
+            resolve_at_offset(&db, sub_id, cursor(sub_src, "/*unqual_base_method*/")).unwrap();
+        assert_eq!(unq_m.qualified_name, "com.example.Base.overloaded");
+        let unq_c =
+            resolve_at_offset(&db, sub_id, cursor(sub_src, "/*unqual_iface_const*/")).unwrap();
+        assert_eq!(unq_c.qualified_name, "com.example.Greeter.GREET_CODE");
+        let nested_ref =
+            resolve_at_offset(&db, sub_id, cursor(sub_src, "/*nested_type_ref*/")).unwrap();
+        assert_eq!(nested_ref.qualified_name, "com.example.Base.NestedInBase");
+
+        // Subclass own field shadows Base field.
+        let inh_f = resolve_at_offset(&db, sub_id, cursor(sub_src, "/*inh_field*/")).unwrap();
+        assert_eq!(inh_f.qualified_name, "com.example.Sub.baseField");
+
+        // Overload arity preserved across hierarchy.
+        let ov_base =
+            resolve_at_offset(&db, sub_id, cursor(sub_src, "/*call_overloaded_base*/")).unwrap();
+        assert_eq!(ov_base.qualified_name, "com.example.Base.overloaded");
+        let ov_sub =
+            resolve_at_offset(&db, sub_id, cursor(sub_src, "/*call_overloaded_sub*/")).unwrap();
+        assert_eq!(ov_sub.qualified_name, "com.example.Sub.overloaded");
+
+        // Interface default method inherited; interface static method NOT inherited (JLS §8.4.8).
+        let def_g = resolve_at_offset(&db, sub_id, cursor(sub_src, "/*call_default*/")).unwrap();
+        assert_eq!(def_g.qualified_name, "com.example.Greeter.defaultGreet");
+        assert!(
+            resolve_at_offset(&db, sub_id, cursor(sub_src, "/*call_iface_static_on_sub*/"))
+                .is_none()
+        );
+        let iface_stat = resolve_at_offset(
+            &db,
+            sub_id,
+            cursor(sub_src, "/*call_iface_static_on_iface*/"),
+        )
+        .unwrap();
+        assert_eq!(iface_stat.qualified_name, "com.example.Greeter.helper");
+
+        // Inherited binary interface method (List -> Collection.size) and Object.toString().
+        let bin_size =
+            resolve_at_offset(&db, sub_id, cursor(sub_src, "/*call_bin_iface*/")).unwrap();
+        assert_eq!(bin_size.qualified_name, "java.util.Collection.size");
+        let obj_ts =
+            resolve_at_offset(&db, sub_id, cursor(sub_src, "/*call_obj_to_string*/")).unwrap();
+        assert_eq!(obj_ts.qualified_name, "java.lang.Object.toString");
+
+        // `resolve_type_of_symbol_at_offset` for local var, param, field, record component, method call.
+        let td_local = resolve_type_of_symbol_at_offset(
+            &db,
+            sub_id,
+            TextSize::from(cursor(sub_src, "/*local_sub*/Sub ")),
+        )
+        .unwrap();
+        assert_eq!(td_local.qualified_name, "com.example.Sub");
+        assert_eq!(td_local.file_id, Some(FileId(2)));
+
+        let td_param = resolve_type_of_symbol_at_offset(
+            &db,
+            sub_id,
+            TextSize::from(cursor(sub_src, "/*var_items*/")),
+        )
+        .unwrap();
+        assert_eq!(td_param.qualified_name, "java.util.List");
+        assert!(td_param.binary_target.is_some());
+
+        let td_field = resolve_type_of_symbol_at_offset(
+            &db,
+            sub_id,
+            TextSize::from(cursor(sub_src, "/*field_my_base*/")),
+        )
+        .unwrap();
+        assert_eq!(td_field.qualified_name, "com.example.Base");
+
+        let td_rec = resolve_type_of_symbol_at_offset(
+            &db,
+            sub_id,
+            TextSize::from(cursor(sub_src, "/*rec_comp_owner*/")),
+        )
+        .unwrap();
+        assert_eq!(td_rec.qualified_name, "com.example.Base");
+
+        let td_method = resolve_type_of_symbol_at_offset(
+            &db,
+            sub_id,
+            TextSize::from(cursor(sub_src, "/*call_get_base*/")),
+        )
+        .unwrap();
+        assert_eq!(td_method.qualified_name, "com.example.Base");
+
+        let td_this = resolve_type_of_symbol_at_offset(
+            &db,
+            sub_id,
+            TextSize::from(sub_src.find("this./*field_my_base*/").unwrap() as u32),
+        )
+        .unwrap();
+        assert_eq!(td_this.qualified_name, "com.example.Sub");
+
+        let td_sup_ctor = resolve_type_of_symbol_at_offset(
+            &db,
+            sub_id,
+            TextSize::from(cursor(sub_src, "/*sup_ctor_0*/")),
+        )
+        .unwrap();
+        assert_eq!(td_sup_ctor.qualified_name, "com.example.Base");
+
+        // Primitive local variable returns `None` for type definition.
+        assert!(
+            resolve_type_of_symbol_at_offset(
+                &db,
+                sub_id,
+                TextSize::from(sub_src.find("a = s./*inh_field*/").unwrap() as u32),
+            )
+            .is_none()
+        );
     }
 }

@@ -11,21 +11,28 @@ use std::{
 
 use ide::{
     Analysis, AnalysisHost, Cancellable, Cancelled, ClasspathIndex, FileId, LanguageLevel,
-    ModuleId, NavigationTarget, is_path_within, normalize_rel_path,
+    ModuleId, NavigationTarget, TypeHierarchyNode, is_path_within, normalize_rel_path,
 };
 use line_index::LineIndex;
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::{
     DiagnosticSeverity, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
-    HoverProviderCapability, InitializeParams, Location, MarkupContent, MarkupKind, OneOf,
-    PublishDiagnosticsParams, Range, ServerCapabilities, SymbolKind, TextDocumentSyncCapability,
-    TextDocumentSyncKind, Uri,
+    HoverProviderCapability, ImplementationProviderCapability, InitializeParams, Location,
+    MarkupContent, MarkupKind, OneOf, PublishDiagnosticsParams, Range, ServerCapabilities,
+    SymbolKind, TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TypeDefinitionProviderCapability, TypeHierarchyItem, TypeHierarchyPrepareParams,
+    TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, Uri,
     notification::{
         DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
         PublishDiagnostics,
     },
-    request::{DocumentSymbolRequest, GotoDefinition, HoverRequest, Request as _},
+    request::{
+        DocumentSymbolRequest, GotoDefinition, GotoImplementation, GotoImplementationParams,
+        GotoImplementationResponse, GotoTypeDefinition, GotoTypeDefinitionParams,
+        GotoTypeDefinitionResponse, HoverRequest, Request as _, TypeHierarchyPrepare,
+        TypeHierarchySubtypes, TypeHierarchySupertypes,
+    },
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -390,6 +397,121 @@ impl GlobalStateSnapshot {
         }
     }
 
+    fn position_offset(
+        &self,
+        pos: &TextDocumentPositionParams,
+    ) -> Cancellable<Option<(FileId, u32)>> {
+        let Some(&file_id) = self.files.get(&pos.text_document.uri) else {
+            return Ok(None);
+        };
+        let text = self.analysis.file_text(file_id)?;
+        let index = self.line_index(file_id, &text);
+        Ok(position_to_offset_with_index(&index, &text, pos.position).map(|off| (file_id, off)))
+    }
+
+    fn resolve_navigation_target(
+        &self,
+        target: NavigationTarget,
+    ) -> Cancellable<Option<(Uri, Range, Range)>> {
+        match target {
+            NavigationTarget::Source {
+                file_id,
+                full_range,
+                focus_range,
+            } => {
+                let Some(target_uri) = self.file_urls.get(&file_id).cloned() else {
+                    return Ok(None);
+                };
+                let target_text = self.analysis.file_text(file_id)?;
+                let target_index = self.line_index(file_id, &target_text);
+                let lsp_full = text_range_to_range_with_index(
+                    &target_index,
+                    &target_text,
+                    full_range.start().into(),
+                    full_range.end().into(),
+                );
+                let lsp_focus = text_range_to_range_with_index(
+                    &target_index,
+                    &target_text,
+                    focus_range.start().into(),
+                    focus_range.end().into(),
+                );
+                Ok(Some((target_uri, lsp_full, lsp_focus)))
+            }
+            NavigationTarget::Binary(bin_target) => {
+                let Some((path, source, range_opt)) = materialize_binary_location(
+                    &self.classpath_index,
+                    self.resolved_jdk.as_deref().map(PathBuf::as_path),
+                    &self.jar_companions,
+                    &bin_target,
+                ) else {
+                    return Ok(None);
+                };
+                let Some(target_uri) = path_to_uri(&path) else {
+                    return Ok(None);
+                };
+                let range = match range_opt {
+                    Some(text_range) => {
+                        let target_index = LineIndex::new(&source);
+                        text_range_to_range_with_index(
+                            &target_index,
+                            &source,
+                            text_range.start().into(),
+                            text_range.end().into(),
+                        )
+                    }
+                    None => Range::default(),
+                };
+                Ok(Some((target_uri, range, range)))
+            }
+        }
+    }
+
+    fn resolve_navigation_target_to_location(
+        &self,
+        target: NavigationTarget,
+    ) -> Cancellable<Option<Location>> {
+        Ok(self
+            .resolve_navigation_target(target)?
+            .map(|(uri, _full_range, focus_range)| Location {
+                uri,
+                range: focus_range,
+            }))
+    }
+
+    fn type_hierarchy_node_to_item(
+        &self,
+        node: TypeHierarchyNode,
+    ) -> Cancellable<Option<TypeHierarchyItem>> {
+        let Some((uri, full_range, focus_range)) = self.resolve_navigation_target(node.target)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(TypeHierarchyItem {
+            name: node.name.to_string(),
+            kind: to_lsp_symbol_kind(node.kind),
+            tags: None,
+            detail: Some(node.qualified_name.clone()),
+            uri,
+            range: full_range,
+            selection_range: focus_range,
+            data: Some(serde_json::Value::String(node.qualified_name)),
+        }))
+    }
+
+    fn type_hierarchy_nodes_to_items(
+        &self,
+        nodes: Vec<TypeHierarchyNode>,
+    ) -> Cancellable<Vec<TypeHierarchyItem>> {
+        let mut items = Vec::with_capacity(nodes.len());
+        for node in nodes {
+            if let Some(item) = self.type_hierarchy_node_to_item(node)? {
+                items.push(item);
+            }
+        }
+        Ok(items)
+    }
+
     fn document_symbols(
         &self,
         params: DocumentSymbolParams,
@@ -409,13 +531,9 @@ impl GlobalStateSnapshot {
     }
 
     fn hover(&self, params: HoverParams) -> Cancellable<Option<Hover>> {
-        let pos = params.text_document_position_params;
-        let Some(&file_id) = self.files.get(&pos.text_document.uri) else {
-            return Ok(None);
-        };
-        let text = self.analysis.file_text(file_id)?;
-        let index = self.line_index(file_id, &text);
-        let Some(offset) = position_to_offset_with_index(&index, &text, pos.position) else {
+        let Some((file_id, offset)) =
+            self.position_offset(&params.text_document_position_params)?
+        else {
             return Ok(None);
         };
         let Some(mut result) = self.analysis.hover(file_id, offset)? else {
@@ -443,70 +561,106 @@ impl GlobalStateSnapshot {
         &self,
         params: GotoDefinitionParams,
     ) -> Cancellable<Option<GotoDefinitionResponse>> {
-        let pos = params.text_document_position_params;
-        let Some(&file_id) = self.files.get(&pos.text_document.uri) else {
-            return Ok(None);
-        };
-        let text = self.analysis.file_text(file_id)?;
-        let index = self.line_index(file_id, &text);
-        let Some(offset) = position_to_offset_with_index(&index, &text, pos.position) else {
+        let Some((file_id, offset)) =
+            self.position_offset(&params.text_document_position_params)?
+        else {
             return Ok(None);
         };
         let Some(target) = self.analysis.goto_definition(file_id, offset)? else {
             return Ok(None);
         };
-        match target {
-            NavigationTarget::Source {
-                file_id,
-                focus_range,
-                ..
-            } => {
-                let Some(target_uri) = self.file_urls.get(&file_id).cloned() else {
-                    return Ok(None);
-                };
-                let target_text = self.analysis.file_text(file_id)?;
-                let target_index = self.line_index(file_id, &target_text);
-                let range = text_range_to_range_with_index(
-                    &target_index,
-                    &target_text,
-                    focus_range.start().into(),
-                    focus_range.end().into(),
-                );
-                Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                    uri: target_uri,
-                    range,
-                })))
-            }
-            NavigationTarget::Binary(bin_target) => {
-                let Some((path, source, range_opt)) = materialize_binary_location(
-                    &self.classpath_index,
-                    self.resolved_jdk.as_deref().map(PathBuf::as_path),
-                    &self.jar_companions,
-                    &bin_target,
-                ) else {
-                    return Ok(None);
-                };
-                let Some(target_uri) = path_to_uri(&path) else {
-                    return Ok(None);
-                };
-                let range = match range_opt {
-                    Some(text_range) => {
-                        let target_index = LineIndex::new(&source);
-                        text_range_to_range_with_index(
-                            &target_index,
-                            &source,
-                            text_range.start().into(),
-                            text_range.end().into(),
-                        )
-                    }
-                    None => Range::default(),
-                };
-                Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                    uri: target_uri,
-                    range,
-                })))
+        Ok(self
+            .resolve_navigation_target_to_location(target)?
+            .map(GotoDefinitionResponse::Scalar))
+    }
+
+    fn goto_implementation(
+        &self,
+        params: GotoImplementationParams,
+    ) -> Cancellable<Option<GotoImplementationResponse>> {
+        let Some((file_id, offset)) =
+            self.position_offset(&params.text_document_position_params)?
+        else {
+            return Ok(None);
+        };
+        let targets = self.analysis.goto_implementation(file_id, offset)?;
+        let mut locations = Vec::with_capacity(targets.len());
+        for target in targets {
+            if let Some(loc) = self.resolve_navigation_target_to_location(target)? {
+                locations.push(loc);
             }
         }
+        if locations.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(GotoImplementationResponse::Array(locations)))
+        }
+    }
+
+    fn goto_type_definition(
+        &self,
+        params: GotoTypeDefinitionParams,
+    ) -> Cancellable<Option<GotoTypeDefinitionResponse>> {
+        let Some((file_id, offset)) =
+            self.position_offset(&params.text_document_position_params)?
+        else {
+            return Ok(None);
+        };
+        let Some(target) = self.analysis.goto_type_definition(file_id, offset)? else {
+            return Ok(None);
+        };
+        Ok(self
+            .resolve_navigation_target_to_location(target)?
+            .map(GotoTypeDefinitionResponse::Scalar))
+    }
+
+    fn prepare_type_hierarchy(
+        &self,
+        params: TypeHierarchyPrepareParams,
+    ) -> Cancellable<Option<Vec<TypeHierarchyItem>>> {
+        let Some((file_id, offset)) =
+            self.position_offset(&params.text_document_position_params)?
+        else {
+            return Ok(None);
+        };
+        let Some(node) = self.analysis.prepare_type_hierarchy(file_id, offset)? else {
+            return Ok(None);
+        };
+        Ok(self
+            .type_hierarchy_node_to_item(node)?
+            .map(|item| vec![item]))
+    }
+
+    fn type_hierarchy_supertypes(
+        &self,
+        params: TypeHierarchySupertypesParams,
+    ) -> Cancellable<Option<Vec<TypeHierarchyItem>>> {
+        let Some(fqn) = params
+            .item
+            .data
+            .as_ref()
+            .and_then(serde_json::Value::as_str)
+        else {
+            return Ok(None);
+        };
+        let nodes = self.analysis.type_hierarchy_supertypes(fqn)?;
+        Ok(Some(self.type_hierarchy_nodes_to_items(nodes)?))
+    }
+
+    fn type_hierarchy_subtypes(
+        &self,
+        params: TypeHierarchySubtypesParams,
+    ) -> Cancellable<Option<Vec<TypeHierarchyItem>>> {
+        let Some(fqn) = params
+            .item
+            .data
+            .as_ref()
+            .and_then(serde_json::Value::as_str)
+        else {
+            return Ok(None);
+        };
+        let nodes = self.analysis.type_hierarchy_subtypes(fqn)?;
+        Ok(Some(self.type_hierarchy_nodes_to_items(nodes)?))
     }
 }
 
@@ -515,8 +669,36 @@ pub fn capabilities() -> ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         definition_provider: Some(OneOf::Left(true)),
+        implementation_provider: Some(ImplementationProviderCapability::Simple(true)),
+        type_definition_provider: Some(TypeDefinitionProviderCapability::Simple(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
         ..Default::default()
+    }
+}
+
+fn capabilities_json() -> serde_json::Result<serde_json::Value> {
+    let mut value = serde_json::to_value(capabilities())?;
+    // `lsp-types` 0.97 omits `ServerCapabilities::type_hierarchy_provider`, so advertise
+    // LSP 3.17 `typeHierarchyProvider` explicitly in the serialized capabilities object.
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "typeHierarchyProvider".to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
+    Ok(value)
+}
+
+fn to_lsp_symbol_kind(kind: ide::SymbolKind) -> SymbolKind {
+    match kind {
+        ide::SymbolKind::Class => SymbolKind::CLASS,
+        ide::SymbolKind::Interface | ide::SymbolKind::Annotation => SymbolKind::INTERFACE,
+        ide::SymbolKind::Enum => SymbolKind::ENUM,
+        ide::SymbolKind::Record => SymbolKind::STRUCT,
+        ide::SymbolKind::Field => SymbolKind::FIELD,
+        ide::SymbolKind::Method => SymbolKind::METHOD,
+        ide::SymbolKind::Constructor => SymbolKind::CONSTRUCTOR,
+        ide::SymbolKind::EnumConstant => SymbolKind::ENUM_MEMBER,
     }
 }
 
@@ -528,16 +710,7 @@ fn to_document_symbol(index: &LineIndex, text: &str, node: &ide::StructureNode) 
     DocumentSymbol {
         name: node.name.clone(),
         detail: node.detail.clone(),
-        kind: match node.kind {
-            ide::SymbolKind::Class => SymbolKind::CLASS,
-            ide::SymbolKind::Interface | ide::SymbolKind::Annotation => SymbolKind::INTERFACE,
-            ide::SymbolKind::Enum => SymbolKind::ENUM,
-            ide::SymbolKind::Record => SymbolKind::STRUCT,
-            ide::SymbolKind::Field => SymbolKind::FIELD,
-            ide::SymbolKind::Method => SymbolKind::METHOD,
-            ide::SymbolKind::Constructor => SymbolKind::CONSTRUCTOR,
-            ide::SymbolKind::EnumConstant => SymbolKind::ENUM_MEMBER,
-        },
+        kind: to_lsp_symbol_kind(node.kind),
         tags: None,
         deprecated: None,
         range: range(node.range),
@@ -601,7 +774,7 @@ fn notification_needs_workspace(method: &str) -> bool {
 
 /// Runs the server main loop until the client requests shutdown/exit.
 pub fn run(connection: Connection) -> anyhow::Result<()> {
-    let init_params_val = connection.initialize(serde_json::to_value(capabilities())?)?;
+    let init_params_val = connection.initialize(capabilities_json()?)?;
 
     let mut state = GlobalState::new();
     let mut pending_probe: Option<JoinHandle<WorkspaceProbe>> = None;
@@ -722,6 +895,38 @@ fn spawn_request_worker<F, S>(
     workers.push(handle);
 }
 
+fn dispatch_snapshot_request<R, F>(
+    state: &GlobalState,
+    connection: &Connection,
+    workers: &mut Vec<JoinHandle<()>>,
+    req: Request,
+    handler: F,
+) -> anyhow::Result<()>
+where
+    R: lsp_types::request::Request,
+    R::Params: Send + 'static,
+    R::Result: serde::Serialize,
+    F: FnOnce(GlobalStateSnapshot, R::Params) -> Cancellable<R::Result> + Send + 'static,
+{
+    match cast_request::<R>(req) {
+        Ok((id, params)) => {
+            let snap = state.snapshot();
+            let sender = connection.sender.clone();
+            spawn_request_worker(
+                workers,
+                id,
+                R::METHOD,
+                move || Ok(serde_json::to_value(handler(snap, params)?)),
+                move |resp| {
+                    let _ = sender.send(Message::Response(resp));
+                },
+            );
+        }
+        Err(response) => connection.sender.send(Message::Response(response))?,
+    }
+    Ok(())
+}
+
 fn dispatch_request(
     state: &GlobalState,
     connection: &Connection,
@@ -729,54 +934,74 @@ fn dispatch_request(
     req: Request,
 ) -> anyhow::Result<()> {
     match req.method.as_str() {
-        HoverRequest::METHOD => match cast_request::<HoverRequest>(req) {
-            Ok((id, params)) => {
-                let snap = state.snapshot();
-                let sender = connection.sender.clone();
-                spawn_request_worker(
-                    workers,
-                    id,
-                    HoverRequest::METHOD,
-                    move || Ok(serde_json::to_value(snap.hover(params)?)),
-                    move |resp| {
-                        let _ = sender.send(Message::Response(resp));
-                    },
-                );
-            }
-            Err(response) => connection.sender.send(Message::Response(response))?,
-        },
-        GotoDefinition::METHOD => match cast_request::<GotoDefinition>(req) {
-            Ok((id, params)) => {
-                let snap = state.snapshot();
-                let sender = connection.sender.clone();
-                spawn_request_worker(
-                    workers,
-                    id,
-                    GotoDefinition::METHOD,
-                    move || Ok(serde_json::to_value(snap.goto_definition(params)?)),
-                    move |resp| {
-                        let _ = sender.send(Message::Response(resp));
-                    },
-                );
-            }
-            Err(response) => connection.sender.send(Message::Response(response))?,
-        },
-        DocumentSymbolRequest::METHOD => match cast_request::<DocumentSymbolRequest>(req) {
-            Ok((id, params)) => {
-                let snap = state.snapshot();
-                let sender = connection.sender.clone();
-                spawn_request_worker(
-                    workers,
-                    id,
-                    DocumentSymbolRequest::METHOD,
-                    move || Ok(serde_json::to_value(snap.document_symbols(params)?)),
-                    move |resp| {
-                        let _ = sender.send(Message::Response(resp));
-                    },
-                );
-            }
-            Err(response) => connection.sender.send(Message::Response(response))?,
-        },
+        HoverRequest::METHOD => {
+            dispatch_snapshot_request::<HoverRequest, _>(state, connection, workers, req, |s, p| {
+                s.hover(p)
+            })?;
+        }
+        GotoDefinition::METHOD => {
+            dispatch_snapshot_request::<GotoDefinition, _>(
+                state,
+                connection,
+                workers,
+                req,
+                |s, p| s.goto_definition(p),
+            )?;
+        }
+        GotoImplementation::METHOD => {
+            dispatch_snapshot_request::<GotoImplementation, _>(
+                state,
+                connection,
+                workers,
+                req,
+                |s, p| s.goto_implementation(p),
+            )?;
+        }
+        GotoTypeDefinition::METHOD => {
+            dispatch_snapshot_request::<GotoTypeDefinition, _>(
+                state,
+                connection,
+                workers,
+                req,
+                |s, p| s.goto_type_definition(p),
+            )?;
+        }
+        TypeHierarchyPrepare::METHOD => {
+            dispatch_snapshot_request::<TypeHierarchyPrepare, _>(
+                state,
+                connection,
+                workers,
+                req,
+                |s, p| s.prepare_type_hierarchy(p),
+            )?;
+        }
+        TypeHierarchySupertypes::METHOD => {
+            dispatch_snapshot_request::<TypeHierarchySupertypes, _>(
+                state,
+                connection,
+                workers,
+                req,
+                |s, p| s.type_hierarchy_supertypes(p),
+            )?;
+        }
+        TypeHierarchySubtypes::METHOD => {
+            dispatch_snapshot_request::<TypeHierarchySubtypes, _>(
+                state,
+                connection,
+                workers,
+                req,
+                |s, p| s.type_hierarchy_subtypes(p),
+            )?;
+        }
+        DocumentSymbolRequest::METHOD => {
+            dispatch_snapshot_request::<DocumentSymbolRequest, _>(
+                state,
+                connection,
+                workers,
+                req,
+                |s, p| s.document_symbols(p),
+            )?;
+        }
         _ => {
             let response = Response::new_err(
                 req.id,

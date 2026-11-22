@@ -156,6 +156,49 @@ impl Client {
             }),
         )
     }
+
+    pub fn implementation_uri(&mut self, uri: &str, line: u32, character: u32) -> Value {
+        self.request(
+            "textDocument/implementation",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character }
+            }),
+        )
+    }
+
+    pub fn type_definition_uri(&mut self, uri: &str, line: u32, character: u32) -> Value {
+        self.request(
+            "textDocument/typeDefinition",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character }
+            }),
+        )
+    }
+
+    pub fn prepare_type_hierarchy_uri(
+        &mut self,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> Value {
+        self.request(
+            "textDocument/prepareTypeHierarchy",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character }
+            }),
+        )
+    }
+
+    pub fn type_hierarchy_supertypes(&mut self, item: Value) -> Value {
+        self.request("typeHierarchy/supertypes", json!({ "item": item }))
+    }
+
+    pub fn type_hierarchy_subtypes(&mut self, item: Value) -> Value {
+        self.request("typeHierarchy/subtypes", json!({ "item": item }))
+    }
 }
 
 pub fn start_server() -> (Client, thread::JoinHandle<()>) {
@@ -182,6 +225,9 @@ pub fn start_server_with_init(init_params: Value) -> (Client, thread::JoinHandle
     let init = client.request("initialize", init_params);
     assert_eq!(init["capabilities"]["hoverProvider"], json!(true));
     assert_eq!(init["capabilities"]["definitionProvider"], json!(true));
+    assert_eq!(init["capabilities"]["implementationProvider"], json!(true));
+    assert_eq!(init["capabilities"]["typeDefinitionProvider"], json!(true));
+    assert_eq!(init["capabilities"]["typeHierarchyProvider"], json!(true));
     client.notify("initialized", json!({}));
     (client, handle)
 }

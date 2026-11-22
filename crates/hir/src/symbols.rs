@@ -87,7 +87,15 @@ pub struct TypeSymbol {
     pub enclosing_type: Option<String>,
     pub kind: TypeKind,
     pub is_static: bool,
+    pub is_abstract: bool,
+    pub is_final: bool,
     pub type_params: Vec<SmolStr>,
+    /// Raw type references from `extends` clause (e.g. `["Base", "com.foo.Iface<T>"]`).
+    pub extends: Vec<String>,
+    /// Raw type references from `implements` clause.
+    pub implements: Vec<String>,
+    /// Raw type references from `permits` clause (sealed types).
+    pub permits: Vec<String>,
     /// Direct members of this type (fields, methods, constructors, enum constants, record components).
     pub members: Vec<MemberSymbol>,
     /// Simple names of directly nested types (resolved via `"{self.qualified_name}.{nested}"`).
@@ -137,6 +145,9 @@ pub struct MemberSymbol {
     pub name: SmolStr,
     pub kind: MemberKind,
     pub is_static: bool,
+    pub is_default: bool,
+    pub is_abstract: bool,
+    pub has_override: bool,
     /// Collapsed source text of the declared type (`None` for constructors and enum constants).
     pub type_ref: Option<String>,
     /// Parameter list summary for methods and constructors.
@@ -147,6 +158,20 @@ pub struct MemberSymbol {
 
 pub(crate) fn format_params_signature(params: &[ParamSummary]) -> String {
     let inner: Vec<String> = params.iter().map(ParamSummary::display).collect();
+    format!("({})", inner.join(", "))
+}
+
+pub(crate) fn format_params_types_signature(params: &[ParamSummary]) -> String {
+    let inner: Vec<String> = params
+        .iter()
+        .map(|p| {
+            if p.is_varargs {
+                format!("{}...", p.type_ref)
+            } else {
+                p.type_ref.clone()
+            }
+        })
+        .collect();
     format!("({})", inner.join(", "))
 }
 

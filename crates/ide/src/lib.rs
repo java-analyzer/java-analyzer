@@ -86,6 +86,38 @@ impl Analysis {
         hir::catch_cancelled(|| goto_definition(&self.db, file_id, offset))
     }
 
+    pub fn goto_implementation(
+        &self,
+        file_id: FileId,
+        offset: u32,
+    ) -> Cancellable<Vec<NavigationTarget>> {
+        hir::catch_cancelled(|| goto_implementation(&self.db, file_id, offset))
+    }
+
+    pub fn goto_type_definition(
+        &self,
+        file_id: FileId,
+        offset: u32,
+    ) -> Cancellable<Option<NavigationTarget>> {
+        hir::catch_cancelled(|| goto_type_definition(&self.db, file_id, offset))
+    }
+
+    pub fn prepare_type_hierarchy(
+        &self,
+        file_id: FileId,
+        offset: u32,
+    ) -> Cancellable<Option<TypeHierarchyNode>> {
+        hir::catch_cancelled(|| prepare_type_hierarchy(&self.db, file_id, offset))
+    }
+
+    pub fn type_hierarchy_supertypes(&self, fqn: &str) -> Cancellable<Vec<TypeHierarchyNode>> {
+        hir::catch_cancelled(|| type_hierarchy_supertypes(&self.db, fqn))
+    }
+
+    pub fn type_hierarchy_subtypes(&self, fqn: &str) -> Cancellable<Vec<TypeHierarchyNode>> {
+        hir::catch_cancelled(|| type_hierarchy_subtypes(&self.db, fqn))
+    }
+
     pub fn document_symbols(&self, file_id: FileId) -> Cancellable<Vec<StructureNode>> {
         hir::catch_cancelled(|| document_symbols(&self.db, file_id))
     }
@@ -135,12 +167,15 @@ pub enum NavigationTarget {
     Binary(BinaryTarget),
 }
 
-pub fn goto_definition(
-    db: &dyn DefDatabase,
-    file_id: FileId,
-    offset: u32,
-) -> Option<NavigationTarget> {
-    let resolved = hir::resolve_at_offset(db, file_id, offset)?;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeHierarchyNode {
+    pub name: SmolStr,
+    pub qualified_name: String,
+    pub kind: SymbolKind,
+    pub target: NavigationTarget,
+}
+
+fn navigation_target_from_resolved(resolved: ResolvedSymbol) -> Option<NavigationTarget> {
     if let Some((file_id, full_range, focus_range)) = resolved.location() {
         return Some(NavigationTarget::Source {
             file_id,
@@ -149,6 +184,235 @@ pub fn goto_definition(
         });
     }
     resolved.binary_target.map(NavigationTarget::Binary)
+}
+
+fn source_navigation_target(
+    db: &dyn DefDatabase,
+    file_id: FileId,
+    ast_id: hir::AstId,
+) -> NavigationTarget {
+    let range = db.ast_id_map(file_id).range(ast_id);
+    NavigationTarget::Source {
+        file_id,
+        full_range: range.full_range,
+        focus_range: range.selection_range,
+    }
+}
+
+fn type_kind_to_symbol_kind(kind: TypeKind) -> SymbolKind {
+    match kind {
+        TypeKind::Class => SymbolKind::Class,
+        TypeKind::Interface => SymbolKind::Interface,
+        TypeKind::Enum => SymbolKind::Enum,
+        TypeKind::Record => SymbolKind::Record,
+        TypeKind::Annotation => SymbolKind::Annotation,
+    }
+}
+
+fn count_params_in_signature(params: &str) -> usize {
+    let trimmed = params.trim();
+    let inner = trimmed
+        .strip_prefix('(')
+        .and_then(|s| s.strip_suffix(')'))
+        .unwrap_or(trimmed)
+        .trim();
+    if inner.is_empty() {
+        return 0;
+    }
+
+    let mut count = 1usize;
+    let mut angle_depth = 0usize;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut escaped = false;
+
+    for ch in inner.chars() {
+        if in_string || in_char {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+            } else if in_string && ch == '"' {
+                in_string = false;
+            } else if in_char && ch == '\'' {
+                in_char = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '\'' => in_char = true,
+            '<' => angle_depth += 1,
+            '>' => angle_depth = angle_depth.saturating_sub(1),
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            ',' if angle_depth == 0 && paren_depth == 0 && bracket_depth == 0 => {
+                count += 1;
+            }
+            _ => {}
+        }
+    }
+
+    count
+}
+
+fn resolve_type_hierarchy_node(db: &dyn DefDatabase, fqn: &str) -> Option<TypeHierarchyNode> {
+    let workspace = db.workspace_index();
+    if let Some((file_id, type_id)) = workspace.get_type(fqn) {
+        let tree = db.file_item_tree(file_id);
+        let ty = &tree.types[type_id];
+        return Some(TypeHierarchyNode {
+            name: ty.name.clone(),
+            qualified_name: ty.qualified_name.clone(),
+            kind: type_kind_to_symbol_kind(ty.kind),
+            target: source_navigation_target(db, file_id, ty.ast_id),
+        });
+    }
+
+    let classpath = db.classpath_index();
+    let bin = classpath.type_by_fqn(fqn)?;
+    Some(TypeHierarchyNode {
+        name: bin.name.clone(),
+        qualified_name: bin.qualified_name.clone(),
+        kind: type_kind_to_symbol_kind(bin.kind),
+        target: NavigationTarget::Binary(bin.to_target(None)),
+    })
+}
+
+fn resolved_to_type_hierarchy_node(resolved: ResolvedSymbol) -> Option<TypeHierarchyNode> {
+    let kind = match resolved.kind {
+        ResolvedSymbolKind::Class => SymbolKind::Class,
+        ResolvedSymbolKind::Interface => SymbolKind::Interface,
+        ResolvedSymbolKind::Enum => SymbolKind::Enum,
+        ResolvedSymbolKind::Record => SymbolKind::Record,
+        ResolvedSymbolKind::Annotation => SymbolKind::Annotation,
+        _ => return None,
+    };
+    let name = resolved.name.clone();
+    let qualified_name = resolved.qualified_name.clone();
+    let target = navigation_target_from_resolved(resolved)?;
+    Some(TypeHierarchyNode {
+        name,
+        qualified_name,
+        kind,
+        target,
+    })
+}
+
+#[must_use]
+pub fn goto_definition(
+    db: &dyn DefDatabase,
+    file_id: FileId,
+    offset: u32,
+) -> Option<NavigationTarget> {
+    let resolved = hir::resolve_at_offset(db, file_id, offset)?;
+    navigation_target_from_resolved(resolved)
+}
+
+/// Finds workspace implementations of the type or method at `offset` in `file_id`.
+#[must_use]
+pub fn goto_implementation(
+    db: &dyn DefDatabase,
+    file_id: FileId,
+    offset: u32,
+) -> Vec<NavigationTarget> {
+    let Some(resolved) = hir::resolve_at_offset(db, file_id, offset) else {
+        return Vec::new();
+    };
+
+    match resolved.kind {
+        ResolvedSymbolKind::Class
+        | ResolvedSymbolKind::Interface
+        | ResolvedSymbolKind::Enum
+        | ResolvedSymbolKind::Record
+        | ResolvedSymbolKind::Annotation => {
+            let workspace = db.workspace_index();
+            hir::all_subtypes(db, &resolved.qualified_name)
+                .into_iter()
+                .filter_map(|sub_fqn| {
+                    let (sub_file_id, type_id) = workspace.get_type(&sub_fqn)?;
+                    let tree = db.file_item_tree(sub_file_id);
+                    let ty = &tree.types[type_id];
+                    Some(source_navigation_target(db, sub_file_id, ty.ast_id))
+                })
+                .collect()
+        }
+        ResolvedSymbolKind::Method => {
+            let Some((owner_fqn, _)) = resolved.qualified_name.rsplit_once('.') else {
+                return Vec::new();
+            };
+            let param_count = match &resolved.detail {
+                Some(SymbolDetail::Method { params, .. }) => count_params_in_signature(params),
+                _ => return Vec::new(),
+            };
+            hir::find_overriding_methods(db, owner_fqn, &resolved.name, param_count)
+                .into_iter()
+                .map(|(ov_file_id, member_id)| {
+                    let tree = db.file_item_tree(ov_file_id);
+                    let member = &tree.members[member_id];
+                    source_navigation_target(db, ov_file_id, member.ast_id)
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Navigates to the declared type definition of the symbol or expression at `offset` in `file_id`.
+#[must_use]
+pub fn goto_type_definition(
+    db: &dyn DefDatabase,
+    file_id: FileId,
+    offset: u32,
+) -> Option<NavigationTarget> {
+    let resolved = hir::resolve_type_of_symbol_at_offset(db, file_id, offset.into())?;
+    navigation_target_from_resolved(resolved)
+}
+
+/// Prepares a [`TypeHierarchyNode`] for the type declaration or reference at `offset` in `file_id`.
+#[must_use]
+pub fn prepare_type_hierarchy(
+    db: &dyn DefDatabase,
+    file_id: FileId,
+    offset: u32,
+) -> Option<TypeHierarchyNode> {
+    hir::resolve_at_offset(db, file_id, offset).and_then(resolved_to_type_hierarchy_node)
+}
+
+/// Resolves direct supertypes (`super_class` followed by `interfaces`) of `fqn` across workspace
+/// sources and the binary classpath.
+#[must_use]
+pub fn type_hierarchy_supertypes(db: &dyn DefDatabase, fqn: &str) -> Vec<TypeHierarchyNode> {
+    let direct = hir::direct_supertypes(db, fqn);
+    let mut out = Vec::new();
+    if let Some(sup) = direct.super_class
+        && let Some(node) = resolve_type_hierarchy_node(db, &sup)
+    {
+        out.push(node);
+    }
+    for iface in direct.interfaces {
+        if !out.iter().any(|n| n.qualified_name == iface)
+            && let Some(node) = resolve_type_hierarchy_node(db, &iface)
+        {
+            out.push(node);
+        }
+    }
+    out
+}
+
+/// Resolves direct workspace subtypes of `fqn`.
+#[must_use]
+pub fn type_hierarchy_subtypes(db: &dyn DefDatabase, fqn: &str) -> Vec<TypeHierarchyNode> {
+    hir::direct_subtypes(db, fqn)
+        .into_iter()
+        .filter_map(|sub| resolve_type_hierarchy_node(db, &sub))
+        .collect()
 }
 
 pub fn hover(db: &dyn DefDatabase, file_id: FileId, offset: u32) -> Option<HoverResult> {
@@ -261,16 +525,30 @@ fn format_resolved_hover(sym: &ResolvedSymbol) -> String {
         ResolvedSymbolKind::Package => format!("```java\npackage {}\n```", sym.qualified_name),
     };
 
-    match &sym.binary_target {
-        Some(target) => match &target.origin {
+    let mut out = base;
+    if let Some(ov) = &sym.overrides {
+        out.push_str("\n*overrides `");
+        out.push_str(ov);
+        out.push_str("`*");
+    }
+    if let Some(target) = &sym.binary_target {
+        match &target.origin {
             BinaryOrigin::Jdk {
                 module_name: Some(module_name),
-            } => format!("{base}\n*from JDK module `{module_name}`*"),
-            BinaryOrigin::Jdk { module_name: None } => format!("{base}\n*from JDK*"),
-            BinaryOrigin::Jar { label } => format!("{base}\n*from `{label}`*"),
-        },
-        None => base,
+            } => {
+                out.push_str("\n*from JDK module `");
+                out.push_str(module_name);
+                out.push_str("`*");
+            }
+            BinaryOrigin::Jdk { module_name: None } => out.push_str("\n*from JDK*"),
+            BinaryOrigin::Jar { label } => {
+                out.push_str("\n*from `");
+                out.push_str(label);
+                out.push_str("`*");
+            }
+        }
     }
+    out
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -588,6 +866,7 @@ class C {
                 params: "(@Param(\"(\") int a)".to_string(),
             }),
             kind: ResolvedSymbolKind::Method,
+            overrides: None,
         };
         assert_eq!(
             format_resolved_hover(&structured),
@@ -1204,5 +1483,411 @@ class App { Assert a; }
             .unwrap();
         let (_, focus) = assert_source_target(def, FileId(1));
         assert_eq!(slice(ws_assert, focus), "Assert");
+    }
+
+    fn hierarchy_classpath() -> ClasspathIndex {
+        let mut cp = sample_ide_classpath();
+        let jdk_base = BinaryOrigin::Jdk {
+            module_name: Some(SmolStr::new("java.base")),
+        };
+
+        cp.insert_type(BinaryTypeSymbol {
+            name: SmolStr::new("Object"),
+            qualified_name: "java.lang.Object".to_string(),
+            internal_name: "java/lang/Object".to_string(),
+            package: "java.lang".to_string(),
+            enclosing_type: None,
+            kind: TypeKind::Class,
+            is_public: true,
+            is_static: false,
+            is_final: false,
+            is_abstract: false,
+            type_params: vec![],
+            super_class: None,
+            interfaces: vec![],
+            permitted_subclasses: vec![],
+            members: vec![BinaryMemberSymbol {
+                owner_type: "java.lang.Object".to_string(),
+                name: SmolStr::new("toString"),
+                kind: MemberKind::Method,
+                is_public: true,
+                is_static: false,
+                type_ref: Some("java.lang.String".to_string()),
+                params: vec![],
+                is_varargs: false,
+            }],
+            nested_types: vec![],
+            origin: jdk_base.clone(),
+        });
+
+        cp.insert_type(BinaryTypeSymbol {
+            name: SmolStr::new("Collection"),
+            qualified_name: "java.util.Collection".to_string(),
+            internal_name: "java/util/Collection".to_string(),
+            package: "java.util".to_string(),
+            enclosing_type: None,
+            kind: TypeKind::Interface,
+            is_public: true,
+            is_static: false,
+            is_final: false,
+            is_abstract: true,
+            type_params: vec![SmolStr::new("E")],
+            super_class: None,
+            interfaces: vec![],
+            permitted_subclasses: vec![],
+            members: vec![],
+            nested_types: vec![],
+            origin: jdk_base.clone(),
+        });
+
+        cp.insert_type(BinaryTypeSymbol {
+            name: SmolStr::new("List"),
+            qualified_name: "java.util.List".to_string(),
+            internal_name: "java/util/List".to_string(),
+            package: "java.util".to_string(),
+            enclosing_type: None,
+            kind: TypeKind::Interface,
+            is_public: true,
+            is_static: false,
+            is_final: false,
+            is_abstract: true,
+            type_params: vec![SmolStr::new("E")],
+            super_class: None,
+            interfaces: vec!["java.util.Collection".to_string()],
+            permitted_subclasses: vec![],
+            members: vec![BinaryMemberSymbol {
+                owner_type: "java.util.List".to_string(),
+                name: SmolStr::new("size"),
+                kind: MemberKind::Method,
+                is_public: true,
+                is_static: false,
+                type_ref: Some("int".to_string()),
+                params: vec![],
+                is_varargs: false,
+            }],
+            nested_types: vec![],
+            origin: jdk_base,
+        });
+
+        cp.finalize();
+        cp
+    }
+
+    #[test]
+    fn hover_displays_overrides_note_before_binary_origin() {
+        let base_src = "\
+package com.example;
+public interface Greeter {
+    String greet(String name);
+}
+";
+        let impl_src = "\
+package com.example;
+public class FriendlyGreeter implements Greeter {
+    @Override
+    public String /*greet_impl*/greet(String name) {
+        return \"hi \" + name;
+    }
+    public String /*non_override*/extra() {
+        return \"ok\";
+    }
+}
+";
+        let db = db_with_files(&[(1, base_src), (2, impl_src)]);
+
+        let h = hover(&db, FileId(2), cursor(impl_src, "/*greet_impl*/")).unwrap();
+        assert_eq!(
+            h.content,
+            "```java\nString com.example.FriendlyGreeter.greet(String name)\n```\n*overrides `com.example.Greeter.greet(String)`*"
+        );
+
+        let non_ov = hover(&db, FileId(2), cursor(impl_src, "/*non_override*/")).unwrap();
+        assert_eq!(
+            non_ov.content,
+            "```java\nString com.example.FriendlyGreeter.extra()\n```"
+        );
+
+        let synthetic = ResolvedSymbol {
+            file_id: None,
+            full_range: None,
+            focus_range: None,
+            binary_target: Some(BinaryTarget {
+                origin: BinaryOrigin::Jdk {
+                    module_name: Some(SmolStr::new("java.base")),
+                },
+                internal_name: "java/util/ArrayList".to_string(),
+                qualified_name: "java.util.ArrayList".to_string(),
+                member_name: Some(SmolStr::new("size")),
+            }),
+            name: SmolStr::new("size"),
+            qualified_name: "java.util.ArrayList.size".to_string(),
+            detail: Some(SymbolDetail::Method {
+                return_type: Some("int".to_string()),
+                params: "()".to_string(),
+            }),
+            kind: ResolvedSymbolKind::Method,
+            overrides: Some("java.util.List.size()".to_string()),
+        };
+        assert_eq!(
+            format_resolved_hover(&synthetic),
+            "```java\nint java.util.ArrayList.size()\n```\n*overrides `java.util.List.size()`*\n*from JDK module `java.base`*"
+        );
+    }
+
+    #[test]
+    fn goto_implementation_on_types_and_methods() {
+        let api = "\
+package com.api;
+import java.util.Map;
+public interface /*iface*/Repo {
+    void /*save_decl*/save(Map<String, Integer> items, int count);
+    void save(String single);
+}
+";
+        let base = "\
+package com.impl;
+import com.api.Repo;
+import java.util.Map;
+public abstract class /*base*/AbstractRepo implements Repo {
+    @Override
+    public void save(Map<String, Integer> items, int count) {}
+    public void save(String single) {}
+}
+";
+        let sub = "\
+package com.impl;
+import com.api./*iface_ref*/Repo;
+import java.util.List;
+import java.util.Map;
+public class ConcreteRepo extends AbstractRepo {
+    @Override
+    public void save(Map<String, Integer> items, int count) {}
+    void use(Repo r) {
+        r./*save_call*/save(null, 1);
+    }
+}
+class MyList implements /*bin_list*/List<String> {
+    @Override
+    public int size() { return 0; }
+}
+";
+        let mut host = AnalysisHost::new();
+        host.set_file_text(FileId(1), Arc::new(api.to_string()));
+        host.set_file_text(FileId(2), Arc::new(base.to_string()));
+        host.set_file_text(FileId(3), Arc::new(sub.to_string()));
+        host.set_workspace_files(Arc::new(vec![FileId(1), FileId(2), FileId(3)]));
+        host.set_classpath_index(Arc::new(hierarchy_classpath()));
+
+        let snap = host.analysis();
+
+        // Interface declaration -> all workspace subtypes (sorted by FQN: AbstractRepo, ConcreteRepo).
+        let iface_impls = snap
+            .goto_implementation(FileId(1), cursor(api, "/*iface*/"))
+            .unwrap();
+        assert_eq!(iface_impls.len(), 2);
+        let (_, f0) = assert_source_target(iface_impls[0].clone(), FileId(2));
+        assert_eq!(slice(base, f0), "AbstractRepo");
+        let (_, f1) = assert_source_target(iface_impls[1].clone(), FileId(3));
+        assert_eq!(slice(sub, f1), "ConcreteRepo");
+
+        // Type reference to interface -> same workspace subtypes.
+        let ref_impls = snap
+            .goto_implementation(FileId(3), cursor(sub, "/*iface_ref*/"))
+            .unwrap();
+        assert_eq!(ref_impls, iface_impls);
+
+        // Abstract base class -> ConcreteRepo only.
+        let base_impls = snap
+            .goto_implementation(FileId(2), cursor(base, "/*base*/"))
+            .unwrap();
+        assert_eq!(base_impls.len(), 1);
+        let (_, bf) = assert_source_target(base_impls[0].clone(), FileId(3));
+        assert_eq!(slice(sub, bf), "ConcreteRepo");
+
+        // Binary interface reference -> workspace implementer MyList.
+        let bin_impls = snap
+            .goto_implementation(FileId(3), cursor(sub, "/*bin_list*/"))
+            .unwrap();
+        assert_eq!(bin_impls.len(), 1);
+        let (_, mf) = assert_source_target(bin_impls[0].clone(), FileId(3));
+        assert_eq!(slice(sub, mf), "MyList");
+
+        // Method declaration (with generic comma inside param type -> still arity 2) -> both overrides.
+        let method_impls = snap
+            .goto_implementation(FileId(1), cursor(api, "/*save_decl*/"))
+            .unwrap();
+        assert_eq!(method_impls.len(), 2);
+        let (m0_full, m0_focus) = assert_source_target(method_impls[0].clone(), FileId(2));
+        assert_eq!(slice(base, m0_focus), "save");
+        assert!(slice(base, m0_full).contains("int count"));
+        let (m1_full, m1_focus) = assert_source_target(method_impls[1].clone(), FileId(3));
+        assert_eq!(slice(sub, m1_focus), "save");
+        assert!(slice(sub, m1_full).contains("int count"));
+
+        // Method call site -> same overriding methods.
+        let call_impls = snap
+            .goto_implementation(FileId(3), cursor(sub, "/*save_call*/"))
+            .unwrap();
+        assert_eq!(call_impls, method_impls);
+    }
+
+    #[test]
+    fn goto_type_definition_workspace_and_binary() {
+        let model = "\
+package com.model;
+public class User {
+    public String name;
+}
+";
+        let app = "\
+package com.app;
+import com.model.User;
+import java.util.List;
+public record Wrapper(User /*rec_comp*/owner) {
+    private User /*field*/primary;
+    void run(User /*param*/arg, List<String> /*bin_param*/items) {
+        User /*local*/u = arg;
+        String /*bin_local*/s = u.name;
+        int n = /*bin_call*/s.length();
+        User x = /*src_use*/u;
+    }
+}
+";
+        let mut host = AnalysisHost::new();
+        host.set_file_text(FileId(1), Arc::new(model.to_string()));
+        host.set_file_text(FileId(2), Arc::new(app.to_string()));
+        host.set_workspace_files(Arc::new(vec![FileId(1), FileId(2)]));
+        host.set_classpath_index(Arc::new(hierarchy_classpath()));
+
+        let snap = host.analysis();
+
+        for marker in ["/*rec_comp*/", "/*field*/", "/*param*/", "/*local*/", "/*src_use*/"] {
+            let target = snap
+                .goto_type_definition(FileId(2), cursor(app, marker))
+                .unwrap()
+                .unwrap();
+            let (_, focus) = assert_source_target(target, FileId(1));
+            assert_eq!(slice(model, focus), "User");
+        }
+
+        let bin_local = snap
+            .goto_type_definition(FileId(2), cursor(app, "/*bin_local*/"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            bin_local,
+            NavigationTarget::Binary(BinaryTarget {
+                origin: BinaryOrigin::Jdk {
+                    module_name: Some(SmolStr::new("java.base")),
+                },
+                internal_name: "java/lang/String".to_string(),
+                qualified_name: "java.lang.String".to_string(),
+                member_name: None,
+            })
+        );
+
+        let bin_param = snap
+            .goto_type_definition(FileId(2), cursor(app, "/*bin_param*/"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            bin_param,
+            NavigationTarget::Binary(BinaryTarget {
+                origin: BinaryOrigin::Jdk {
+                    module_name: Some(SmolStr::new("java.base")),
+                },
+                internal_name: "java/util/List".to_string(),
+                qualified_name: "java.util.List".to_string(),
+                member_name: None,
+            })
+        );
+    }
+
+    #[test]
+    fn type_hierarchy_prepare_supertypes_and_subtypes() {
+        let base_src = "\
+package com.h;
+public abstract class Base {}
+";
+        let types_src = "\
+package com.h;
+import java.util.List;
+public interface Extra {}
+public abstract class /*mid_decl*/Mid extends Base implements Extra, List<String> {
+    void /*non_type*/helper() {}
+}
+public class Leaf extends Mid {}
+";
+        let mut host = AnalysisHost::new();
+        host.set_file_text(FileId(1), Arc::new(base_src.to_string()));
+        host.set_file_text(FileId(2), Arc::new(types_src.to_string()));
+        host.set_workspace_files(Arc::new(vec![FileId(1), FileId(2)]));
+        host.set_classpath_index(Arc::new(hierarchy_classpath()));
+
+        let snap = host.analysis();
+
+        // Prepare on non-type returns None.
+        assert!(
+            snap.prepare_type_hierarchy(FileId(2), cursor(types_src, "/*non_type*/"))
+                .unwrap()
+                .is_none()
+        );
+
+        // Prepare on workspace class declaration.
+        let mid_node = snap
+            .prepare_type_hierarchy(FileId(2), cursor(types_src, "/*mid_decl*/"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(mid_node.name, "Mid");
+        assert_eq!(mid_node.qualified_name, "com.h.Mid");
+        assert_eq!(mid_node.kind, SymbolKind::Class);
+        let (_, mid_focus) = assert_source_target(mid_node.target.clone(), FileId(2));
+        assert_eq!(slice(types_src, mid_focus), "Mid");
+
+        // Supertypes of Mid: Base (source), Extra (source), java.util.List (binary).
+        let supers = snap.type_hierarchy_supertypes(&mid_node.qualified_name).unwrap();
+        assert_eq!(supers.len(), 3);
+        assert_eq!(supers[0].qualified_name, "com.h.Base");
+        assert_eq!(supers[0].kind, SymbolKind::Class);
+        assert_source_target(supers[0].target.clone(), FileId(1));
+
+        assert_eq!(supers[1].qualified_name, "com.h.Extra");
+        assert_eq!(supers[1].kind, SymbolKind::Interface);
+        assert_source_target(supers[1].target.clone(), FileId(2));
+
+        assert_eq!(supers[2].qualified_name, "java.util.List");
+        assert_eq!(supers[2].kind, SymbolKind::Interface);
+        assert_eq!(
+            supers[2].target,
+            NavigationTarget::Binary(BinaryTarget {
+                origin: BinaryOrigin::Jdk {
+                    module_name: Some(SmolStr::new("java.base")),
+                },
+                internal_name: "java/util/List".to_string(),
+                qualified_name: "java.util.List".to_string(),
+                member_name: None,
+            })
+        );
+
+        // Binary supertype query: java.util.List -> java.util.Collection.
+        let list_supers = snap.type_hierarchy_supertypes("java.util.List").unwrap();
+        assert_eq!(list_supers.len(), 1);
+        assert_eq!(list_supers[0].qualified_name, "java.util.Collection");
+        assert_eq!(list_supers[0].kind, SymbolKind::Interface);
+
+        // Direct subtypes of Base: Mid (not Leaf, which is transitive).
+        let base_subs = snap.type_hierarchy_subtypes("com.h.Base").unwrap();
+        assert_eq!(base_subs, vec![mid_node.clone()]);
+
+        // Direct subtypes of Mid: Leaf.
+        let mid_subs = snap.type_hierarchy_subtypes("com.h.Mid").unwrap();
+        assert_eq!(mid_subs.len(), 1);
+        assert_eq!(mid_subs[0].qualified_name, "com.h.Leaf");
+        let (_, leaf_focus) = assert_source_target(mid_subs[0].target.clone(), FileId(2));
+        assert_eq!(slice(types_src, leaf_focus), "Leaf");
+
+        // Direct subtypes of binary java.util.List: Mid.
+        let list_subs = snap.type_hierarchy_subtypes("java.util.List").unwrap();
+        assert_eq!(list_subs, vec![mid_node]);
     }
 }

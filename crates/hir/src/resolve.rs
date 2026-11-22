@@ -1,6 +1,9 @@
 //! Pure, IO-free Java name resolution at a source offset.
 //! See `docs/specs/0005-symbol-indexing-and-name-resolution.md`.
 
+use std::collections::VecDeque;
+
+use rustc_hash::FxHashSet;
 use smol_str::SmolStr;
 use syntax::{
     SyntaxNode, TextRange, TextSize,
@@ -14,6 +17,9 @@ use syntax::{
 use crate::{
     DefDatabase, FileId,
     classpath::{BinaryTarget, ClasspathIndex},
+    hierarchy::{
+        direct_supertypes, find_overridden_method, linearized_supertypes, parse_type_ref_segments,
+    },
     item_tree::{AstIdMap, FileItemTree, MemberId, TypeId},
     symbols::{
         ImportKind, MemberKind, MemberSymbol, ParamSummary, TypeKind, TypeSymbol, WorkspaceIndex,
@@ -122,6 +128,9 @@ pub struct ResolvedSymbol {
     pub qualified_name: String,
     pub detail: Option<SymbolDetail>,
     pub kind: ResolvedSymbolKind,
+    /// Nearest overridden supertype method signature (`"OwnerFqn.methodName(ParamTypes...)"`),
+    /// populated when resolving an overriding method declaration or reference.
+    pub overrides: Option<String>,
 }
 
 impl ResolvedSymbol {
@@ -158,7 +167,7 @@ struct TypeParamSymbol {
 #[derive(Debug, Clone)]
 enum TypeRefTarget {
     Indexed(FileId, TypeId),
-    Local(TypeSymbol),
+    Local(Box<TypeSymbol>),
     Binary(String),
 }
 
@@ -198,7 +207,7 @@ impl From<TypeRefTarget> for ResolvedTarget {
     fn from(target: TypeRefTarget) -> Self {
         match target {
             TypeRefTarget::Indexed(fid, tid) => Self::IndexedType(fid, tid),
-            TypeRefTarget::Local(ty) => Self::LocalType(ty),
+            TypeRefTarget::Local(ty) => Self::LocalType(*ty),
             TypeRefTarget::Binary(fqn) => Self::BinaryType(fqn),
         }
     }
@@ -246,6 +255,7 @@ impl ResolvedTarget {
                     qualified_name: t.qualified_name.clone(),
                     detail,
                     kind: t.kind.into(),
+                    overrides: None,
                 })
             }
             Self::LocalType(t) => {
@@ -260,6 +270,7 @@ impl ResolvedTarget {
                     qualified_name: t.qualified_name,
                     detail,
                     kind: t.kind.into(),
+                    overrides: None,
                 })
             }
             Self::BinaryType(fqn) => {
@@ -275,6 +286,7 @@ impl ResolvedTarget {
                     qualified_name: t.qualified_name.clone(),
                     detail,
                     kind: t.kind.into(),
+                    overrides: None,
                 })
             }
             Self::IndexedMember(file_id, member_id) => {
@@ -286,6 +298,13 @@ impl ResolvedTarget {
                     None => m.name.to_string(),
                 };
                 let detail = member_detail(m.kind, m.type_ref.as_deref(), &m.params);
+                let overrides = (m.kind == MemberKind::Method && !m.is_static)
+                    .then(|| {
+                        m.owner_type.as_deref().and_then(|owner_fqn| {
+                            find_overridden_method(db, owner_fqn, &m.name, m.params.len())
+                        })
+                    })
+                    .flatten();
                 Some(ResolvedSymbol {
                     file_id: Some(file_id),
                     full_range: Some(range.full_range),
@@ -295,6 +314,7 @@ impl ResolvedTarget {
                     qualified_name,
                     detail,
                     kind: m.kind.into(),
+                    overrides,
                 })
             }
             Self::LocalMember(m) => {
@@ -303,6 +323,13 @@ impl ResolvedTarget {
                     None => m.name.to_string(),
                 };
                 let detail = member_detail(m.kind, m.type_ref.as_deref(), &m.params);
+                let overrides = (m.kind == MemberKind::Method && !m.is_static)
+                    .then(|| {
+                        m.owner_type.as_deref().and_then(|owner_fqn| {
+                            find_overridden_method(db, owner_fqn, &m.name, m.params.len())
+                        })
+                    })
+                    .flatten();
                 Some(ResolvedSymbol {
                     file_id: Some(m.file_id),
                     full_range: Some(m.full_range),
@@ -312,6 +339,7 @@ impl ResolvedTarget {
                     qualified_name,
                     detail,
                     kind: m.kind.into(),
+                    overrides,
                 })
             }
             Self::BinaryMember {
@@ -321,6 +349,9 @@ impl ResolvedTarget {
                 let t = classpath.type_by_fqn(&owner_fqn)?;
                 let m = t.members.get(member_index)?;
                 let detail = member_detail(m.kind, m.type_ref.as_deref(), &m.params);
+                let overrides = (m.kind == MemberKind::Method && !m.is_static)
+                    .then(|| find_overridden_method(db, &owner_fqn, &m.name, m.params.len()))
+                    .flatten();
                 Some(ResolvedSymbol {
                     file_id: None,
                     full_range: None,
@@ -330,6 +361,7 @@ impl ResolvedTarget {
                     qualified_name: format!("{}.{}", t.qualified_name, m.name),
                     detail,
                     kind: m.kind.into(),
+                    overrides,
                 })
             }
             Self::Local(l) => {
@@ -343,6 +375,7 @@ impl ResolvedTarget {
                     qualified_name,
                     detail: l.type_ref.map(SymbolDetail::TypeRef),
                     kind: l.kind.into(),
+                    overrides: None,
                 })
             }
             Self::TypeParam(tp) => {
@@ -357,6 +390,7 @@ impl ResolvedTarget {
                     qualified_name,
                     detail,
                     kind: ResolvedSymbolKind::TypeParam,
+                    overrides: None,
                 })
             }
             Self::Package(name) => {
@@ -370,6 +404,7 @@ impl ResolvedTarget {
                     qualified_name: name,
                     detail: None,
                     kind: ResolvedSymbolKind::Package,
+                    overrides: None,
                 })
             }
         }
@@ -386,7 +421,7 @@ struct ResolveCtx<'a> {
     classpath: &'a ClasspathIndex,
 }
 
-/// Resolves the Java identifier at byte `offset` in `file_id`, if any.
+/// Resolves the Java identifier or `super` keyword at byte `offset` in `file_id`, if any.
 pub fn resolve_at_offset(
     db: &dyn DefDatabase,
     file_id: FileId,
@@ -398,12 +433,6 @@ pub fn resolve_at_offset(
         return None;
     }
 
-    let token = root.token_at_offset(offset_size).right_biased()?;
-    if token.kind() != IDENT {
-        return None;
-    }
-
-    let parent = token.parent()?;
     let file_tree = db.file_item_tree(file_id);
     let ast_id_map = db.ast_id_map(file_id);
     let index = db.workspace_index();
@@ -417,13 +446,110 @@ pub fn resolve_at_offset(
         classpath: &classpath,
     };
 
-    let target = match parent.kind() {
-        NAME => resolve_declaration_site(ctx, &parent)?,
-        NAME_REF => resolve_reference_site(ctx, &parent)?,
-        _ => return None,
+    let target = resolve_target_at_offset(ctx, &root, offset_size)?;
+    target.into_resolved_symbol(db, &classpath)
+}
+
+/// Resolves the declared type of the variable, parameter, field, record component, method return,
+/// or expression at `offset` in `file_id` to its workspace or binary [`ResolvedSymbol`].
+#[must_use]
+pub fn resolve_type_of_symbol_at_offset(
+    db: &dyn DefDatabase,
+    file_id: FileId,
+    offset: TextSize,
+) -> Option<ResolvedSymbol> {
+    let root = db.syntax_tree(file_id);
+    if offset > root.text_range().end() {
+        return None;
+    }
+
+    let file_tree = db.file_item_tree(file_id);
+    let ast_id_map = db.ast_id_map(file_id);
+    let index = db.workspace_index();
+    let classpath = db.classpath_index();
+    let ctx = ResolveCtx {
+        db,
+        file_id,
+        file_tree: &file_tree,
+        ast_id_map: &ast_id_map,
+        index: &index,
+        classpath: &classpath,
     };
 
-    target.into_resolved_symbol(db, &classpath)
+    let token = root.token_at_offset(offset).right_biased()?;
+    let parent = token.parent()?;
+
+    if token.kind() == THIS_KW && parent.kind() == THIS_EXPR {
+        let ty = resolve_expr_type(ctx, &parent, 0)?;
+        return ResolvedTarget::from(ty).into_resolved_symbol(db, &classpath);
+    }
+
+    if let Some(target) = resolve_target_at_offset(ctx, &root, offset) {
+        let ty = match target {
+            ResolvedTarget::IndexedMember(m_file, m_id) => {
+                let m_tree = db.file_item_tree(m_file);
+                if m_tree.members[m_id].kind == MemberKind::Constructor {
+                    let owner_fqn = m_tree.members[m_id].owner_type.as_deref()?;
+                    lookup_type_by_fqn(&m_tree, &index, owner_fqn)
+                        .map(|(fid, tid)| TypeRefTarget::Indexed(fid, tid))?
+                } else {
+                    target_to_type_ref(ctx, ResolvedTarget::IndexedMember(m_file, m_id), 0)?
+                }
+            }
+            ResolvedTarget::LocalMember(m) if m.kind == MemberKind::Constructor => {
+                let owner_fqn = m.owner_type.as_deref()?;
+                let decl_tree = db.file_item_tree(m.file_id);
+                lookup_type_by_fqn(&decl_tree, &index, owner_fqn)
+                    .map(|(fid, tid)| TypeRefTarget::Indexed(fid, tid))?
+            }
+            ResolvedTarget::BinaryMember {
+                owner_fqn,
+                member_index,
+            } => {
+                let owner_ty = classpath.type_by_fqn(&owner_fqn)?;
+                let m = owner_ty.members.get(member_index)?;
+                if m.kind == MemberKind::Constructor {
+                    TypeRefTarget::Binary(owner_fqn)
+                } else {
+                    target_to_type_ref(
+                        ctx,
+                        ResolvedTarget::BinaryMember {
+                            owner_fqn,
+                            member_index,
+                        },
+                        0,
+                    )?
+                }
+            }
+            other => target_to_type_ref(ctx, other, 0)?,
+        };
+        return ResolvedTarget::from(ty).into_resolved_symbol(db, &classpath);
+    }
+
+    if token.kind() == NEW_KW && parent.kind() == NEW_EXPR {
+        let ty = resolve_expr_type(ctx, &parent, 0)?;
+        return ResolvedTarget::from(ty).into_resolved_symbol(db, &classpath);
+    }
+
+    None
+}
+
+fn resolve_target_at_offset(
+    ctx: ResolveCtx<'_>,
+    root: &SyntaxNode,
+    offset_size: TextSize,
+) -> Option<ResolvedTarget> {
+    let token = root.token_at_offset(offset_size).right_biased()?;
+    let parent = token.parent()?;
+    match token.kind() {
+        IDENT => match parent.kind() {
+            NAME => resolve_declaration_site(ctx, &parent),
+            NAME_REF => resolve_reference_site(ctx, &parent),
+            _ => None,
+        },
+        SUPER_KW if parent.kind() == SUPER_EXPR => resolve_super_expr_target(ctx, &parent),
+        _ => None,
+    }
 }
 
 fn local_symbol_from_node(
@@ -665,6 +791,9 @@ fn resolve_member_declaration(
             name: node_ident_text(name_node),
             kind: MemberKind::EnumConstant,
             is_static: true,
+            is_default: false,
+            is_abstract: false,
+            has_override: false,
             type_ref: None,
             params: Vec::new(),
             full_range: member_node.text_range(),
@@ -847,7 +976,7 @@ fn resolve_method_ref(
         let seg_refs: Vec<&str> = segs.iter().map(String::as_str).collect();
         match resolve_type_segments(ctx, &qualifier, &seg_refs)? {
             ResolvedTarget::IndexedType(fid, tid) => TypeRefTarget::Indexed(fid, tid),
-            ResolvedTarget::LocalType(ty) => TypeRefTarget::Local(ty),
+            ResolvedTarget::LocalType(ty) => TypeRefTarget::Local(Box::new(ty)),
             ResolvedTarget::BinaryType(fqn) => TypeRefTarget::Binary(fqn),
             _ => return None,
         }
@@ -878,45 +1007,25 @@ fn resolve_name_ref_expr(
             .find(|n| n.kind() == ARG_LIST)
             .map(|al| count_args(&al));
 
-        // 1. Enclosing types' methods (innermost to outermost).
+        // 1. Enclosing types' methods (innermost to outermost, walking supertypes).
         for ty in enclosing_type_targets(ctx.file_id, ctx.file_tree, ctx.ast_id_map, expr_node) {
-            match ty {
-                TypeRefTarget::Indexed(tid_file, tid) => {
-                    let ty_item = &ctx.file_tree.types[tid];
-                    if let Some(mid) = select_method_from_tree(
-                        ctx.file_tree,
-                        &ty_item.members,
-                        &name,
-                        arg_count,
-                        ty_item.kind == TypeKind::Record,
-                        false,
-                    ) {
-                        return Some(ResolvedTarget::IndexedMember(tid_file, mid));
-                    }
-                }
-                TypeRefTarget::Local(local_ty) => {
-                    if let Some(m) = select_method_from_slice(
-                        &local_ty.members,
-                        &name,
-                        arg_count,
-                        local_ty.kind == TypeKind::Record,
-                        false,
-                    ) {
-                        return Some(ResolvedTarget::LocalMember(m.clone()));
-                    }
-                }
-                TypeRefTarget::Binary(_) => {}
+            if let Some(found) = lookup_method_across_hierarchy(ctx, &ty, &name, arg_count) {
+                return Some(found);
             }
         }
         // Compact-source top-level methods.
-        if let Some(mid) = select_method_from_tree(
+        if let Some(mid) = select_callable_from_tree(
             ctx.file_tree,
             &ctx.file_tree.top_level_members,
+            MemberKind::Method,
             &name,
             arg_count,
             false,
             false,
-        ) {
+            false,
+        )
+        .map(CallableMatch::into_inner)
+        {
             return Some(ResolvedTarget::IndexedMember(ctx.file_id, mid));
         }
 
@@ -933,10 +1042,10 @@ fn resolve_name_ref_expr(
         return Some(ResolvedTarget::Local(local));
     }
 
-    // 2. Enclosing type(s) members (fields, record components, enum constants, nested types)
-    //    plus compact-source top-level fields.
+    // 2. Enclosing type(s) members (direct + inherited fields, record components, enum constants,
+    //    nested types) plus compact-source top-level fields.
     for ty in enclosing_type_targets(ctx.file_id, ctx.file_tree, ctx.ast_id_map, expr_node) {
-        if let Some(found) = lookup_non_method_member_or_nested(ctx, &ty, &name) {
+        if let Some(found) = lookup_non_method_member_or_nested_with_supers(ctx, &ty, &name) {
             return Some(found);
         }
     }
@@ -1261,16 +1370,9 @@ fn resolve_type_segments(
         let name = segs[0];
 
         // 1. Walk enclosing scopes innermost-to-outermost (local types, method/type params,
-        // enclosing types and their nested types), stopping type parameter propagation across
-        // `static` boundaries.
-        if let Some(found) = resolve_enclosing_type_or_param(
-            ctx.file_id,
-            ctx.file_tree,
-            ctx.ast_id_map,
-            ctx.index,
-            site_node,
-            name,
-        ) {
+        // enclosing types and their nested/inherited nested types), stopping type parameter
+        // propagation across `static` boundaries.
+        if let Some(found) = resolve_enclosing_type_or_param(ctx, site_node, name) {
             return Some(found);
         }
 
@@ -1417,8 +1519,22 @@ fn resolve_type_segments(
     let mut resolved = None;
     for seg in &segs[1..] {
         let next_fqn = format!("{current_qname}.{seg}");
-        resolved = Some(lookup_workspace_or_binary_type(ctx, &next_fqn)?);
-        current_qname = next_fqn;
+        if let Some(found) = lookup_workspace_or_binary_type(ctx, &next_fqn) {
+            resolved = Some(found);
+            current_qname = next_fqn;
+        } else {
+            let mut inherited_found = None;
+            for sup_fqn in linearized_supertypes(ctx.db, &current_qname) {
+                let sup_next = format!("{sup_fqn}.{seg}");
+                if let Some(found) = lookup_workspace_or_binary_type(ctx, &sup_next) {
+                    inherited_found = Some((found, sup_next));
+                    break;
+                }
+            }
+            let (found, next) = inherited_found?;
+            resolved = Some(found);
+            current_qname = next;
+        }
     }
     resolved
 }
@@ -1455,13 +1571,14 @@ fn lookup_workspace_or_binary_type(ctx: ResolveCtx<'_>, fqn: &str) -> Option<Res
 }
 
 fn resolve_enclosing_type_or_param(
-    file_id: FileId,
-    file_tree: &FileItemTree,
-    ast_id_map: &AstIdMap,
-    index: &WorkspaceIndex,
+    ctx: ResolveCtx<'_>,
     site_node: &SyntaxNode,
     name: &str,
 ) -> Option<ResolvedTarget> {
+    let file_id = ctx.file_id;
+    let file_tree = ctx.file_tree;
+    let ast_id_map = ctx.ast_id_map;
+    let index = ctx.index;
     let site_start = site_node.text_range().start();
     let mut allow_type_params = true;
 
@@ -1529,6 +1646,12 @@ fn resolve_enclosing_type_or_param(
                             return Some(ResolvedTarget::IndexedType(fid, tid));
                         }
                     }
+                    for sup_fqn in linearized_supertypes(ctx.db, &ty.qualified_name) {
+                        let inherited_fqn = format!("{sup_fqn}.{name}");
+                        if let Some(found) = lookup_workspace_or_binary_type(ctx, &inherited_fqn) {
+                            return Some(found);
+                        }
+                    }
                 } else if let Some(ty) = extract_local_type_symbol(file_id, &ancestor) {
                     is_static_boundary |= ty.is_static
                         || matches!(
@@ -1546,6 +1669,13 @@ fn resolve_enclosing_type_or_param(
                         if let Some((fid, tid)) = lookup_type_by_fqn(file_tree, index, &nested_fqn)
                         {
                             return Some(ResolvedTarget::IndexedType(fid, tid));
+                        }
+                    }
+                    let local_target = TypeRefTarget::Local(Box::new(ty));
+                    for sup_fqn in supertypes_of_target(ctx, &local_target) {
+                        let inherited_fqn = format!("{sup_fqn}.{name}");
+                        if let Some(found) = lookup_workspace_or_binary_type(ctx, &inherited_fqn) {
+                            return Some(found);
                         }
                     }
                 }
@@ -1604,7 +1734,7 @@ fn enclosing_type_targets(
             {
                 out.push(TypeRefTarget::Indexed(file_id, type_id));
             } else if let Some(local_ty) = extract_local_type_symbol(file_id, &ancestor) {
-                out.push(TypeRefTarget::Local(local_ty));
+                out.push(TypeRefTarget::Local(Box::new(local_ty)));
             }
         }
     }
@@ -1721,8 +1851,17 @@ fn lookup_static_member_or_nested(
     let owner_ty = &owner_tree.types[owner_id];
 
     if let Some(arity) = callable_arity {
-        return select_method_from_tree(&owner_tree, &owner_ty.members, name, arity, false, true)
-            .map(|mid| ResolvedTarget::IndexedMember(owner_file, mid));
+        return select_callable_from_tree(
+            &owner_tree,
+            &owner_ty.members,
+            MemberKind::Method,
+            name,
+            arity,
+            false,
+            true,
+            false,
+        )
+        .map(|m| ResolvedTarget::IndexedMember(owner_file, m.into_inner()));
     }
 
     if let Some(&mid) = owner_ty.members.iter().find(|&&mid| {
@@ -1759,12 +1898,19 @@ fn lookup_static_member_or_nested_binary(
     let owner_ty = ctx.classpath.type_by_fqn(owner_fqn)?;
 
     if let Some(arity) = callable_arity {
-        return select_method_from_binary(&owner_ty.members, name, arity, false, true).map(
-            |member_index| ResolvedTarget::BinaryMember {
-                owner_fqn: owner_fqn.to_string(),
-                member_index,
-            },
-        );
+        return select_callable_from_binary(
+            &owner_ty.members,
+            MemberKind::Method,
+            name,
+            arity,
+            false,
+            true,
+            false,
+        )
+        .map(|m| ResolvedTarget::BinaryMember {
+            owner_fqn: owner_fqn.to_string(),
+            member_index: m.into_inner(),
+        });
     }
 
     if let Some(member_index) = owner_ty.members.iter().position(|m| {
@@ -1800,6 +1946,247 @@ fn lookup_static_member_or_nested_binary(
     None
 }
 
+#[derive(Clone, Copy)]
+enum CallableMatch<ID> {
+    Exact(ID),
+    Varargs(ID),
+    Fallback(ID),
+}
+
+impl<ID> CallableMatch<ID> {
+    fn into_inner(self) -> ID {
+        match self {
+            Self::Exact(id) | Self::Varargs(id) | Self::Fallback(id) => id,
+        }
+    }
+
+    fn map<U>(self, f: impl FnOnce(ID) -> U) -> CallableMatch<U> {
+        match self {
+            Self::Exact(id) => CallableMatch::Exact(f(id)),
+            Self::Varargs(id) => CallableMatch::Varargs(f(id)),
+            Self::Fallback(id) => CallableMatch::Fallback(f(id)),
+        }
+    }
+}
+
+fn target_is_interface(ctx: ResolveCtx<'_>, ty: &TypeRefTarget) -> bool {
+    match ty {
+        TypeRefTarget::Indexed(fid, tid) => {
+            let owned;
+            let tree = if *fid == ctx.file_tree.file_id {
+                ctx.file_tree
+            } else {
+                owned = ctx.db.file_item_tree(*fid);
+                &owned
+            };
+            matches!(
+                tree.types[*tid].kind,
+                TypeKind::Interface | TypeKind::Annotation
+            )
+        }
+        TypeRefTarget::Local(local_ty) => {
+            matches!(local_ty.kind, TypeKind::Interface | TypeKind::Annotation)
+        }
+        TypeRefTarget::Binary(fqn) => ctx
+            .classpath
+            .type_by_fqn(fqn)
+            .is_some_and(|b| matches!(b.kind, TypeKind::Interface | TypeKind::Annotation)),
+    }
+}
+
+fn supertypes_of_target(ctx: ResolveCtx<'_>, ty: &TypeRefTarget) -> Vec<String> {
+    match ty {
+        TypeRefTarget::Indexed(_, _) | TypeRefTarget::Binary(_) => {
+            let fqn = ty.qualified_name(ctx.db, ctx.file_tree);
+            linearized_supertypes(ctx.db, &fqn)
+        }
+        TypeRefTarget::Local(local_ty) => {
+            let mut visited = FxHashSet::default();
+            visited.insert(local_ty.qualified_name.clone());
+            let mut out = Vec::new();
+            let mut iface_queue = VecDeque::new();
+
+            let resolve_local_ref = |raw: &str| -> Option<String> {
+                let segs = parse_type_ref_segments(raw)?;
+                let seg_refs: Vec<&str> = segs.iter().map(String::as_str).collect();
+                let root = ctx.db.syntax_tree(local_ty.file_id);
+                let site_node = root
+                    .token_at_offset(local_ty.selection_range.start())
+                    .right_biased()
+                    .and_then(|t| t.parent())
+                    .unwrap_or(root);
+                match resolve_type_segments(ctx, &site_node, &seg_refs)? {
+                    ResolvedTarget::IndexedType(fid, tid) => {
+                        Some(TypeRefTarget::Indexed(fid, tid).qualified_name(ctx.db, ctx.file_tree))
+                    }
+                    ResolvedTarget::LocalType(t) => Some(t.qualified_name),
+                    ResolvedTarget::BinaryType(fqn) => Some(fqn),
+                    _ => None,
+                }
+            };
+
+            if let Some(first_ext) = local_ty.extends.first()
+                && let Some(sup_fqn) = resolve_local_ref(first_ext)
+                && sup_fqn != "java.lang.Object"
+                && visited.insert(sup_fqn.clone())
+            {
+                out.push(sup_fqn.clone());
+                for s in linearized_supertypes(ctx.db, &sup_fqn) {
+                    if s != "java.lang.Object" && visited.insert(s.clone()) {
+                        out.push(s);
+                    }
+                }
+            }
+            for raw_impl in &local_ty.implements {
+                if let Some(iface_fqn) = resolve_local_ref(raw_impl) {
+                    iface_queue.push_back(iface_fqn);
+                }
+            }
+            while let Some(iface) = iface_queue.pop_front() {
+                if iface == "java.lang.Object" || !visited.insert(iface.clone()) {
+                    continue;
+                }
+                out.push(iface.clone());
+                for s in linearized_supertypes(ctx.db, &iface) {
+                    if s != "java.lang.Object" && visited.insert(s.clone()) {
+                        out.push(s);
+                    }
+                }
+            }
+            if visited.insert("java.lang.Object".to_string()) {
+                out.push("java.lang.Object".to_string());
+            }
+            out
+        }
+    }
+}
+
+fn type_ref_from_fqn(ctx: ResolveCtx<'_>, fqn: &str) -> Option<TypeRefTarget> {
+    if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.index, fqn) {
+        return Some(TypeRefTarget::Indexed(fid, tid));
+    }
+    ctx.classpath
+        .type_by_fqn(fqn)
+        .map(|_| TypeRefTarget::Binary(fqn.to_string()))
+}
+
+fn lookup_method_on_single_type(
+    ctx: ResolveCtx<'_>,
+    ty: &TypeRefTarget,
+    name: &str,
+    call_arity: Option<usize>,
+    exclude_interface_static: bool,
+) -> Option<CallableMatch<ResolvedTarget>> {
+    let exclude_static = exclude_interface_static && target_is_interface(ctx, ty);
+    match ty {
+        TypeRefTarget::Indexed(ty_file, ty_id) => {
+            let owned_tree;
+            let ty_tree = if *ty_file == ctx.file_tree.file_id {
+                ctx.file_tree
+            } else {
+                owned_tree = ctx.db.file_item_tree(*ty_file);
+                &owned_tree
+            };
+            let type_item = &ty_tree.types[*ty_id];
+            select_callable_from_tree(
+                ty_tree,
+                &type_item.members,
+                MemberKind::Method,
+                name,
+                call_arity,
+                type_item.kind == TypeKind::Record,
+                false,
+                exclude_static,
+            )
+            .map(|m| m.map(|mid| ResolvedTarget::IndexedMember(*ty_file, mid)))
+        }
+        TypeRefTarget::Local(local_ty) => select_callable_from_slice(
+            &local_ty.members,
+            MemberKind::Method,
+            name,
+            call_arity,
+            local_ty.kind == TypeKind::Record,
+            false,
+            exclude_static,
+        )
+        .map(|m| m.map(|mem| ResolvedTarget::LocalMember(mem.clone()))),
+        TypeRefTarget::Binary(fqn) => {
+            let bin_ty = ctx.classpath.type_by_fqn(fqn)?;
+            select_callable_from_binary(
+                &bin_ty.members,
+                MemberKind::Method,
+                name,
+                call_arity,
+                bin_ty.kind == TypeKind::Record,
+                false,
+                exclude_static,
+            )
+            .map(|m| {
+                m.map(|member_index| ResolvedTarget::BinaryMember {
+                    owner_fqn: fqn.clone(),
+                    member_index,
+                })
+            })
+        }
+    }
+}
+
+fn lookup_method_across_hierarchy(
+    ctx: ResolveCtx<'_>,
+    ty: &TypeRefTarget,
+    name: &str,
+    call_arity: Option<usize>,
+) -> Option<ResolvedTarget> {
+    let mut best_varargs = None;
+    let mut best_fallback = None;
+
+    if let Some(m) = lookup_method_on_single_type(ctx, ty, name, call_arity, false) {
+        match m {
+            CallableMatch::Exact(target) => return Some(target),
+            CallableMatch::Varargs(target) => best_varargs = Some(target),
+            CallableMatch::Fallback(target) => best_fallback = Some(target),
+        }
+    }
+
+    for sup_fqn in supertypes_of_target(ctx, ty) {
+        let Some(sup_ty) = type_ref_from_fqn(ctx, &sup_fqn) else {
+            continue;
+        };
+        if let Some(m) = lookup_method_on_single_type(ctx, &sup_ty, name, call_arity, true) {
+            match m {
+                CallableMatch::Exact(target) => return Some(target),
+                CallableMatch::Varargs(target) if best_varargs.is_none() => {
+                    best_varargs = Some(target);
+                }
+                CallableMatch::Fallback(target) if best_fallback.is_none() => {
+                    best_fallback = Some(target);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    best_varargs.or(best_fallback)
+}
+
+fn lookup_non_method_member_or_nested_with_supers(
+    ctx: ResolveCtx<'_>,
+    ty: &TypeRefTarget,
+    name: &str,
+) -> Option<ResolvedTarget> {
+    if let Some(found) = lookup_non_method_member_or_nested(ctx, ty, name) {
+        return Some(found);
+    }
+    for sup_fqn in supertypes_of_target(ctx, ty) {
+        if let Some(sup_ty) = type_ref_from_fqn(ctx, &sup_fqn)
+            && let Some(found) = lookup_non_method_member_or_nested(ctx, &sup_ty, name)
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
 fn lookup_member_on_type(
     ctx: ResolveCtx<'_>,
     ty: &TypeRefTarget,
@@ -1808,72 +2195,14 @@ fn lookup_member_on_type(
     prefer_callable: bool,
 ) -> Option<ResolvedTarget> {
     if prefer_callable {
-        return match ty {
-            TypeRefTarget::Indexed(ty_file, ty_id) => {
-                let ty_tree = ctx.db.file_item_tree(*ty_file);
-                let type_item = &ty_tree.types[*ty_id];
-                select_method_from_tree(
-                    &ty_tree,
-                    &type_item.members,
-                    name,
-                    call_arity,
-                    type_item.kind == TypeKind::Record,
-                    false,
-                )
-                .map(|mid| ResolvedTarget::IndexedMember(*ty_file, mid))
-            }
-            TypeRefTarget::Local(local_ty) => select_method_from_slice(
-                &local_ty.members,
-                name,
-                call_arity,
-                local_ty.kind == TypeKind::Record,
-                false,
-            )
-            .cloned()
-            .map(ResolvedTarget::LocalMember),
-            TypeRefTarget::Binary(fqn) => {
-                let bin_ty = ctx.classpath.type_by_fqn(fqn)?;
-                select_method_from_binary(
-                    &bin_ty.members,
-                    name,
-                    call_arity,
-                    bin_ty.kind == TypeKind::Record,
-                    false,
-                )
-                .map(|member_index| ResolvedTarget::BinaryMember {
-                    owner_fqn: fqn.clone(),
-                    member_index,
-                })
-            }
-        };
+        return lookup_method_across_hierarchy(ctx, ty, name, call_arity);
     }
 
-    if let Some(found) = lookup_non_method_member_or_nested(ctx, ty, name) {
+    if let Some(found) = lookup_non_method_member_or_nested_with_supers(ctx, ty, name) {
         return Some(found);
     }
 
-    match ty {
-        TypeRefTarget::Indexed(ty_file, ty_id) => {
-            let ty_tree = ctx.db.file_item_tree(*ty_file);
-            let type_item = &ty_tree.types[*ty_id];
-            select_method_from_tree(&ty_tree, &type_item.members, name, call_arity, false, false)
-                .map(|mid| ResolvedTarget::IndexedMember(*ty_file, mid))
-        }
-        TypeRefTarget::Local(local_ty) => {
-            select_method_from_slice(&local_ty.members, name, call_arity, false, false)
-                .cloned()
-                .map(ResolvedTarget::LocalMember)
-        }
-        TypeRefTarget::Binary(fqn) => {
-            let bin_ty = ctx.classpath.type_by_fqn(fqn)?;
-            select_method_from_binary(&bin_ty.members, name, call_arity, false, false).map(
-                |member_index| ResolvedTarget::BinaryMember {
-                    owner_fqn: fqn.clone(),
-                    member_index,
-                },
-            )
-        }
-    }
+    lookup_method_across_hierarchy(ctx, ty, name, call_arity)
 }
 
 fn lookup_non_method_member_or_nested(
@@ -1947,60 +2276,24 @@ fn lookup_method_or_member(
     ty: &TypeRefTarget,
     name: &str,
 ) -> Option<ResolvedTarget> {
-    match ty {
-        TypeRefTarget::Indexed(ty_file, ty_id) => {
-            let ty_tree = ctx.db.file_item_tree(*ty_file);
-            let type_item = &ty_tree.types[*ty_id];
-            if let Some(mid) = select_method_from_tree(
-                &ty_tree,
-                &type_item.members,
-                name,
-                None,
-                type_item.kind == TypeKind::Record,
-                false,
-            ) {
-                return Some(ResolvedTarget::IndexedMember(*ty_file, mid));
-            }
-        }
-        TypeRefTarget::Local(local_ty) => {
-            if let Some(m) = select_method_from_slice(
-                &local_ty.members,
-                name,
-                None,
-                local_ty.kind == TypeKind::Record,
-                false,
-            ) {
-                return Some(ResolvedTarget::LocalMember(m.clone()));
-            }
-        }
-        TypeRefTarget::Binary(fqn) => {
-            let bin_ty = ctx.classpath.type_by_fqn(fqn)?;
-            if let Some(member_index) = select_method_from_binary(
-                &bin_ty.members,
-                name,
-                None,
-                bin_ty.kind == TypeKind::Record,
-                false,
-            ) {
-                return Some(ResolvedTarget::BinaryMember {
-                    owner_fqn: fqn.clone(),
-                    member_index,
-                });
-            }
-        }
+    if let Some(found) = lookup_method_across_hierarchy(ctx, ty, name, None) {
+        return Some(found);
     }
-    lookup_non_method_member_or_nested(ctx, ty, name)
+    lookup_non_method_member_or_nested_with_supers(ctx, ty, name)
 }
 
-fn select_method_from_tree(
+#[allow(clippy::too_many_arguments)]
+fn select_callable_from_tree(
     tree: &FileItemTree,
     member_ids: &[MemberId],
+    target_kind: MemberKind,
     name: &str,
     call_arity: Option<usize>,
     include_record_components: bool,
     only_static: bool,
-) -> Option<MemberId> {
-    select_method_by(
+    exclude_static: bool,
+) -> Option<CallableMatch<MemberId>> {
+    select_callable_by(
         member_ids.iter().map(|&mid| {
             let m = &tree.members[mid];
             (
@@ -2011,59 +2304,73 @@ fn select_method_from_tree(
                 m.params.as_slice(),
             )
         }),
+        target_kind,
         name,
         call_arity,
         include_record_components,
         only_static,
+        exclude_static,
     )
 }
 
-fn select_method_from_slice<'a>(
+#[allow(clippy::too_many_arguments)]
+fn select_callable_from_slice<'a>(
     members: &'a [MemberSymbol],
+    target_kind: MemberKind,
     name: &str,
     call_arity: Option<usize>,
     include_record_components: bool,
     only_static: bool,
-) -> Option<&'a MemberSymbol> {
-    let idx = select_method_by(
+    exclude_static: bool,
+) -> Option<CallableMatch<&'a MemberSymbol>> {
+    select_callable_by(
         members
             .iter()
             .enumerate()
             .map(|(i, m)| (i, m.kind, m.name.as_str(), m.is_static, m.params.as_slice())),
+        target_kind,
         name,
         call_arity,
         include_record_components,
         only_static,
-    )?;
-    Some(&members[idx])
+        exclude_static,
+    )
+    .map(|m| m.map(|idx| &members[idx]))
 }
 
-fn select_method_from_binary(
+#[allow(clippy::too_many_arguments)]
+fn select_callable_from_binary(
     members: &[crate::classpath::BinaryMemberSymbol],
+    target_kind: MemberKind,
     name: &str,
     call_arity: Option<usize>,
     include_record_components: bool,
     only_static: bool,
-) -> Option<usize> {
-    select_method_by(
+    exclude_static: bool,
+) -> Option<CallableMatch<usize>> {
+    select_callable_by(
         members
             .iter()
             .enumerate()
             .map(|(i, m)| (i, m.kind, m.name.as_str(), m.is_static, m.params.as_slice())),
+        target_kind,
         name,
         call_arity,
         include_record_components,
         only_static,
+        exclude_static,
     )
 }
 
-fn select_method_by<'a, I, ID>(
+fn select_callable_by<'a, I, ID>(
     members: I,
+    target_kind: MemberKind,
     name: &str,
     call_arity: Option<usize>,
     include_record_components: bool,
     only_static: bool,
-) -> Option<ID>
+    exclude_static: bool,
+) -> Option<CallableMatch<ID>>
 where
     ID: Copy,
     I: Iterator<Item = (ID, MemberKind, &'a str, bool, &'a [ParamSummary])>,
@@ -2073,11 +2380,12 @@ where
     let mut record_comp_match: Option<ID> = None;
 
     for (id, kind, m_name, is_static, params) in members {
-        if m_name != name {
+        if target_kind == MemberKind::Method && m_name != name {
             continue;
         }
         if kind == MemberKind::RecordComponent {
-            if !only_static
+            if target_kind == MemberKind::Method
+                && !only_static
                 && include_record_components
                 && call_arity.is_none_or(|a| a == 0)
                 && record_comp_match.is_none()
@@ -2086,7 +2394,7 @@ where
             }
             continue;
         }
-        if kind != MemberKind::Method || (only_static && !is_static) {
+        if kind != target_kind || (only_static && !is_static) || (exclude_static && is_static) {
             continue;
         }
         if first_match.is_none() {
@@ -2096,19 +2404,172 @@ where
             let is_varargs = params.last().is_some_and(|p| p.is_varargs);
             // 1. Exact fixed-arity match.
             if !is_varargs && params.len() == arity {
-                return Some(id);
+                return Some(CallableMatch::Exact(id));
             }
             // 2. Varargs arity match.
             if is_varargs && varargs_match.is_none() && arity + 1 >= params.len() {
                 varargs_match = Some(id);
             }
         } else {
-            return Some(id);
+            return Some(CallableMatch::Exact(id));
         }
     }
 
-    // 3. Fallback to first varargs match, first matching method, or record component.
-    varargs_match.or(first_match).or(record_comp_match)
+    // 3. Fallback to first varargs match, record component (0-arg exact), or first matching callable.
+    if let Some(id) = varargs_match {
+        return Some(CallableMatch::Varargs(id));
+    }
+    if let Some(id) = record_comp_match {
+        return Some(CallableMatch::Exact(id));
+    }
+    first_match.map(CallableMatch::Fallback)
+}
+
+fn lookup_constructor_on_type(
+    ctx: ResolveCtx<'_>,
+    ty: &TypeRefTarget,
+    arg_count: Option<usize>,
+) -> Option<ResolvedTarget> {
+    match ty {
+        TypeRefTarget::Indexed(ty_file, ty_id) => {
+            let owned_tree;
+            let ty_tree = if *ty_file == ctx.file_tree.file_id {
+                ctx.file_tree
+            } else {
+                owned_tree = ctx.db.file_item_tree(*ty_file);
+                &owned_tree
+            };
+            let type_item = &ty_tree.types[*ty_id];
+            select_callable_from_tree(
+                ty_tree,
+                &type_item.members,
+                MemberKind::Constructor,
+                "",
+                arg_count,
+                false,
+                false,
+                false,
+            )
+            .map(|m| ResolvedTarget::IndexedMember(*ty_file, m.into_inner()))
+        }
+        TypeRefTarget::Local(local_ty) => select_callable_from_slice(
+            &local_ty.members,
+            MemberKind::Constructor,
+            "",
+            arg_count,
+            false,
+            false,
+            false,
+        )
+        .map(|m| ResolvedTarget::LocalMember(m.into_inner().clone())),
+        TypeRefTarget::Binary(fqn) => {
+            let bin_ty = ctx.classpath.type_by_fqn(fqn)?;
+            select_callable_from_binary(
+                &bin_ty.members,
+                MemberKind::Constructor,
+                "",
+                arg_count,
+                false,
+                false,
+                false,
+            )
+            .map(|m| ResolvedTarget::BinaryMember {
+                owner_fqn: fqn.clone(),
+                member_index: m.into_inner(),
+            })
+        }
+    }
+}
+
+fn resolve_super_target_type(ctx: ResolveCtx<'_>, super_expr: &SyntaxNode) -> Option<TypeRefTarget> {
+    // Qualified `Interface.super` or `Outer.super`.
+    if let Some(qualifier) = super_expr.children().next() {
+        let segs = extract_dotted_name_chain(&qualifier)?;
+        let seg_refs: Vec<&str> = segs.iter().map(SmolStr::as_str).collect();
+        let qual_target = match resolve_type_segments(ctx, &qualifier, &seg_refs)? {
+            ResolvedTarget::IndexedType(fid, tid) => TypeRefTarget::Indexed(fid, tid),
+            ResolvedTarget::LocalType(ty) => TypeRefTarget::Local(Box::new(ty)),
+            ResolvedTarget::BinaryType(fqn) => TypeRefTarget::Binary(fqn),
+            _ => return None,
+        };
+        if target_is_interface(ctx, &qual_target) {
+            return Some(qual_target);
+        }
+        let qual_fqn = qual_target.qualified_name(ctx.db, ctx.file_tree);
+        let sup_fqn = direct_supertypes(ctx.db, &qual_fqn).super_class?;
+        return type_ref_from_fqn(ctx, &sup_fqn);
+    }
+
+    // Unqualified `super`: walk enclosing type or anonymous class `NEW_EXPR`.
+    for ancestor in super_expr.ancestors().skip(1) {
+        if ancestor.kind() == NEW_EXPR
+            && let Some(path_type) = ancestor.children().find(|n| n.kind() == PATH_TYPE)
+        {
+            let segs = path_segments(&path_type);
+            let seg_refs: Vec<&str> = segs.iter().map(String::as_str).collect();
+            return match resolve_type_segments(ctx, &path_type, &seg_refs)? {
+                ResolvedTarget::IndexedType(fid, tid) => Some(TypeRefTarget::Indexed(fid, tid)),
+                ResolvedTarget::LocalType(ty) => Some(TypeRefTarget::Local(Box::new(ty))),
+                ResolvedTarget::BinaryType(fqn) => Some(TypeRefTarget::Binary(fqn)),
+                _ => None,
+            };
+        }
+        if TypeKind::from_syntax(ancestor.kind()).is_some() {
+            let range = ancestor.text_range();
+            if let Some((_, ty)) = ctx
+                .ast_id_map
+                .find_by_full(range)
+                .and_then(|ast_id| ctx.file_tree.find_type_by_ast_id(ast_id))
+            {
+                let sup_fqn = direct_supertypes(ctx.db, &ty.qualified_name).super_class?;
+                return type_ref_from_fqn(ctx, &sup_fqn);
+            }
+            if let Some(local_ty) = extract_local_type_symbol(ctx.file_id, &ancestor) {
+                let sup_fqn = local_ty
+                    .extends
+                    .first()
+                    .and_then(|raw| parse_type_ref_segments(raw))
+                    .and_then(|segs| {
+                        let seg_refs: Vec<&str> = segs.iter().map(String::as_str).collect();
+                        match resolve_type_segments(ctx, &ancestor, &seg_refs)? {
+                            ResolvedTarget::IndexedType(fid, tid) => Some(
+                                TypeRefTarget::Indexed(fid, tid)
+                                    .qualified_name(ctx.db, ctx.file_tree),
+                            ),
+                            ResolvedTarget::LocalType(t) => Some(t.qualified_name),
+                            ResolvedTarget::BinaryType(fqn) => Some(fqn),
+                            _ => None,
+                        }
+                    })
+                    .unwrap_or_else(|| "java.lang.Object".to_string());
+                return type_ref_from_fqn(ctx, &sup_fqn);
+            }
+        }
+    }
+
+    None
+}
+
+fn resolve_super_expr_target(
+    ctx: ResolveCtx<'_>,
+    super_expr: &SyntaxNode,
+) -> Option<ResolvedTarget> {
+    if let Some(call_expr) = super_expr.parent().filter(|p| {
+        p.kind() == CALL_EXPR
+            && p.children()
+                .next()
+                .is_some_and(|c| c.text_range() == super_expr.text_range())
+    }) {
+        let arg_count = call_expr
+            .children()
+            .find(|n| n.kind() == ARG_LIST)
+            .map(|al| count_args(&al));
+        let super_ty = resolve_super_target_type(ctx, super_expr)?;
+        return lookup_constructor_on_type(ctx, &super_ty, arg_count)
+            .or_else(|| Some(ResolvedTarget::from(super_ty)));
+    }
+
+    resolve_super_target_type(ctx, super_expr).map(ResolvedTarget::from)
 }
 
 // ---- Receiver type resolution ----
@@ -2133,6 +2594,7 @@ fn resolve_expr_type(
                 .into_iter()
                 .next()
         }
+        SUPER_EXPR => resolve_super_target_type(ctx, expr),
         NAME_REF_EXPR => {
             let ref_node = expr.children().find(|n| n.kind() == NAME_REF)?;
             let target = resolve_name_ref_expr(ctx, expr, &ref_node)?;
@@ -2200,7 +2662,7 @@ fn resolve_expr_type(
             let seg_refs: Vec<&str> = segs.iter().map(String::as_str).collect();
             match resolve_type_segments(ctx, &path_type, &seg_refs)? {
                 ResolvedTarget::IndexedType(fid, tid) => Some(TypeRefTarget::Indexed(fid, tid)),
-                ResolvedTarget::LocalType(ty) => Some(TypeRefTarget::Local(ty)),
+                ResolvedTarget::LocalType(ty) => Some(TypeRefTarget::Local(Box::new(ty))),
                 ResolvedTarget::BinaryType(fqn) => Some(TypeRefTarget::Binary(fqn)),
                 _ => None,
             }
@@ -2215,7 +2677,7 @@ fn resolve_expr_type(
             let seg_refs: Vec<&str> = segs.iter().map(String::as_str).collect();
             match resolve_type_segments(ctx, &path_type, &seg_refs)? {
                 ResolvedTarget::IndexedType(fid, tid) => Some(TypeRefTarget::Indexed(fid, tid)),
-                ResolvedTarget::LocalType(ty) => Some(TypeRefTarget::Local(ty)),
+                ResolvedTarget::LocalType(ty) => Some(TypeRefTarget::Local(Box::new(ty))),
                 ResolvedTarget::BinaryType(fqn) => Some(TypeRefTarget::Binary(fqn)),
                 _ => None,
             }
@@ -2234,7 +2696,7 @@ fn target_to_type_ref(
     }
     match target {
         ResolvedTarget::IndexedType(fid, tid) => Some(TypeRefTarget::Indexed(fid, tid)),
-        ResolvedTarget::LocalType(ty) => Some(TypeRefTarget::Local(ty)),
+        ResolvedTarget::LocalType(ty) => Some(TypeRefTarget::Local(Box::new(ty))),
         ResolvedTarget::BinaryType(fqn) => Some(TypeRefTarget::Binary(fqn)),
         ResolvedTarget::Local(l) => {
             let ty_str = l.type_ref.as_deref()?;
@@ -2305,7 +2767,7 @@ fn target_to_type_ref(
             match m.kind {
                 MemberKind::Field | MemberKind::RecordComponent | MemberKind::Method => {
                     let ty_str = m.type_ref.as_deref()?;
-                    resolve_binary_type_ref(ctx.index, ctx.classpath, ty_str)
+                    resolve_binary_type_ref(ctx.index, ctx.classpath, &owner_fqn, ty_str)
                 }
                 MemberKind::EnumConstant => Some(TypeRefTarget::Binary(owner_fqn)),
                 MemberKind::Constructor => None,
@@ -2318,6 +2780,7 @@ fn target_to_type_ref(
 fn resolve_binary_type_ref(
     index: &WorkspaceIndex,
     classpath: &ClasspathIndex,
+    owner_fqn: &str,
     type_ref: &str,
 ) -> Option<TypeRefTarget> {
     let segs = parse_type_ref_segments(type_ref)?;
@@ -2327,6 +2790,17 @@ fn resolve_binary_type_ref(
     }
     if classpath.type_by_fqn(&joined).is_some() {
         return Some(TypeRefTarget::Binary(joined));
+    }
+    if let Some(pkg) = classpath.type_by_fqn(owner_fqn).map(|t| t.package.as_str())
+        && !pkg.is_empty()
+    {
+        let same_pkg_fqn = format!("{pkg}.{joined}");
+        if let Some(&(fid, tid)) = index.types_by_fqn.get(&same_pkg_fqn) {
+            return Some(TypeRefTarget::Indexed(fid, tid));
+        }
+        if classpath.type_by_fqn(&same_pkg_fqn).is_some() {
+            return Some(TypeRefTarget::Binary(same_pkg_fqn));
+        }
     }
     let java_lang_fqn = format!("java.lang.{joined}");
     if let Some(&(fid, tid)) = index.types_by_fqn.get(&java_lang_fqn) {
@@ -2369,85 +2843,10 @@ fn resolve_type_ref_in_file(
     };
     match resolve_type_segments(decl_ctx, &site_node, &seg_refs)? {
         ResolvedTarget::IndexedType(fid, tid) => Some(TypeRefTarget::Indexed(fid, tid)),
-        ResolvedTarget::LocalType(ty) => Some(TypeRefTarget::Local(ty)),
+        ResolvedTarget::LocalType(ty) => Some(TypeRefTarget::Local(Box::new(ty))),
         ResolvedTarget::BinaryType(fqn) => Some(TypeRefTarget::Binary(fqn)),
         _ => None,
     }
-}
-
-/// Strips generics (`<...>`), leading `@Annotations(...)`, and rejects arrays / primitives / `var`.
-fn parse_type_ref_segments(type_ref: &str) -> Option<Vec<String>> {
-    let trimmed = type_ref.trim();
-    if trimmed.is_empty() || trimmed.ends_with(']') {
-        return None;
-    }
-
-    let mut cleaned = String::with_capacity(trimmed.len());
-    let mut chars = trimmed.chars().peekable();
-    let mut angle_depth = 0usize;
-
-    while let Some(c) = chars.next() {
-        match c {
-            '<' => angle_depth += 1,
-            '>' => angle_depth = angle_depth.saturating_sub(1),
-            '@' if angle_depth == 0 => {
-                // Skip annotation name (possibly dotted) and optional `(...)`.
-                while let Some(&next) = chars.peek() {
-                    if next.is_alphanumeric() || next == '_' || next == '$' || next == '.' {
-                        chars.next();
-                    } else {
-                        break;
-                    }
-                }
-                while chars.peek().is_some_and(|ch| ch.is_whitespace()) {
-                    chars.next();
-                }
-                if chars.peek() == Some(&'(') {
-                    let mut paren_depth = 0usize;
-                    for ch in chars.by_ref() {
-                        if ch == '(' {
-                            paren_depth += 1;
-                        } else if ch == ')' {
-                            paren_depth = paren_depth.saturating_sub(1);
-                            if paren_depth == 0 {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            _ if angle_depth == 0 => cleaned.push(c),
-            _ => {}
-        }
-    }
-
-    let segs: Vec<String> = cleaned
-        .split('.')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect();
-    if segs.is_empty() {
-        return None;
-    }
-    if segs.len() == 1
-        && matches!(
-            segs[0].as_str(),
-            "boolean"
-                | "byte"
-                | "short"
-                | "int"
-                | "long"
-                | "char"
-                | "float"
-                | "double"
-                | "void"
-                | "var"
-        )
-    {
-        return None;
-    }
-    Some(segs)
 }
 
 fn extract_dotted_name_chain(node: &SyntaxNode) -> Option<Vec<SmolStr>> {

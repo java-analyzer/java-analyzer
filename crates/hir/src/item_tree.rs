@@ -8,8 +8,11 @@ use la_arena::{Arena, Idx};
 use smol_str::SmolStr;
 use syntax::{
     SyntaxNode, TextRange,
-    ext::{has_modifier, name_child, path_segments, type_child, type_text_with_dims},
-    syntax_kind::SyntaxKind::*,
+    ext::{
+        collapsed_text, has_modifier, is_type_node, name_child, path_segments, path_text,
+        type_child, type_text_with_dims,
+    },
+    syntax_kind::SyntaxKind::{self, *},
 };
 
 use crate::{
@@ -79,7 +82,15 @@ pub struct TypeItem {
     pub enclosing_type: Option<String>,
     pub kind: TypeKind,
     pub is_static: bool,
+    pub is_abstract: bool,
+    pub is_final: bool,
     pub type_params: Vec<SmolStr>,
+    /// Raw type references from `extends` clause (e.g. `["Base", "com.foo.Iface<T>"]`).
+    pub extends: Vec<String>,
+    /// Raw type references from `implements` clause.
+    pub implements: Vec<String>,
+    /// Raw type references from `permits` clause (sealed types).
+    pub permits: Vec<String>,
     pub members: Vec<MemberId>,
     pub nested_types: Vec<SmolStr>,
     pub ast_id: AstId,
@@ -94,6 +105,9 @@ pub struct MemberItem {
     pub name: SmolStr,
     pub kind: MemberKind,
     pub is_static: bool,
+    pub is_default: bool,
+    pub is_abstract: bool,
+    pub has_override: bool,
     pub type_ref: Option<String>,
     pub params: Vec<ParamSummary>,
     pub ast_id: AstId,
@@ -196,6 +210,7 @@ pub(crate) fn lower_file_item_tree(file_id: FileId, root: &SyntaxNode) -> (FileI
                 if let Some(member_id) = lower_method_or_ctor(
                     file_id,
                     &child,
+                    None,
                     None,
                     MemberKind::Method,
                     &mut members,
@@ -305,7 +320,7 @@ pub(crate) fn extract_method_or_ctor(
 ) -> Option<MemberSymbol> {
     let mut members = Arena::new();
     let mut map = AstIdMap::default();
-    let id = lower_method_or_ctor(file_id, node, owner_fqn, kind, &mut members, &mut map)?;
+    let id = lower_method_or_ctor(file_id, node, owner_fqn, None, kind, &mut members, &mut map)?;
     Some(member_symbol_from_item(&members[id], &map))
 }
 
@@ -323,7 +338,12 @@ fn type_symbol_from_item(ty: &TypeItem, members: &Arena<MemberItem>, map: &AstId
         enclosing_type: ty.enclosing_type.clone(),
         kind: ty.kind,
         is_static: ty.is_static,
+        is_abstract: ty.is_abstract,
+        is_final: ty.is_final,
         type_params: ty.type_params.clone(),
+        extends: ty.extends.clone(),
+        implements: ty.implements.clone(),
+        permits: ty.permits.clone(),
         members: ty_members,
         nested_types: ty.nested_types.clone(),
         full_range: range.full_range,
@@ -339,11 +359,44 @@ fn member_symbol_from_item(item: &MemberItem, map: &AstIdMap) -> MemberSymbol {
         name: item.name.clone(),
         kind: item.kind,
         is_static: item.is_static,
+        is_default: item.is_default,
+        is_abstract: item.is_abstract,
+        has_override: item.has_override,
         type_ref: item.type_ref.clone(),
         params: item.params.clone(),
         full_range: range.full_range,
         selection_range: range.selection_range,
     }
+}
+
+fn extract_clause_types(type_node: &SyntaxNode, clause_kind: SyntaxKind) -> Vec<String> {
+    type_node
+        .children()
+        .find(|n| n.kind() == clause_kind)
+        .map(|clause| {
+            clause
+                .children()
+                .filter(|n| is_type_node(n.kind()))
+                .map(|t| collapsed_text(&t))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn has_override_annotation(node: &SyntaxNode) -> bool {
+    let Some(mods) = node.children().find(|n| n.kind() == MODIFIER_LIST) else {
+        return false;
+    };
+    mods.children()
+        .filter(|n| n.kind() == ANNOTATION)
+        .any(|anno| {
+            anno.children()
+                .find(|n| n.kind() == PATH)
+                .is_some_and(|p| {
+                    let text = path_text(&p);
+                    text == "Override" || text == "java.lang.Override"
+                })
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -379,7 +432,13 @@ fn lower_type_decl(
                 Some(TypeKind::Interface | TypeKind::Annotation)
             )));
 
+    let is_abstract = has_modifier(node, ABSTRACT_KW)
+        || matches!(kind, TypeKind::Interface | TypeKind::Annotation);
+    let is_final = has_modifier(node, FINAL_KW) || kind == TypeKind::Record;
     let type_params = extract_type_param_names(node);
+    let extends = extract_clause_types(node, EXTENDS_CLAUSE);
+    let implements = extract_clause_types(node, IMPLEMENTS_CLAUSE);
+    let permits = extract_clause_types(node, PERMITS_CLAUSE);
     let ast_id = map.alloc(AstRange {
         full_range: node.text_range(),
         selection_range: name_node.text_range(),
@@ -391,7 +450,12 @@ fn lower_type_decl(
         enclosing_type: enclosing_fqn.map(str::to_string),
         kind,
         is_static,
+        is_abstract,
+        is_final,
         type_params,
+        extends,
+        implements,
+        permits,
         members: Vec::new(),
         nested_types: Vec::new(),
         ast_id,
@@ -416,6 +480,9 @@ fn lower_type_decl(
                             name: node_ident_text(&comp_name),
                             kind: MemberKind::RecordComponent,
                             is_static: false,
+                            is_default: false,
+                            is_abstract: false,
+                            has_override: false,
                             type_ref,
                             params: Vec::new(),
                             ast_id: comp_ast_id,
@@ -439,6 +506,9 @@ fn lower_type_decl(
                                     name: node_ident_text(&const_name),
                                     kind: MemberKind::EnumConstant,
                                     is_static: true,
+                                    is_default: false,
+                                    is_abstract: false,
+                                    has_override: false,
                                     type_ref: None,
                                     params: Vec::new(),
                                     ast_id: const_ast_id,
@@ -462,6 +532,7 @@ fn lower_type_decl(
                                 file_id,
                                 &member_node,
                                 Some(&qualified_name),
+                                Some(kind),
                                 MemberKind::Method,
                                 members,
                                 map,
@@ -474,6 +545,7 @@ fn lower_type_decl(
                                 file_id,
                                 &member_node,
                                 Some(&qualified_name),
+                                Some(kind),
                                 MemberKind::Constructor,
                                 members,
                                 map,
@@ -539,6 +611,9 @@ fn lower_field_decl(
             name: node_ident_text(&name_node),
             kind: MemberKind::Field,
             is_static,
+            is_default: false,
+            is_abstract: false,
+            has_override: false,
             type_ref,
             params: Vec::new(),
             ast_id,
@@ -551,12 +626,21 @@ fn lower_method_or_ctor(
     file_id: FileId,
     node: &SyntaxNode,
     owner_fqn: Option<&str>,
+    owner_kind: Option<TypeKind>,
     kind: MemberKind,
     members: &mut Arena<MemberItem>,
     map: &mut AstIdMap,
 ) -> Option<MemberId> {
     let name_node = name_child(node)?;
     let is_static = kind == MemberKind::Method && has_modifier(node, STATIC_KW);
+    let is_default = kind == MemberKind::Method && has_modifier(node, DEFAULT_KW);
+    let is_abstract = kind == MemberKind::Method
+        && (has_modifier(node, ABSTRACT_KW)
+            || (matches!(owner_kind, Some(TypeKind::Interface | TypeKind::Annotation))
+                && !is_default
+                && !is_static
+                && !has_modifier(node, PRIVATE_KW)));
+    let has_override = kind == MemberKind::Method && has_override_annotation(node);
     let type_ref = if kind == MemberKind::Method {
         type_child(node).map(|t| type_text_with_dims(&t, node))
     } else {
@@ -579,6 +663,9 @@ fn lower_method_or_ctor(
         name: node_ident_text(&name_node),
         kind,
         is_static,
+        is_default,
+        is_abstract,
+        has_override,
         type_ref,
         params,
         ast_id,
