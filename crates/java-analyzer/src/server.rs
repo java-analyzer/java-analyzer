@@ -1,6 +1,7 @@
 use std::{
     any::Any,
     borrow::Cow,
+    collections::BTreeMap,
     fs,
     panic::{catch_unwind, AssertUnwindSafe},
     path::Path,
@@ -9,7 +10,8 @@ use std::{
 };
 
 use ide::{
-    normalize_rel_path, Analysis, AnalysisHost, Cancellable, Cancelled, FileId, LanguageLevel,
+    is_path_within, normalize_rel_path, Analysis, AnalysisHost, Cancellable, Cancelled, FileId,
+    LanguageLevel, ModuleId,
 };
 use line_index::LineIndex;
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
@@ -151,7 +153,67 @@ impl GlobalState {
     fn sync_workspace_files(&mut self) {
         let mut ids: Vec<FileId> = self.file_urls.keys().copied().collect();
         ids.sort();
-        self.host.set_workspace_files(Arc::new(ids));
+
+        let Some(probe) = &self.workspace_probe else {
+            self.host.set_workspace_files(Arc::new(ids));
+            return;
+        };
+
+        if probe.layout.modules.is_empty() {
+            self.host.set_workspace_files(Arc::new(ids));
+            return;
+        }
+
+        let fallback_module = probe
+            .layout
+            .modules
+            .iter()
+            .find(|m| m.rel_path == ".")
+            .unwrap_or(&probe.layout.modules[0])
+            .id;
+
+        let mut by_module: BTreeMap<ModuleId, Vec<FileId>> = probe
+            .layout
+            .modules
+            .iter()
+            .map(|m| (m.id, Vec::new()))
+            .collect();
+
+        for file_id in ids {
+            let mod_id = self
+                .file_urls
+                .get(&file_id)
+                .and_then(uri_to_path)
+                .and_then(|file_path| {
+                    let rel = file_path.strip_prefix(&probe.workspace_dir).ok()?;
+                    let norm = normalize_rel_path(&rel.to_string_lossy());
+                    if let Some((module, _)) = probe.layout.enclosing_source_root(&norm) {
+                        return Some(module.id);
+                    }
+                    probe
+                        .layout
+                        .modules
+                        .iter()
+                        .filter(|module| is_path_within(&norm, &module.rel_path))
+                        .max_by_key(|module| {
+                            if module.rel_path == "." {
+                                0
+                            } else {
+                                module.rel_path.len()
+                            }
+                        })
+                        .map(|module| module.id)
+                })
+                .unwrap_or(fallback_module);
+
+            by_module.entry(mod_id).or_default().push(file_id);
+        }
+
+        let modules = by_module
+            .into_iter()
+            .map(|(id, file_ids)| (id, Arc::new(file_ids)))
+            .collect();
+        self.host.set_workspace_modules(modules);
     }
 
     fn language_level_for(&self, uri: &Uri, text: &str) -> LanguageLevel {

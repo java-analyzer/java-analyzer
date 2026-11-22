@@ -13,7 +13,10 @@ use syntax::{
     SyntaxNode, TextRange,
 };
 
-use crate::FileId;
+use crate::{
+    item_tree::{file_symbols_from_item_tree, lower_file_item_tree, FileItemTree, TypeId},
+    FileId,
+};
 
 /// Extracts the identifier text of a `NAME` or `NAME_REF` node without heap allocation for short
 /// names.
@@ -145,11 +148,15 @@ pub struct MemberSymbol {
     pub selection_range: TextRange,
 }
 
+pub(crate) fn format_params_signature(params: &[ParamSummary]) -> String {
+    let inner: Vec<String> = params.iter().map(ParamSummary::display).collect();
+    format!("({})", inner.join(", "))
+}
+
 impl MemberSymbol {
     /// Formats the parameter list as `"(T a, U... b)"`.
     pub fn params_signature(&self) -> String {
-        let inner: Vec<String> = self.params.iter().map(ParamSummary::display).collect();
-        format!("({})", inner.join(", "))
+        format_params_signature(&self.params)
     }
 }
 
@@ -167,11 +174,59 @@ pub struct FileSymbols {
     pub top_level_members: Vec<MemberSymbol>,
 }
 
+/// Position-independent symbol lookup index for a single module.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModuleIndex {
+    /// Canonical FQN (`"com.example.Outer.Inner"`, or `"Foo"` in unnamed package) -> `(FileId, TypeId)`.
+    pub(crate) types_by_fqn: BTreeMap<String, (FileId, TypeId)>,
+    /// Package name (`""` for unnamed package, `"com.example"` otherwise) -> top-level type FQNs.
+    pub(crate) types_by_package: BTreeMap<String, Vec<String>>,
+    /// Package name -> simple name -> top-level type FQN for fast same-package & wildcard lookup.
+    pub(crate) package_type_map: BTreeMap<String, BTreeMap<SmolStr, String>>,
+}
+
+impl ModuleIndex {
+    /// Returns the indexed `(FileId, TypeId)` for `fqn`, if present.
+    pub fn get_type(&self, fqn: &str) -> Option<(FileId, TypeId)> {
+        self.types_by_fqn.get(fqn).copied()
+    }
+
+    /// Returns `true` if `fqn` is present in this module index.
+    pub fn contains_type(&self, fqn: &str) -> bool {
+        self.types_by_fqn.contains_key(fqn)
+    }
+
+    /// Returns the indexed top-level type FQNs belonging to `pkg` (`""` for the unnamed package).
+    pub fn package_types(&self, pkg: &str) -> Option<&[String]> {
+        self.types_by_package.get(pkg).map(Vec::as_slice)
+    }
+
+    /// Returns the number of distinct indexed packages in this module.
+    pub fn package_count(&self) -> usize {
+        self.types_by_package.len()
+    }
+
+    /// Returns the total number of indexed types in this module.
+    pub fn type_count(&self) -> usize {
+        self.types_by_fqn.len()
+    }
+
+    /// Returns `true` if the module index contains no types.
+    pub fn is_empty(&self) -> bool {
+        self.types_by_fqn.is_empty()
+    }
+
+    /// Returns `true` if `prefix` is a known package or ancestor prefix of any indexed package.
+    pub fn has_package_prefix(&self, prefix: &str) -> bool {
+        has_package_prefix_in(&self.types_by_package, prefix)
+    }
+}
+
 /// Aggregated deterministic workspace-wide symbol lookup index.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkspaceIndex {
-    /// Canonical FQN (`"com.example.Outer.Inner"`, or `"Foo"` in unnamed package) -> `TypeSymbol`.
-    pub(crate) types_by_fqn: BTreeMap<String, TypeSymbol>,
+    /// Canonical FQN (`"com.example.Outer.Inner"`, or `"Foo"` in unnamed package) -> `(FileId, TypeId)`.
+    pub(crate) types_by_fqn: BTreeMap<String, (FileId, TypeId)>,
     /// Package name (`""` for unnamed package, `"com.example"` otherwise) -> top-level type FQNs.
     pub(crate) types_by_package: BTreeMap<String, Vec<String>>,
     /// Package name -> simple name -> top-level type FQN for fast same-package & wildcard lookup.
@@ -179,9 +234,9 @@ pub struct WorkspaceIndex {
 }
 
 impl WorkspaceIndex {
-    /// Returns the indexed [`TypeSymbol`] for `fqn`, if present.
-    pub fn get_type(&self, fqn: &str) -> Option<&TypeSymbol> {
-        self.types_by_fqn.get(fqn)
+    /// Returns the indexed `(FileId, TypeId)` for `fqn`, if present.
+    pub fn get_type(&self, fqn: &str) -> Option<(FileId, TypeId)> {
+        self.types_by_fqn.get(fqn).copied()
     }
 
     /// Returns `true` if `fqn` is present in the workspace index.
@@ -211,85 +266,41 @@ impl WorkspaceIndex {
 
     /// Returns `true` if `prefix` is a known package or ancestor prefix of any indexed package.
     pub fn has_package_prefix(&self, prefix: &str) -> bool {
-        if prefix.is_empty() {
-            return false;
-        }
-        if self.types_by_package.contains_key(prefix) {
-            return true;
-        }
-        let prefix_dot = format!("{prefix}.");
-        self.types_by_package
-            .range(prefix_dot.clone()..)
-            .next()
-            .is_some_and(|(pkg, _)| pkg.starts_with(&prefix_dot))
+        has_package_prefix_in(&self.types_by_package, prefix)
     }
+}
+
+fn has_package_prefix_in(types_by_package: &BTreeMap<String, Vec<String>>, prefix: &str) -> bool {
+    if prefix.is_empty() {
+        return false;
+    }
+    if types_by_package.contains_key(prefix) {
+        return true;
+    }
+    let prefix_dot = format!("{prefix}.");
+    types_by_package
+        .range(prefix_dot.clone()..)
+        .next()
+        .is_some_and(|(pkg, _)| pkg.starts_with(&prefix_dot))
 }
 
 /// Extracts all package, import, type, and member declarations from `root`, without descending into
 /// method, constructor, or initializer bodies.
 pub fn extract_file_symbols(file_id: FileId, root: &SyntaxNode) -> FileSymbols {
-    let mut package = None;
-    let mut imports = Vec::new();
-    let mut types = Vec::new();
-    let mut top_level_members = Vec::new();
-
-    for child in root.children() {
-        match child.kind() {
-            PACKAGE_DECL if package.is_none() => {
-                let segs = child
-                    .children()
-                    .find(|n| n.kind() == PATH)
-                    .map(|p| path_segments(&p))
-                    .unwrap_or_default();
-                if !segs.is_empty() {
-                    package = Some(segs.join("."));
-                }
-            }
-            IMPORT_DECL => {
-                imports.push(extract_import(&child));
-            }
-            kind if TypeKind::from_syntax(kind).is_some() => {
-                extract_type_decl(
-                    file_id,
-                    &child,
-                    package.as_deref(),
-                    None,
-                    None,
-                    &mut types,
-                );
-            }
-            FIELD_DECL => {
-                extract_field_decl(file_id, &child, None, None, &mut top_level_members);
-            }
-            METHOD_DECL => {
-                if let Some(member) = extract_method_or_ctor(file_id, &child, None, MemberKind::Method)
-                {
-                    top_level_members.push(member);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    FileSymbols {
-        file_id,
-        package,
-        imports,
-        types,
-        top_level_members,
-    }
+    let (tree, map) = lower_file_item_tree(file_id, root);
+    file_symbols_from_item_tree(&tree, &map)
 }
 
-/// Builds a deterministic [`WorkspaceIndex`] across all provided [`FileSymbols`].
-pub fn build_workspace_index(files: &[Arc<FileSymbols>]) -> WorkspaceIndex {
-    let mut index = WorkspaceIndex::default();
+/// Builds a deterministic, position-independent [`ModuleIndex`] across a module's [`FileItemTree`]s.
+pub fn build_module_index(files: &[Arc<FileItemTree>]) -> ModuleIndex {
+    let mut index = ModuleIndex::default();
 
     for file in files {
         let pkg = file.package.as_deref().unwrap_or("");
-        for ty in &file.types {
+        for (type_id, ty) in file.types.iter() {
             index
                 .types_by_fqn
-                .insert(ty.qualified_name.clone(), ty.clone());
+                .insert(ty.qualified_name.clone(), (file.file_id, type_id));
             if ty.enclosing_type.is_none() {
                 index
                     .types_by_package
@@ -313,15 +324,52 @@ pub fn build_workspace_index(files: &[Arc<FileSymbols>]) -> WorkspaceIndex {
     index
 }
 
+/// Merges per-module [`ModuleIndex`]es into a deterministic [`WorkspaceIndex`].
+pub fn merge_module_indexes(modules: &[Arc<ModuleIndex>]) -> WorkspaceIndex {
+    let mut index = WorkspaceIndex::default();
+
+    for module in modules {
+        for (fqn, &loc) in &module.types_by_fqn {
+            index.types_by_fqn.insert(fqn.clone(), loc);
+        }
+        for (pkg, fqns) in &module.types_by_package {
+            index
+                .types_by_package
+                .entry(pkg.clone())
+                .or_default()
+                .extend(fqns.iter().cloned());
+        }
+        for (pkg, map) in &module.package_type_map {
+            let entry = index.package_type_map.entry(pkg.clone()).or_default();
+            for (name, fqn) in map {
+                entry.insert(name.clone(), fqn.clone());
+            }
+        }
+    }
+
+    for fqns in index.types_by_package.values_mut() {
+        fqns.sort();
+        fqns.dedup();
+    }
+
+    index
+}
+
+/// Builds a deterministic [`WorkspaceIndex`] across all provided [`FileItemTree`]s.
+pub fn build_workspace_index(files: &[Arc<FileItemTree>]) -> WorkspaceIndex {
+    let module_idx = Arc::new(build_module_index(files));
+    merge_module_indexes(&[module_idx])
+}
+
 /// Extracts a standalone [`TypeSymbol`] from a single type declaration node (used for local types
-/// inside method/block bodies as well as workspace types).
+/// inside method/block bodies).
 pub(crate) fn extract_local_type_symbol(file_id: FileId, node: &SyntaxNode) -> Option<TypeSymbol> {
     let mut out = Vec::new();
     extract_type_decl(file_id, node, None, None, None, &mut out);
     out.into_iter().next()
 }
 
-fn extract_import(node: &SyntaxNode) -> ImportDecl {
+pub(crate) fn extract_import_parts(node: &SyntaxNode) -> (ImportKind, Vec<String>) {
     let mut has_static = false;
     let mut is_module = false;
     let mut is_wildcard = false;
@@ -355,11 +403,7 @@ fn extract_import(node: &SyntaxNode) -> ImportDecl {
         ImportKind::SingleType
     };
 
-    ImportDecl {
-        kind,
-        path,
-        range: node.text_range(),
-    }
+    (kind, path)
 }
 
 fn extract_type_decl(
@@ -570,7 +614,7 @@ pub(crate) fn extract_method_or_ctor(
     })
 }
 
-fn extract_params(param_list: &SyntaxNode) -> Vec<ParamSummary> {
+pub(crate) fn extract_params(param_list: &SyntaxNode) -> Vec<ParamSummary> {
     param_list
         .children()
         .filter(|n| n.kind() == PARAM)
@@ -588,7 +632,7 @@ fn extract_params(param_list: &SyntaxNode) -> Vec<ParamSummary> {
         .collect()
 }
 
-fn extract_type_param_names(node: &SyntaxNode) -> Vec<SmolStr> {
+pub(crate) fn extract_type_param_names(node: &SyntaxNode) -> Vec<SmolStr> {
     node.children()
         .find(|n| n.kind() == TYPE_PARAMS)
         .map(|tps| {

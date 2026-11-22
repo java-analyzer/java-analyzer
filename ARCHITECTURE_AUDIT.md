@@ -209,6 +209,6 @@ Each step is small, independent, behavior-preserving, and leaves `cargo test` gr
 - [x] Add `ide::AnalysisHost` (wrapping `RootDatabase`) and `ide::Analysis` (holding a Salsa snapshot) so `java-analyzer` depends only on `ide` (no direct `hir` or `syntax` dependency).
 - [x] Offload `Hover`, `GotoDefinition`, and `DocumentSymbol` requests to a worker thread pool with `salsa::Cancelled` handling, and run initial workspace indexing asynchronously off the main loop.
 
-### Step 9: Position-Independent `ItemTree` & Per-Module Indexing (Prep for Spec 0009) **[Salsa Query Change]** **[New Dependency]**
-- Add `la-arena` and separate `FileSymbols` into a position-independent `ItemTree` (no `TextRange`s, preserving true Salsa early-cutoff on body edits of any length) plus a per-file `AstIdMap` for range lookup.
-- Replace the monolithic `WorkspaceFiles` / `build_index` query with per-module / per-source-root symbol index queries so edits in one module do not invalidate unrelated modules.
+### Step 9: Position-Independent `ItemTree` & Per-Module Indexing (Prep for Spec 0009) **[Salsa Query Change]** **[New Dependency]** *(Completed)*
+- [x] Add `la-arena` and separate `FileSymbols` into a position-independent `ItemTree` (no `TextRange`s, preserving true Salsa early-cutoff on body edits of any length) plus a per-file `AstIdMap` for range lookup.
+- [x] Replace the monolithic `WorkspaceFiles` / `build_index` query with per-module / per-source-root symbol index queries so edits in one module do not invalidate unrelated modules.

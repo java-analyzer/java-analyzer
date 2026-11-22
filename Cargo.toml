@@ -20,6 +20,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 expect-test = "1"
 ignore = "0.4"
+la-arena = "0.3"
 line-index = "0.1"
 lsp-server = "0.10"
 lsp-types = "0.97"

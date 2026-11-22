@@ -1,3 +1,4 @@
+pub mod item_tree;
 pub mod resolve;
 pub mod symbols;
 #[cfg(any(test, feature = "test-utils"))]
@@ -9,11 +10,16 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 use salsa::Setter as _;
 
+pub use item_tree::{
+    AstId, AstIdMap, AstRange, FileItemTree, ImportId, ImportTree, MemberId, MemberItem, TypeId,
+    TypeItem,
+};
 pub use resolve::{resolve_at_offset, LocalKind, ResolvedSymbol, ResolvedSymbolKind, SymbolDetail};
 pub use smol_str::SmolStr;
 pub use symbols::{
-    build_workspace_index, extract_file_symbols, FileSymbols, ImportDecl, ImportKind, MemberKind,
-    MemberSymbol, ParamSummary, TypeKind, TypeSymbol, WorkspaceIndex,
+    build_module_index, build_workspace_index, extract_file_symbols, merge_module_indexes,
+    FileSymbols, ImportDecl, ImportKind, MemberKind, MemberSymbol, ModuleIndex, ParamSummary,
+    TypeKind, TypeSymbol, WorkspaceIndex,
 };
 pub use syntax::{
     parse_shebang_level, LanguageLevel, Parse, Release, SyntaxError, SyntaxNode, TextRange,
@@ -37,8 +43,14 @@ pub(crate) struct SourceFile {
 }
 
 #[salsa::input]
-pub(crate) struct WorkspaceFiles {
+pub(crate) struct ModuleFiles {
+    pub(crate) module_id: ModuleId,
     pub(crate) files: Arc<Vec<SourceFile>>,
+}
+
+#[salsa::input]
+pub(crate) struct WorkspaceModules {
+    pub(crate) modules: Arc<Vec<ModuleFiles>>,
 }
 
 #[salsa::tracked]
@@ -52,17 +64,63 @@ fn file_syntax_errors(db: &dyn salsa::Database, file: SourceFile) -> Arc<Vec<Syn
 }
 
 #[salsa::tracked]
-fn extract_symbols(db: &dyn salsa::Database, file: SourceFile) -> Arc<FileSymbols> {
+fn file_item_tree_data(db: &dyn salsa::Database, file: SourceFile) -> FileItemTree {
     let root = parse_file(db, file).syntax_node();
-    Arc::new(symbols::extract_file_symbols(*file.file_id(db), &root))
+    let (tree, _map) = item_tree::lower_file_item_tree(*file.file_id(db), &root);
+    tree
 }
 
 #[salsa::tracked]
-fn build_index(db: &dyn salsa::Database, workspace: WorkspaceFiles) -> Arc<WorkspaceIndex> {
-    let files = workspace.files(db);
-    let per_file: Vec<Arc<FileSymbols>> =
-        files.iter().map(|&f| extract_symbols(db, f).clone()).collect();
-    Arc::new(symbols::build_workspace_index(&per_file))
+fn file_item_tree(db: &dyn salsa::Database, file: SourceFile) -> Arc<FileItemTree> {
+    Arc::new(file_item_tree_data(db, file).clone())
+}
+
+#[salsa::tracked]
+fn file_ast_id_map(db: &dyn salsa::Database, file: SourceFile) -> Arc<AstIdMap> {
+    let root = parse_file(db, file).syntax_node();
+    let (_tree, map) = item_tree::lower_file_item_tree(*file.file_id(db), &root);
+    Arc::new(map)
+}
+
+#[salsa::tracked]
+fn extract_symbols(db: &dyn salsa::Database, file: SourceFile) -> Arc<FileSymbols> {
+    let tree = file_item_tree(db, file);
+    let map = file_ast_id_map(db, file);
+    Arc::new(item_tree::file_symbols_from_item_tree(tree, map))
+}
+
+#[salsa::tracked]
+fn build_module_index_data(db: &dyn salsa::Database, module: ModuleFiles) -> ModuleIndex {
+    let files = module.files(db);
+    let per_file: Vec<Arc<FileItemTree>> =
+        files.iter().map(|&f| file_item_tree(db, f).clone()).collect();
+    symbols::build_module_index(&per_file)
+}
+
+#[salsa::tracked]
+fn build_module_index_query(db: &dyn salsa::Database, module: ModuleFiles) -> Arc<ModuleIndex> {
+    Arc::new(build_module_index_data(db, module).clone())
+}
+
+#[salsa::tracked]
+fn build_workspace_index_data(
+    db: &dyn salsa::Database,
+    workspace: WorkspaceModules,
+) -> WorkspaceIndex {
+    let modules = workspace.modules(db);
+    let per_module: Vec<Arc<ModuleIndex>> = modules
+        .iter()
+        .map(|&m| build_module_index_query(db, m).clone())
+        .collect();
+    symbols::merge_module_indexes(&per_module)
+}
+
+#[salsa::tracked]
+fn build_workspace_index_query(
+    db: &dyn salsa::Database,
+    workspace: WorkspaceModules,
+) -> Arc<WorkspaceIndex> {
+    Arc::new(build_workspace_index_data(db, workspace).clone())
 }
 
 pub trait SourceDatabase: salsa::Database {
@@ -85,8 +143,17 @@ pub trait DefDatabase: SourceDatabase {
     /// Ordered list of all `.java` files currently in the workspace.
     fn workspace_files(&self) -> Arc<Vec<FileId>>;
 
+    /// Position-independent structural item tree for a single file.
+    fn file_item_tree(&self, file_id: FileId) -> Arc<FileItemTree>;
+
+    /// Source byte ranges keyed by [`AstId`] for a single file.
+    fn ast_id_map(&self, file_id: FileId) -> Arc<AstIdMap>;
+
     /// Declared package, imports, types, and members extracted from a single file.
     fn file_symbols(&self, file_id: FileId) -> Arc<FileSymbols>;
+
+    /// Position-independent lookup index for a single workspace module.
+    fn module_index(&self, module_id: ModuleId) -> Arc<ModuleIndex>;
 
     /// Aggregated workspace-wide lookup index over `workspace_files`.
     fn workspace_index(&self) -> Arc<WorkspaceIndex>;
@@ -117,7 +184,8 @@ where
 pub struct RootDatabase {
     storage: salsa::Storage<Self>,
     files: FxHashMap<FileId, SourceFile>,
-    workspace: Option<WorkspaceFiles>,
+    module_files: FxHashMap<ModuleId, ModuleFiles>,
+    workspace_modules: Option<WorkspaceModules>,
 }
 
 #[salsa::db]
@@ -164,16 +232,41 @@ impl RootDatabase {
     }
 
     pub fn set_workspace_files(&mut self, file_ids: Arc<Vec<FileId>>) {
-        let files: Arc<Vec<SourceFile>> = Arc::new(
-            file_ids
+        self.set_workspace_modules(vec![(ModuleId(0), file_ids)]);
+    }
+
+    pub fn set_workspace_modules(&mut self, modules: Vec<(ModuleId, Arc<Vec<FileId>>)>) {
+        let mut active_ids = Vec::with_capacity(modules.len());
+        let mut mod_inputs = Vec::with_capacity(modules.len());
+
+        for (module_id, file_ids) in modules {
+            active_ids.push(module_id);
+            let files: Vec<SourceFile> = file_ids
                 .iter()
                 .map(|&id| self.ensure_source_file(id))
-                .collect(),
-        );
-        if let Some(ws) = self.workspace {
-            ws.set_files(self).to(files);
+                .collect();
+
+            let mod_files = if let Some(&existing) = self.module_files.get(&module_id) {
+                if existing.files(self).as_slice() != files.as_slice() {
+                    existing.set_files(self).to(Arc::new(files));
+                }
+                existing
+            } else {
+                let created = ModuleFiles::new(self, module_id, Arc::new(files));
+                self.module_files.insert(module_id, created);
+                created
+            };
+            mod_inputs.push(mod_files);
+        }
+
+        self.module_files.retain(|id, _| active_ids.contains(id));
+
+        if let Some(ws) = self.workspace_modules {
+            if ws.modules(self).as_slice() != mod_inputs.as_slice() {
+                ws.set_modules(self).to(Arc::new(mod_inputs));
+            }
         } else {
-            self.workspace = Some(WorkspaceFiles::new(self, files));
+            self.workspace_modules = Some(WorkspaceModules::new(self, Arc::new(mod_inputs)));
         }
     }
 
@@ -207,19 +300,42 @@ impl SourceDatabase for RootDatabase {
 
 impl DefDatabase for RootDatabase {
     fn workspace_files(&self) -> Arc<Vec<FileId>> {
-        match self.workspace {
-            Some(ws) => Arc::new(ws.files(self).iter().map(|&f| *f.file_id(self)).collect()),
+        match self.workspace_modules {
+            Some(ws) => {
+                let mut ids = Vec::new();
+                for &module in ws.modules(self).iter() {
+                    for &file in module.files(self).iter() {
+                        ids.push(*file.file_id(self));
+                    }
+                }
+                Arc::new(ids)
+            }
             None => Arc::new(Vec::new()),
         }
+    }
+
+    fn file_item_tree(&self, file_id: FileId) -> Arc<FileItemTree> {
+        file_item_tree(self, self.source_file(file_id)).clone()
+    }
+
+    fn ast_id_map(&self, file_id: FileId) -> Arc<AstIdMap> {
+        file_ast_id_map(self, self.source_file(file_id)).clone()
     }
 
     fn file_symbols(&self, file_id: FileId) -> Arc<FileSymbols> {
         extract_symbols(self, self.source_file(file_id)).clone()
     }
 
+    fn module_index(&self, module_id: ModuleId) -> Arc<ModuleIndex> {
+        match self.module_files.get(&module_id) {
+            Some(&module) => build_module_index_query(self, module).clone(),
+            None => Arc::new(ModuleIndex::default()),
+        }
+    }
+
     fn workspace_index(&self) -> Arc<WorkspaceIndex> {
-        match self.workspace {
-            Some(ws) => build_index(self, ws).clone(),
+        match self.workspace_modules {
+            Some(ws) => build_workspace_index_query(self, ws).clone(),
             None => Arc::new(WorkspaceIndex::default()),
         }
     }
@@ -1049,5 +1165,118 @@ class LocalDecls {
         // Removing an absent FileId does not panic.
         db.remove_file(f2);
         db.remove_file(FileId(999));
+    }
+
+    #[test]
+    fn variable_length_body_edit_preserves_item_tree_and_index_with_shifted_ranges() {
+        let initial = "\
+package p;
+class First {
+    int compute() {
+        return 1;
+    }
+}
+class Second {
+    int field;
+}
+class Caller {
+    Second ref = null;
+}
+";
+        let edited = "\
+package p;
+class First {
+    int compute() {
+        int a = 10;
+        int b = 20;
+        int c = a + b;
+        return c;
+    }
+}
+class Second {
+    int field;
+}
+class Caller {
+    /*ref*/Second ref = null;
+}
+";
+        let (mut db, file_id) = db_with(initial);
+        let tree_before = db.file_item_tree(file_id);
+        let idx_before = db.workspace_index();
+
+        let expected_before_offset = initial.find("Second {\n").unwrap();
+        let caller_ref_before = initial.find("Second ref").unwrap() as u32;
+        let resolved_before = resolve_at_offset(&db, file_id, caller_ref_before).unwrap();
+        assert_eq!(
+            usize::from(resolved_before.focus_range.unwrap().start()),
+            expected_before_offset
+        );
+
+        db.set_file_text(file_id, Arc::new(edited.to_string()));
+        let tree_after = db.file_item_tree(file_id);
+        let idx_after = db.workspace_index();
+
+        assert!(
+            Arc::ptr_eq(&tree_before, &tree_after),
+            "variable-length body edit must trigger Salsa early-cutoff for FileItemTree"
+        );
+        assert!(
+            Arc::ptr_eq(&idx_before, &idx_after),
+            "variable-length body edit must trigger Salsa early-cutoff for WorkspaceIndex"
+        );
+
+        let expected_after_offset = edited.find("Second {\n").unwrap();
+        assert_ne!(expected_before_offset, expected_after_offset);
+        let resolved_after = resolve_at_offset(&db, file_id, cursor(edited, "/*ref*/")).unwrap();
+        assert_eq!(resolved_after.qualified_name, "p.Second");
+        assert_eq!(
+            usize::from(resolved_after.focus_range.unwrap().start()),
+            expected_after_offset
+        );
+    }
+
+    #[test]
+    fn signature_edit_in_one_module_does_not_invalidate_other_modules() {
+        let mut db = RootDatabase::default();
+        let f0 = FileId(1);
+        let f1 = FileId(2);
+
+        db.set_file_text(f0, Arc::new("package m0; public class Alpha {}".to_string()));
+        db.set_file_text(f1, Arc::new("package m1; public class Beta {}".to_string()));
+        db.set_workspace_modules(vec![
+            (ModuleId(0), Arc::new(vec![f0])),
+            (ModuleId(1), Arc::new(vec![f1])),
+        ]);
+
+        let mod0_before = db.module_index(ModuleId(0));
+        let mod1_before = db.module_index(ModuleId(1));
+        let ws_before = db.workspace_index();
+        assert!(mod0_before.contains_type("m0.Alpha"));
+        assert!(mod1_before.contains_type("m1.Beta"));
+        assert!(ws_before.contains_type("m0.Alpha"));
+        assert!(ws_before.contains_type("m1.Beta"));
+
+        // Edit signature in Module 0.
+        db.set_file_text(
+            f0,
+            Arc::new("package m0; public class AlphaRenamed { int x; }".to_string()),
+        );
+
+        let mod0_after = db.module_index(ModuleId(0));
+        let mod1_after = db.module_index(ModuleId(1));
+        let ws_after = db.workspace_index();
+
+        assert!(
+            !Arc::ptr_eq(&mod0_before, &mod0_after),
+            "Module 0 index must update after signature edit"
+        );
+        assert!(
+            Arc::ptr_eq(&mod1_before, &mod1_after),
+            "Module 1 index must remain pointer-identical after Module 0 edit"
+        );
+        assert!(!Arc::ptr_eq(&ws_before, &ws_after));
+        assert!(!ws_after.contains_type("m0.Alpha"));
+        assert!(ws_after.contains_type("m0.AlphaRenamed"));
+        assert!(ws_after.contains_type("m1.Beta"));
     }
 }

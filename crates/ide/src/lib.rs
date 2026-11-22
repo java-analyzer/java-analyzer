@@ -45,6 +45,10 @@ impl AnalysisHost {
         self.db.set_workspace_files(file_ids);
     }
 
+    pub fn set_workspace_modules(&mut self, modules: Vec<(ModuleId, Arc<Vec<FileId>>)>) {
+        self.db.set_workspace_modules(modules);
+    }
+
     pub fn remove_file(&mut self, file_id: FileId) {
         self.db.remove_file(file_id);
     }
