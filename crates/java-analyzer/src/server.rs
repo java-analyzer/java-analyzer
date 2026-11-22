@@ -42,9 +42,9 @@ const MAX_INFLIGHT_WORKERS: usize = 16;
 /// All mutable server state. Lives on the main loop thread only.
 pub struct GlobalState {
     host: AnalysisHost,
-    files: FxHashMap<Uri, FileId>,
-    file_urls: FxHashMap<FileId, Uri>,
-    line_indexes: FxHashMap<FileId, Arc<LineIndex>>,
+    files: Arc<FxHashMap<Uri, FileId>>,
+    file_urls: Arc<FxHashMap<FileId, Uri>>,
+    line_indexes: Arc<FxHashMap<FileId, Arc<LineIndex>>>,
     open_files: FxHashSet<Uri>,
     next_file_id: u32,
     workspace_probe: Option<WorkspaceProbe>,
@@ -53,9 +53,9 @@ pub struct GlobalState {
 /// Immutable snapshot of [`GlobalState`] sent to background request workers.
 struct GlobalStateSnapshot {
     analysis: Analysis,
-    files: FxHashMap<Uri, FileId>,
-    file_urls: FxHashMap<FileId, Uri>,
-    line_indexes: FxHashMap<FileId, Arc<LineIndex>>,
+    files: Arc<FxHashMap<Uri, FileId>>,
+    file_urls: Arc<FxHashMap<FileId, Uri>>,
+    line_indexes: Arc<FxHashMap<FileId, Arc<LineIndex>>>,
 }
 
 impl Default for GlobalState {
@@ -68,9 +68,9 @@ impl GlobalState {
     pub fn new() -> Self {
         Self {
             host: AnalysisHost::new(),
-            files: FxHashMap::default(),
-            file_urls: FxHashMap::default(),
-            line_indexes: FxHashMap::default(),
+            files: Arc::new(FxHashMap::default()),
+            file_urls: Arc::new(FxHashMap::default()),
+            line_indexes: Arc::new(FxHashMap::default()),
             open_files: FxHashSet::default(),
             next_file_id: 0,
             workspace_probe: None,
@@ -88,7 +88,7 @@ impl GlobalState {
         self.apply_workspace_probe(probe);
     }
 
-    pub fn apply_workspace_probe(&mut self, probe: WorkspaceProbe) {
+    pub fn apply_workspace_probe(&mut self, mut probe: WorkspaceProbe) {
         for rel_path in probe.file_paths.keys() {
             let abs_path = probe.workspace_dir.join(rel_path);
             let Some(uri) = path_to_uri(&abs_path) else {
@@ -109,6 +109,7 @@ impl GlobalState {
                 }
             }
         }
+        probe.file_contents.clear();
         self.workspace_probe = Some(probe);
         self.sync_workspace_files();
     }
@@ -120,15 +121,14 @@ impl GlobalState {
     fn snapshot(&self) -> GlobalStateSnapshot {
         GlobalStateSnapshot {
             analysis: self.host.analysis(),
-            files: self.files.clone(),
-            file_urls: self.file_urls.clone(),
-            line_indexes: self.line_indexes.clone(),
+            files: Arc::clone(&self.files),
+            file_urls: Arc::clone(&self.file_urls),
+            line_indexes: Arc::clone(&self.line_indexes),
         }
     }
 
     fn set_file_text(&mut self, file_id: FileId, text: Arc<String>) {
-        self.line_indexes
-            .insert(file_id, Arc::new(LineIndex::new(&text)));
+        Arc::make_mut(&mut self.line_indexes).insert(file_id, Arc::new(LineIndex::new(&text)));
         self.host.set_file_text(file_id, text);
     }
 
@@ -145,8 +145,8 @@ impl GlobalState {
         }
         let id = FileId(self.next_file_id);
         self.next_file_id += 1;
-        self.files.insert(uri.clone(), id);
-        self.file_urls.insert(id, uri.clone());
+        Arc::make_mut(&mut self.files).insert(uri.clone(), id);
+        Arc::make_mut(&mut self.file_urls).insert(id, uri.clone());
         (id, true)
     }
 
@@ -253,9 +253,9 @@ impl GlobalState {
         }
 
         // Non-disk / deleted file: drop it from the workspace index and clean up its database entry.
-        self.files.remove(uri);
-        self.file_urls.remove(&file_id);
-        self.line_indexes.remove(&file_id);
+        Arc::make_mut(&mut self.files).remove(uri);
+        Arc::make_mut(&mut self.file_urls).remove(&file_id);
+        Arc::make_mut(&mut self.line_indexes).remove(&file_id);
         self.sync_workspace_files();
         self.host.remove_file(file_id);
     }
@@ -618,7 +618,7 @@ fn spawn_request_worker<F, S>(
     work: F,
     send: S,
 ) where
-    F: FnOnce() -> Cancellable<serde_json::Value> + Send + 'static,
+    F: FnOnce() -> Cancellable<serde_json::Result<serde_json::Value>> + Send + 'static,
     S: FnOnce(Response) + Send + 'static,
 {
     prune_finished_workers(workers);
@@ -628,7 +628,15 @@ fn spawn_request_worker<F, S>(
     }
     let handle = thread::spawn(move || {
         let response = match catch_unwind(AssertUnwindSafe(work)) {
-            Ok(Ok(value)) => Response::new_ok(id, value),
+            Ok(Ok(Ok(value))) => Response::new_ok(id, value),
+            Ok(Ok(Err(err))) => {
+                tracing::error!(method = %method, %err, "failed to serialize LSP response");
+                Response::new_err(
+                    id,
+                    ErrorCode::InternalError as i32,
+                    format!("failed to serialize {method} response: {err}"),
+                )
+            }
             Ok(Err(Cancelled)) => Response::new_err(
                 id,
                 ErrorCode::ContentModified as i32,
@@ -664,10 +672,7 @@ fn dispatch_request(
                     workers,
                     id,
                     HoverRequest::METHOD,
-                    move || {
-                        let res = snap.hover(params)?;
-                        Ok(serde_json::to_value(res).expect("serializable hover response"))
-                    },
+                    move || Ok(serde_json::to_value(snap.hover(params)?)),
                     move |resp| {
                         let _ = sender.send(Message::Response(resp));
                     },
@@ -683,11 +688,7 @@ fn dispatch_request(
                     workers,
                     id,
                     GotoDefinition::METHOD,
-                    move || {
-                        let res = snap.goto_definition(params)?;
-                        Ok(serde_json::to_value(res)
-                            .expect("serializable goto_definition response"))
-                    },
+                    move || Ok(serde_json::to_value(snap.goto_definition(params)?)),
                     move |resp| {
                         let _ = sender.send(Message::Response(resp));
                     },
@@ -703,11 +704,7 @@ fn dispatch_request(
                     workers,
                     id,
                     DocumentSymbolRequest::METHOD,
-                    move || {
-                        let res = snap.document_symbols(params)?;
-                        Ok(serde_json::to_value(res)
-                            .expect("serializable document_symbol response"))
-                    },
+                    move || Ok(serde_json::to_value(snap.document_symbols(params)?)),
                     move |resp| {
                         let _ = sender.send(Message::Response(resp));
                     },
@@ -901,7 +898,7 @@ mod tests {
 
         // Even if a LineIndex entry is absent, queries fall back cleanly without panicking.
         state.set_text(&disk_uri, "class Disk { int x = ; }\n".to_string());
-        state.line_indexes.remove(&disk_id);
+        Arc::make_mut(&mut state.line_indexes).remove(&disk_id);
         let diags = state.diagnostics(&disk_uri, Some(1));
         assert!(!diags.diagnostics.is_empty());
         let syms = state.document_symbols(DocumentSymbolParams {
@@ -963,5 +960,26 @@ mod tests {
             pub_diags.diagnostics
         );
         assert_eq!(pub_diags.diagnostics.len(), 2);
+    }
+
+    #[test]
+    fn apply_workspace_probe_clears_file_contents_and_snapshots_share_maps() {
+        let dir = TestDir::new();
+        dir.write("src/Main.java", "class Main {}\n");
+
+        let state = GlobalState::with_workspace(dir.path());
+        assert!(
+            state
+                .workspace_probe()
+                .expect("probe stored")
+                .file_contents
+                .is_empty(),
+            "probe.file_contents should be cleared after loading into AnalysisHost"
+        );
+
+        let snap = state.snapshot();
+        assert!(Arc::ptr_eq(&state.files, &snap.files));
+        assert!(Arc::ptr_eq(&state.file_urls, &snap.file_urls));
+        assert!(Arc::ptr_eq(&state.line_indexes, &snap.line_indexes));
     }
 }
