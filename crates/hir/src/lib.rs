@@ -92,8 +92,28 @@ pub trait DefDatabase: SourceDatabase {
     fn workspace_index(&self) -> Arc<WorkspaceIndex>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("query cancelled")
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
+pub type Cancellable<T> = Result<T, Cancelled>;
+
+pub fn catch_cancelled<F, T>(f: F) -> Cancellable<T>
+where
+    F: FnOnce() -> T,
+{
+    salsa::Cancelled::catch(std::panic::AssertUnwindSafe(f)).map_err(|_| Cancelled)
+}
+
 #[salsa::db]
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct RootDatabase {
     storage: salsa::Storage<Self>,
     files: FxHashMap<FileId, SourceFile>,

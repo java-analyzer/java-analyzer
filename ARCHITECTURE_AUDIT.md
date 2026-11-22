@@ -205,9 +205,9 @@ Each step is small, independent, behavior-preserving, and leaves `cargo test` gr
 - [x] Refactor `lookup_type_by_fqn` and `select_method` to borrow `&TypeSymbol` / `&MemberSymbol` instead of cloning whole structs and temporary `Vec`s.
 - [x] Extract `local_symbol_from_node` in `hir::resolve` and `WorkspaceLayout::enclosing_source_root` in `hir::workspace`.
 
-### Step 8: Introduce `AnalysisHost` / `Analysis` Facade & Background Request Execution **[Crate Boundary Change]**
-- Add `ide::AnalysisHost` (wrapping `RootDatabase`) and `ide::Analysis` (holding a Salsa snapshot) so `java-analyzer` depends only on `ide` (no direct `hir` or `syntax` dependency).
-- Offload `Hover`, `GotoDefinition`, and `DocumentSymbol` requests to a worker thread pool with `salsa::Cancelled` handling, and run initial workspace indexing asynchronously off the main loop.
+### Step 8: Introduce `AnalysisHost` / `Analysis` Facade & Background Request Execution **[Crate Boundary Change]** *(Completed)*
+- [x] Add `ide::AnalysisHost` (wrapping `RootDatabase`) and `ide::Analysis` (holding a Salsa snapshot) so `java-analyzer` depends only on `ide` (no direct `hir` or `syntax` dependency).
+- [x] Offload `Hover`, `GotoDefinition`, and `DocumentSymbol` requests to a worker thread pool with `salsa::Cancelled` handling, and run initial workspace indexing asynchronously off the main loop.
 
 ### Step 9: Position-Independent `ItemTree` & Per-Module Indexing (Prep for Spec 0009) **[Salsa Query Change]** **[New Dependency]**
 - Add `la-arena` and separate `FileSymbols` into a position-independent `ItemTree` (no `TextRange`s, preserving true Salsa early-cutoff on body edits of any length) plus a per-file `AstIdMap` for range lookup.

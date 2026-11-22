@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use hir::Release;
+use ide::Release;
 
 use super::DetectedVersionSpec;
 

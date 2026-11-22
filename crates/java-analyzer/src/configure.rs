@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use hir::{normalize_rel_path, ModuleDependency, ModuleTarget, Release, RootScope};
+use ide::{normalize_rel_path, ModuleDependency, ModuleTarget, Release, RootScope};
 
 use crate::{
     cli::ConfigureArgs,

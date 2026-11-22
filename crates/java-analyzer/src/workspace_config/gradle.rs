@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use hir::{ModuleDependency, RootScope};
+use ide::{ModuleDependency, RootScope};
 
 use super::{parse_version_string, DetectedVersionSpec, ManifestMetadata};
 

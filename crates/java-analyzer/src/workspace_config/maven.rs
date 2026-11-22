@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, path::Path};
 
-use hir::{normalize_rel_path, ModuleDependency, Release, RootScope};
+use ide::{normalize_rel_path, ModuleDependency, Release, RootScope};
 use roxmltree::{Document, Node, ParsingOptions};
 
 use super::{expand_props, parse_version_string, DetectedVersionSpec, ManifestMetadata};

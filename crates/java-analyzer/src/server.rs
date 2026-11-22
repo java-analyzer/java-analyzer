@@ -5,9 +5,12 @@ use std::{
     panic::{catch_unwind, AssertUnwindSafe},
     path::Path,
     sync::Arc,
+    thread::{self, JoinHandle},
 };
 
-use hir::{normalize_rel_path, FileId, RootDatabase, SourceDatabase};
+use ide::{
+    normalize_rel_path, Analysis, AnalysisHost, Cancellable, Cancelled, FileId, LanguageLevel,
+};
 use line_index::LineIndex;
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::{
@@ -31,15 +34,26 @@ use crate::{
     workspace_config::{parse_shebang_level, probe_workspace, WorkspaceProbe},
 };
 
+/// Maximum number of concurrent read-only LSP request worker threads.
+const MAX_INFLIGHT_WORKERS: usize = 16;
+
 /// All mutable server state. Lives on the main loop thread only.
 pub struct GlobalState {
-    db: RootDatabase,
+    host: AnalysisHost,
     files: FxHashMap<Uri, FileId>,
     file_urls: FxHashMap<FileId, Uri>,
-    line_indexes: FxHashMap<FileId, LineIndex>,
+    line_indexes: FxHashMap<FileId, Arc<LineIndex>>,
     open_files: FxHashSet<Uri>,
     next_file_id: u32,
     workspace_probe: Option<WorkspaceProbe>,
+}
+
+/// Immutable snapshot of [`GlobalState`] sent to background request workers.
+struct GlobalStateSnapshot {
+    analysis: Analysis,
+    files: FxHashMap<Uri, FileId>,
+    file_urls: FxHashMap<FileId, Uri>,
+    line_indexes: FxHashMap<FileId, Arc<LineIndex>>,
 }
 
 impl Default for GlobalState {
@@ -51,7 +65,7 @@ impl Default for GlobalState {
 impl GlobalState {
     pub fn new() -> Self {
         Self {
-            db: RootDatabase::default(),
+            host: AnalysisHost::new(),
             files: FxHashMap::default(),
             file_urls: FxHashMap::default(),
             line_indexes: FxHashMap::default(),
@@ -69,6 +83,10 @@ impl GlobalState {
 
     pub fn set_workspace_root(&mut self, workspace_dir: &Path) {
         let probe = probe_workspace(workspace_dir);
+        self.apply_workspace_probe(probe);
+    }
+
+    pub fn apply_workspace_probe(&mut self, probe: WorkspaceProbe) {
         for rel_path in probe.file_paths.keys() {
             let abs_path = probe.workspace_dir.join(rel_path);
             let Some(uri) = path_to_uri(&abs_path) else {
@@ -84,7 +102,7 @@ impl GlobalState {
                     let (file_id, _) = self.ensure_file_id(&uri);
                     let level = parse_shebang_level(&text)
                         .unwrap_or_else(|| probe.language_level_for_path(&abs_path));
-                    self.db.set_file_language_level(file_id, level);
+                    self.host.set_file_language_level(file_id, level);
                     self.set_file_text(file_id, text);
                 }
             }
@@ -97,14 +115,24 @@ impl GlobalState {
         self.workspace_probe.as_ref()
     }
 
+    fn snapshot(&self) -> GlobalStateSnapshot {
+        GlobalStateSnapshot {
+            analysis: self.host.analysis(),
+            files: self.files.clone(),
+            file_urls: self.file_urls.clone(),
+            line_indexes: self.line_indexes.clone(),
+        }
+    }
+
     fn set_file_text(&mut self, file_id: FileId, text: Arc<String>) {
-        self.line_indexes.insert(file_id, LineIndex::new(&text));
-        self.db.set_file_text(file_id, text);
+        self.line_indexes
+            .insert(file_id, Arc::new(LineIndex::new(&text)));
+        self.host.set_file_text(file_id, text);
     }
 
     fn line_index(&self, file_id: FileId, text: &str) -> Cow<'_, LineIndex> {
         match self.line_indexes.get(&file_id) {
-            Some(index) => Cow::Borrowed(index),
+            Some(index) => Cow::Borrowed(index.as_ref()),
             None => Cow::Owned(LineIndex::new(text)),
         }
     }
@@ -123,24 +151,24 @@ impl GlobalState {
     fn sync_workspace_files(&mut self) {
         let mut ids: Vec<FileId> = self.file_urls.keys().copied().collect();
         ids.sort();
-        self.db.set_workspace_files(Arc::new(ids));
+        self.host.set_workspace_files(Arc::new(ids));
     }
 
-    fn language_level_for(&self, uri: &Uri, text: &str) -> hir::LanguageLevel {
+    fn language_level_for(&self, uri: &Uri, text: &str) -> LanguageLevel {
         parse_shebang_level(text)
             .or_else(|| {
                 let probe = self.workspace_probe.as_ref()?;
                 let path = uri_to_path(uri)?;
                 Some(probe.language_level_for_path(&path))
             })
-            .unwrap_or_else(hir::LanguageLevel::latest)
+            .unwrap_or_else(LanguageLevel::latest)
     }
 
     pub fn set_text(&mut self, uri: &Uri, text: String) {
         let level = self.language_level_for(uri, &text);
         let (file_id, is_new) = self.ensure_file_id(uri);
         self.open_files.insert(uri.clone());
-        self.db.set_file_language_level(file_id, level);
+        self.host.set_file_language_level(file_id, level);
         self.set_file_text(file_id, Arc::new(text));
         if is_new {
             self.sync_workspace_files();
@@ -156,7 +184,7 @@ impl GlobalState {
         if let Some(path) = uri_to_path(uri) {
             if let Ok(disk_text) = fs::read_to_string(&path) {
                 let level = self.language_level_for(uri, &disk_text);
-                self.db.set_file_language_level(file_id, level);
+                self.host.set_file_language_level(file_id, level);
                 self.set_file_text(file_id, Arc::new(disk_text));
                 return;
             }
@@ -167,58 +195,64 @@ impl GlobalState {
         self.file_urls.remove(&file_id);
         self.line_indexes.remove(&file_id);
         self.sync_workspace_files();
-        self.db.remove_file(file_id);
+        self.host.remove_file(file_id);
     }
 
     pub fn diagnostics(&self, uri: &Uri, version: Option<i32>) -> PublishDiagnosticsParams {
         let mut diagnostics: Vec<lsp_types::Diagnostic> = if self.open_files.contains(uri) {
             match self.files.get(uri) {
                 Some(&file_id) => {
-                    let text = self.db.file_text(file_id);
-                    let index = self.line_index(file_id, &text);
-                    let rel_path = self.workspace_probe.as_ref().and_then(|probe| {
-                        let file_path = uri_to_path(uri)?;
-                        let rel = file_path.strip_prefix(&probe.workspace_dir).ok()?;
-                        Some(normalize_rel_path(&rel.to_string_lossy()))
-                    });
-                    let layout_ctx = match (&self.workspace_probe, &rel_path) {
-                        (Some(probe), Some(norm)) => Some((&probe.layout, norm.as_str())),
-                        _ => None,
-                    };
-
-                    let mut diags: Vec<lsp_types::Diagnostic> =
-                        ide::diagnostics_with_layout(&self.db, file_id, layout_ctx)
-                            .into_iter()
-                            .map(|d| lsp_types::Diagnostic {
-                                range: text_range_to_range_with_index(
-                                    &index,
-                                    &text,
-                                    d.range.start().into(),
-                                    d.range.end().into(),
-                                ),
-                                severity: Some(match d.severity {
-                                    ide::Severity::Error => DiagnosticSeverity::ERROR,
-                                }),
-                                source: Some("java-analyzer".to_string()),
-                                message: d.message,
-                                ..Default::default()
-                            })
-                            .collect();
-
-                    // Surface workspace-level conflicts
-                    if let Some(probe) = &self.workspace_probe {
-                        for conflict in &probe.conflicts {
-                            diags.push(lsp_types::Diagnostic {
-                                range: text_range_to_range_with_index(&index, &text, 0, 0),
-                                severity: Some(DiagnosticSeverity::WARNING),
-                                source: Some("java-analyzer".to_string()),
-                                message: conflict.diagnostic_message(),
-                                ..Default::default()
+                    let analysis = self.host.analysis();
+                    match analysis.file_text(file_id) {
+                        Ok(text) => {
+                            let index = self.line_index(file_id, &text);
+                            let rel_path = self.workspace_probe.as_ref().and_then(|probe| {
+                                let file_path = uri_to_path(uri)?;
+                                let rel = file_path.strip_prefix(&probe.workspace_dir).ok()?;
+                                Some(normalize_rel_path(&rel.to_string_lossy()))
                             });
-                        }
-                    }
+                            let layout_ctx = match (&self.workspace_probe, &rel_path) {
+                                (Some(probe), Some(norm)) => Some((&probe.layout, norm.as_str())),
+                                _ => None,
+                            };
 
-                    diags
+                            let mut diags: Vec<lsp_types::Diagnostic> = analysis
+                                .diagnostics_with_layout(file_id, layout_ctx)
+                                .unwrap_or_default()
+                                .into_iter()
+                                .map(|d| lsp_types::Diagnostic {
+                                    range: text_range_to_range_with_index(
+                                        &index,
+                                        &text,
+                                        d.range.start().into(),
+                                        d.range.end().into(),
+                                    ),
+                                    severity: Some(match d.severity {
+                                        ide::Severity::Error => DiagnosticSeverity::ERROR,
+                                    }),
+                                    source: Some("java-analyzer".to_string()),
+                                    message: d.message,
+                                    ..Default::default()
+                                })
+                                .collect();
+
+                            // Surface workspace-level conflicts
+                            if let Some(probe) = &self.workspace_probe {
+                                for conflict in &probe.conflicts {
+                                    diags.push(lsp_types::Diagnostic {
+                                        range: text_range_to_range_with_index(&index, &text, 0, 0),
+                                        severity: Some(DiagnosticSeverity::WARNING),
+                                        source: Some("java-analyzer".to_string()),
+                                        message: conflict.diagnostic_message(),
+                                        ..Default::default()
+                                    });
+                                }
+                            }
+
+                            diags
+                        }
+                        Err(Cancelled) => Vec::new(),
+                    }
                 }
                 None => Vec::new(),
             }
@@ -249,42 +283,90 @@ impl GlobalState {
         }
     }
 
+    #[cfg(test)]
     fn document_symbols(&self, params: DocumentSymbolParams) -> Option<DocumentSymbolResponse> {
-        let file_id = *self.files.get(&params.text_document.uri)?;
-        let text = self.db.file_text(file_id);
+        self.snapshot().document_symbols(params).unwrap_or(None)
+    }
+
+    #[cfg(test)]
+    fn hover(&self, params: HoverParams) -> Option<Hover> {
+        self.snapshot().hover(params).unwrap_or(None)
+    }
+
+    #[cfg(test)]
+    fn goto_definition(&self, params: GotoDefinitionParams) -> Option<GotoDefinitionResponse> {
+        self.snapshot().goto_definition(params).unwrap_or(None)
+    }
+}
+
+impl GlobalStateSnapshot {
+    fn line_index(&self, file_id: FileId, text: &str) -> Cow<'_, LineIndex> {
+        match self.line_indexes.get(&file_id) {
+            Some(index) => Cow::Borrowed(index.as_ref()),
+            None => Cow::Owned(LineIndex::new(text)),
+        }
+    }
+
+    fn document_symbols(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Cancellable<Option<DocumentSymbolResponse>> {
+        let Some(&file_id) = self.files.get(&params.text_document.uri) else {
+            return Ok(None);
+        };
+        let text = self.analysis.file_text(file_id)?;
         let index = self.line_index(file_id, &text);
-        let symbols = ide::document_symbols(&self.db, file_id)
+        let symbols = self
+            .analysis
+            .document_symbols(file_id)?
             .iter()
             .map(|node| to_document_symbol(&index, &text, node))
             .collect();
-        Some(DocumentSymbolResponse::Nested(symbols))
+        Ok(Some(DocumentSymbolResponse::Nested(symbols)))
     }
 
-    fn hover(&self, params: HoverParams) -> Option<Hover> {
+    fn hover(&self, params: HoverParams) -> Cancellable<Option<Hover>> {
         let pos = params.text_document_position_params;
-        let file_id = *self.files.get(&pos.text_document.uri)?;
-        let text = self.db.file_text(file_id);
+        let Some(&file_id) = self.files.get(&pos.text_document.uri) else {
+            return Ok(None);
+        };
+        let text = self.analysis.file_text(file_id)?;
         let index = self.line_index(file_id, &text);
-        let offset = position_to_offset_with_index(&index, &text, pos.position)?;
-        let result = ide::hover(&self.db, file_id, offset)?;
-        Some(Hover {
+        let Some(offset) = position_to_offset_with_index(&index, &text, pos.position) else {
+            return Ok(None);
+        };
+        let Some(result) = self.analysis.hover(file_id, offset)? else {
+            return Ok(None);
+        };
+        Ok(Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
                 value: result.content,
             }),
             range: None,
-        })
+        }))
     }
 
-    fn goto_definition(&self, params: GotoDefinitionParams) -> Option<GotoDefinitionResponse> {
+    fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Cancellable<Option<GotoDefinitionResponse>> {
         let pos = params.text_document_position_params;
-        let file_id = *self.files.get(&pos.text_document.uri)?;
-        let text = self.db.file_text(file_id);
+        let Some(&file_id) = self.files.get(&pos.text_document.uri) else {
+            return Ok(None);
+        };
+        let text = self.analysis.file_text(file_id)?;
         let index = self.line_index(file_id, &text);
-        let offset = position_to_offset_with_index(&index, &text, pos.position)?;
-        let target = ide::goto_definition(&self.db, file_id, offset)?;
-        let target_uri = self.file_urls.get(&target.file_id)?.clone();
-        let target_text = self.db.file_text(target.file_id);
+        let Some(offset) = position_to_offset_with_index(&index, &text, pos.position) else {
+            return Ok(None);
+        };
+        let Some(target) = self.analysis.goto_definition(file_id, offset)? else {
+            return Ok(None);
+        };
+        let Some(target_uri) = self.file_urls.get(&target.file_id).cloned() else {
+            return Ok(None);
+        };
+        let target_text = self.analysis.file_text(target.file_id)?;
         let target_index = self.line_index(target.file_id, &target_text);
         let range = text_range_to_range_with_index(
             &target_index,
@@ -292,10 +374,10 @@ impl GlobalState {
             target.focus_range.start().into(),
             target.focus_range.end().into(),
         );
-        Some(GotoDefinitionResponse::Scalar(Location {
+        Ok(Some(GotoDefinitionResponse::Scalar(Location {
             uri: target_uri,
             range,
-        }))
+        })))
     }
 }
 
@@ -348,11 +430,54 @@ fn panic_message(payload: &(dyn Any + Send)) -> &str {
         .unwrap_or("unknown panic")
 }
 
+fn prune_finished_workers(workers: &mut Vec<JoinHandle<()>>) {
+    let mut i = 0;
+    while i < workers.len() {
+        if workers[i].is_finished() {
+            let handle = workers.swap_remove(i);
+            let _ = handle.join();
+        } else {
+            i += 1;
+        }
+    }
+}
+
+fn join_all_workers(workers: &mut Vec<JoinHandle<()>>) {
+    for handle in workers.drain(..) {
+        let _ = handle.join();
+    }
+}
+
+fn finish_pending_probe(
+    pending_probe: &mut Option<JoinHandle<WorkspaceProbe>>,
+    state: &mut GlobalState,
+) {
+    if let Some(handle) = pending_probe.take() {
+        match handle.join() {
+            Ok(probe) => state.apply_workspace_probe(probe),
+            Err(payload) => {
+                let msg = panic_message(&*payload);
+                tracing::error!(panic = %msg, "panic while probing workspace");
+            }
+        }
+    }
+}
+
+fn notification_needs_workspace(method: &str) -> bool {
+    matches!(
+        method,
+        DidOpenTextDocument::METHOD
+            | DidChangeTextDocument::METHOD
+            | DidCloseTextDocument::METHOD
+    )
+}
+
 /// Runs the server main loop until the client requests shutdown/exit.
 pub fn run(connection: Connection) -> anyhow::Result<()> {
     let init_params_val = connection.initialize(serde_json::to_value(capabilities())?)?;
 
     let mut state = GlobalState::new();
+    let mut pending_probe: Option<JoinHandle<WorkspaceProbe>> = None;
     match serde_json::from_value::<InitializeParams>(init_params_val) {
         Ok(init_params) => {
             #[allow(deprecated)]
@@ -364,7 +489,7 @@ pub fn run(connection: Connection) -> anyhow::Result<()> {
                 .or(init_params.root_uri.as_ref());
             if let Some(uri) = workspace_url {
                 if let Some(dir) = uri_to_path(uri) {
-                    state.set_workspace_root(&dir);
+                    pending_probe = Some(thread::spawn(move || probe_workspace(&dir)));
                 }
             }
         }
@@ -373,29 +498,30 @@ pub fn run(connection: Connection) -> anyhow::Result<()> {
         }
     }
 
+    let mut workers: Vec<JoinHandle<()>> = Vec::new();
+
     for msg in &connection.receiver {
+        prune_finished_workers(&mut workers);
+        if pending_probe.as_ref().is_some_and(JoinHandle::is_finished) {
+            finish_pending_probe(&mut pending_probe, &mut state);
+        }
+
         match msg {
             Message::Request(req) => {
                 if connection.handle_shutdown(&req)? {
+                    join_all_workers(&mut workers);
+                    if let Some(handle) = pending_probe.take() {
+                        let _ = handle.join();
+                    }
                     return Ok(());
                 }
-                let req_id = req.id.clone();
-                let method = req.method.clone();
-                let response = match catch_unwind(AssertUnwindSafe(|| handle_request(&state, req))) {
-                    Ok(response) => response,
-                    Err(payload) => {
-                        let msg = panic_message(&*payload);
-                        tracing::error!(method = %method, panic = %msg, "panic while handling LSP request");
-                        Response::new_err(
-                            req_id,
-                            ErrorCode::InternalError as i32,
-                            format!("internal error handling {method}: {msg}"),
-                        )
-                    }
-                };
-                connection.sender.send(Message::Response(response))?;
+                finish_pending_probe(&mut pending_probe, &mut state);
+                dispatch_request(&state, &connection, &mut workers, req)?;
             }
             Message::Notification(not) => {
+                if notification_needs_workspace(&not.method) {
+                    finish_pending_probe(&mut pending_probe, &mut state);
+                }
                 let method = not.method.clone();
                 match catch_unwind(AssertUnwindSafe(|| handle_notification(&mut state, not))) {
                     Ok(Ok(outgoing_list)) => {
@@ -415,29 +541,128 @@ pub fn run(connection: Connection) -> anyhow::Result<()> {
             Message::Response(_) => {}
         }
     }
+
+    join_all_workers(&mut workers);
+    if let Some(handle) = pending_probe.take() {
+        let _ = handle.join();
+    }
     Ok(())
 }
 
-fn handle_request(state: &GlobalState, req: Request) -> Response {
+fn spawn_request_worker<F, S>(
+    workers: &mut Vec<JoinHandle<()>>,
+    id: RequestId,
+    method: &'static str,
+    work: F,
+    send: S,
+) where
+    F: FnOnce() -> Cancellable<serde_json::Value> + Send + 'static,
+    S: FnOnce(Response) + Send + 'static,
+{
+    prune_finished_workers(workers);
+    if workers.len() >= MAX_INFLIGHT_WORKERS {
+        let oldest = workers.remove(0);
+        let _ = oldest.join();
+    }
+    let handle = thread::spawn(move || {
+        let response = match catch_unwind(AssertUnwindSafe(work)) {
+            Ok(Ok(value)) => Response::new_ok(id, value),
+            Ok(Err(Cancelled)) => Response::new_err(
+                id,
+                ErrorCode::ContentModified as i32,
+                "content modified".to_string(),
+            ),
+            Err(payload) => {
+                let msg = panic_message(&*payload);
+                tracing::error!(method = %method, panic = %msg, "panic while handling LSP request");
+                Response::new_err(
+                    id,
+                    ErrorCode::InternalError as i32,
+                    format!("internal error handling {method}: {msg}"),
+                )
+            }
+        };
+        send(response);
+    });
+    workers.push(handle);
+}
+
+fn dispatch_request(
+    state: &GlobalState,
+    connection: &Connection,
+    workers: &mut Vec<JoinHandle<()>>,
+    req: Request,
+) -> anyhow::Result<()> {
     match req.method.as_str() {
         HoverRequest::METHOD => match cast_request::<HoverRequest>(req) {
-            Ok((id, params)) => Response::new_ok(id, state.hover(params)),
-            Err(response) => response,
+            Ok((id, params)) => {
+                let snap = state.snapshot();
+                let sender = connection.sender.clone();
+                spawn_request_worker(
+                    workers,
+                    id,
+                    HoverRequest::METHOD,
+                    move || {
+                        let res = snap.hover(params)?;
+                        Ok(serde_json::to_value(res).expect("serializable hover response"))
+                    },
+                    move |resp| {
+                        let _ = sender.send(Message::Response(resp));
+                    },
+                );
+            }
+            Err(response) => connection.sender.send(Message::Response(response))?,
         },
         GotoDefinition::METHOD => match cast_request::<GotoDefinition>(req) {
-            Ok((id, params)) => Response::new_ok(id, state.goto_definition(params)),
-            Err(response) => response,
+            Ok((id, params)) => {
+                let snap = state.snapshot();
+                let sender = connection.sender.clone();
+                spawn_request_worker(
+                    workers,
+                    id,
+                    GotoDefinition::METHOD,
+                    move || {
+                        let res = snap.goto_definition(params)?;
+                        Ok(serde_json::to_value(res)
+                            .expect("serializable goto_definition response"))
+                    },
+                    move |resp| {
+                        let _ = sender.send(Message::Response(resp));
+                    },
+                );
+            }
+            Err(response) => connection.sender.send(Message::Response(response))?,
         },
         DocumentSymbolRequest::METHOD => match cast_request::<DocumentSymbolRequest>(req) {
-            Ok((id, params)) => Response::new_ok(id, state.document_symbols(params)),
-            Err(response) => response,
+            Ok((id, params)) => {
+                let snap = state.snapshot();
+                let sender = connection.sender.clone();
+                spawn_request_worker(
+                    workers,
+                    id,
+                    DocumentSymbolRequest::METHOD,
+                    move || {
+                        let res = snap.document_symbols(params)?;
+                        Ok(serde_json::to_value(res)
+                            .expect("serializable document_symbol response"))
+                    },
+                    move |resp| {
+                        let _ = sender.send(Message::Response(resp));
+                    },
+                );
+            }
+            Err(response) => connection.sender.send(Message::Response(response))?,
         },
-        _ => Response::new_err(
-            req.id,
-            ErrorCode::MethodNotFound as i32,
-            format!("unsupported request: {}", req.method),
-        ),
+        _ => {
+            let response = Response::new_err(
+                req.id,
+                ErrorCode::MethodNotFound as i32,
+                format!("unsupported request: {}", req.method),
+            );
+            connection.sender.send(Message::Response(response))?;
+        }
     }
+    Ok(())
 }
 
 fn cast_request<R>(req: Request) -> Result<(RequestId, R::Params), Response>
@@ -596,14 +821,14 @@ mod tests {
         // Editing updates cached LineIndex.
         state.set_text(&disk_uri, "class Disk {\n    int x;\n    int y;\n}\n".to_string());
         assert_eq!(
-            state.line_indexes[&disk_id],
+            *state.line_indexes[&disk_id],
             LineIndex::new("class Disk {\n    int x;\n    int y;\n}\n")
         );
 
         // Closing an on-disk file reloads disk text and updates cached LineIndex.
         state.close(&disk_uri);
         assert_eq!(
-            state.line_indexes[&disk_id],
+            *state.line_indexes[&disk_id],
             LineIndex::new("class Disk {\n    int x;\n}\n")
         );
 

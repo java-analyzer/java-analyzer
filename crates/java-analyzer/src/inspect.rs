@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
 };
 
-use hir::{DefDatabase, FileId, ModuleDependency, ModuleTarget, RootDatabase, SourceDatabase};
+use ide::{AnalysisHost, FileId, ModuleDependency, ModuleTarget};
 
 use crate::{
     cli::InspectArgs,
@@ -27,7 +27,7 @@ pub fn run_with_io<W: Write>(args: InspectArgs, out: &mut W) -> io::Result<()> {
 
     let probe = probe_workspace(&workspace_dir);
 
-    let mut db = RootDatabase::default();
+    let mut host = AnalysisHost::new();
     let mut file_ids: Vec<FileId> = Vec::with_capacity(probe.file_paths.len());
     for (rel_path, &file_id) in &probe.file_paths {
         let abs_path = probe.workspace_dir.join(rel_path);
@@ -36,25 +36,26 @@ pub fn run_with_io<W: Write>(args: InspectArgs, out: &mut W) -> io::Result<()> {
             None => Arc::new(fs::read_to_string(&abs_path)?),
         };
         let level = probe.language_level_for_path(&abs_path);
-        db.set_file_language_level(file_id, level);
-        db.set_file_text(file_id, text);
+        host.set_file_language_level(file_id, level);
+        host.set_file_text(file_id, text);
         file_ids.push(file_id);
     }
-    db.set_workspace_files(Arc::new(file_ids));
+    host.set_workspace_files(Arc::new(file_ids));
 
+    let analysis = host.analysis();
     let mut files_with_errors = 0usize;
     let mut file_errors: Vec<(String, usize, String)> = Vec::new();
     for (rel_path, &file_id) in &probe.file_paths {
-        let errors = db.syntax_errors(file_id);
+        let errors = analysis.diagnostics(file_id).map_err(io::Error::other)?;
         if !errors.is_empty() {
             files_with_errors += 1;
             file_errors.push((rel_path.clone(), errors.len(), errors[0].message.clone()));
         }
     }
 
-    let index = db.workspace_index();
-    let indexed_packages = index.package_count();
-    let indexed_types = index.type_count();
+    let (indexed_packages, indexed_types) = analysis
+        .workspace_index_stats()
+        .map_err(io::Error::other)?;
 
     if args.json {
         render_inspect_json(

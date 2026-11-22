@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use hir::{normalize_rel_path, DeltaSet, Release, WorkspaceDelta};
+use ide::{normalize_rel_path, DeltaSet, Release, WorkspaceDelta};
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -255,7 +255,7 @@ pub fn render_minimal_toml(probe: &WorkspaceProbe, config: &ExplicitConfig) -> S
 mod tests {
     use super::*;
     use crate::workspace_config::BuildToolKind;
-    use hir::{LanguageLevel, ModuleDelta, WorkspaceLayout};
+    use ide::{LanguageLevel, ModuleDelta, WorkspaceLayout};
 
     fn dummy_probe(
         inferred_build: Option<BuildToolKind>,

@@ -9,7 +9,6 @@ description.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-hir.workspace = true
 ide.workspace = true
 ignore.workspace = true
 line-index.workspace = true

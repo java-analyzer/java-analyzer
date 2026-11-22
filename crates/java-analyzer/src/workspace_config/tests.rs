@@ -1,5 +1,5 @@
 use crate::test_util::TestDir;
-use hir::{LanguageLevel, ModuleDependency, Release, RootScope};
+use ide::{LanguageLevel, ModuleDependency, Release, RootScope};
 
 use super::{maven::parse_maven_properties, *};
 

@@ -1,7 +1,7 @@
 mod common;
 
 use common::TempWorkspace;
-use hir::{LanguageLevel, ModuleDependency, ModuleTarget, Release, RootScope};
+use ide::{LanguageLevel, ModuleDependency, ModuleTarget, Release, RootScope};
 use java_analyzer::workspace_config::{probe_workspace, BuildToolKind, Conflict};
 
 #[test]

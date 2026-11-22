@@ -5,7 +5,7 @@ use std::{
     process::Command,
 };
 
-use hir::Release;
+use ide::Release;
 
 use super::{parse_version_string, JdkCandidate};
 

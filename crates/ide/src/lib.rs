@@ -1,6 +1,7 @@
+use std::sync::Arc;
+
 use hir::{
-    DefDatabase, FileId, ResolvedSymbol, ResolvedSymbolKind, SourceDatabase, SymbolDetail,
-    WorkspaceLayout,
+    DefDatabase, ResolvedSymbol, ResolvedSymbolKind, SourceDatabase, SymbolDetail,
 };
 use syntax::{
     ext::{collapsed_text, name_child, type_child},
@@ -8,7 +9,91 @@ use syntax::{
     SyntaxNode,
 };
 
+pub use hir::{
+    infer_workspace_layout_from_sources, is_path_within, normalize_rel_path, parse_shebang_level,
+    Cancellable, Cancelled, DeltaSet, FileId, LanguageLevel, ModuleData, ModuleDelta,
+    ModuleDependency, ModuleId, ModuleTarget, Release, ResourceRoot, RootScope, SourceRoot,
+    WorkspaceDelta, WorkspaceLayout,
+};
 pub use syntax::TextRange;
+
+#[derive(Default)]
+pub struct AnalysisHost {
+    db: hir::RootDatabase,
+}
+
+impl AnalysisHost {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn analysis(&self) -> Analysis {
+        Analysis {
+            db: self.db.clone(),
+        }
+    }
+
+    pub fn set_file_text(&mut self, file_id: FileId, text: Arc<String>) {
+        self.db.set_file_text(file_id, text);
+    }
+
+    pub fn set_file_language_level(&mut self, file_id: FileId, level: LanguageLevel) {
+        self.db.set_file_language_level(file_id, level);
+    }
+
+    pub fn set_workspace_files(&mut self, file_ids: Arc<Vec<FileId>>) {
+        self.db.set_workspace_files(file_ids);
+    }
+
+    pub fn remove_file(&mut self, file_id: FileId) {
+        self.db.remove_file(file_id);
+    }
+}
+
+pub struct Analysis {
+    db: hir::RootDatabase,
+}
+
+impl Analysis {
+    pub fn file_text(&self, file_id: FileId) -> Cancellable<Arc<String>> {
+        hir::catch_cancelled(|| self.db.file_text(file_id))
+    }
+
+    pub fn hover(&self, file_id: FileId, offset: u32) -> Cancellable<Option<HoverResult>> {
+        hir::catch_cancelled(|| hover(&self.db, file_id, offset))
+    }
+
+    pub fn goto_definition(
+        &self,
+        file_id: FileId,
+        offset: u32,
+    ) -> Cancellable<Option<NavigationTarget>> {
+        hir::catch_cancelled(|| goto_definition(&self.db, file_id, offset))
+    }
+
+    pub fn document_symbols(&self, file_id: FileId) -> Cancellable<Vec<StructureNode>> {
+        hir::catch_cancelled(|| document_symbols(&self.db, file_id))
+    }
+
+    pub fn diagnostics(&self, file_id: FileId) -> Cancellable<Vec<Diagnostic>> {
+        hir::catch_cancelled(|| diagnostics(&self.db, file_id))
+    }
+
+    pub fn diagnostics_with_layout(
+        &self,
+        file_id: FileId,
+        layout: Option<(&WorkspaceLayout, &str)>,
+    ) -> Cancellable<Vec<Diagnostic>> {
+        hir::catch_cancelled(|| diagnostics_with_layout(&self.db, file_id, layout))
+    }
+
+    pub fn workspace_index_stats(&self) -> Cancellable<(usize, usize)> {
+        hir::catch_cancelled(|| {
+            let index = self.db.workspace_index();
+            (index.package_count(), index.type_count())
+        })
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HoverResult {
@@ -761,5 +846,54 @@ Method main (String[] args)
         assert!(diags[0]
             .message
             .contains("declared package 'wrong.pkg' does not match package-info.java package 'com.example'"));
+    }
+
+    #[test]
+    fn analysis_host_snapshot_isolation_and_cancellation() {
+        let mut host = AnalysisHost::new();
+        let file1 = FileId(1);
+        let file2 = FileId(2);
+        host.set_file_text(file1, Arc::new("package p1;\nclass Before { int x; }".to_string()));
+        host.set_workspace_files(Arc::new(vec![file1]));
+
+        let snap1 = host.analysis();
+        let syms1 = snap1.document_symbols(file1).unwrap();
+        assert_eq!(syms1[0].name, "Before");
+        assert_eq!(snap1.diagnostics(file1).unwrap(), vec![]);
+        assert_eq!(snap1.workspace_index_stats().unwrap(), (1, 1));
+        // Drop `snap1` before mutating `host` on the same thread (Salsa waits for live
+        // snapshots to drop before acquiring the write lock).
+        drop(snap1);
+
+        // Mutating the host updates subsequent snapshots without invalidating results already
+        // obtained from `snap1`.
+        host.set_file_text(file1, Arc::new("package p1;\nclass After { int y }".to_string()));
+        host.set_file_text(file2, Arc::new("package p2;\nclass Helper {}".to_string()));
+        host.set_workspace_files(Arc::new(vec![file1, file2]));
+
+        let snap2 = host.analysis();
+        assert_eq!(snap2.document_symbols(file1).unwrap()[0].name, "After");
+        assert_eq!(snap2.diagnostics(file1).unwrap().len(), 1);
+        assert_eq!(snap2.workspace_index_stats().unwrap(), (2, 2));
+
+        // Earlier extracted results remain intact.
+        assert_eq!(syms1[0].name, "Before");
+        drop(snap2);
+
+        // Concurrent snapshot queries during host mutations never panic: each query
+        // returns either `Ok(...)` or `Err(Cancelled)`.
+        let snap_concurrent = host.analysis();
+        let handle = std::thread::spawn(move || {
+            for _ in 0..32 {
+                match snap_concurrent.document_symbols(file1) {
+                    Ok(nodes) => assert!(!nodes.is_empty()),
+                    Err(Cancelled) => break,
+                }
+            }
+        });
+        for i in 0..16 {
+            host.set_file_text(file1, Arc::new(format!("class Iter{i} {{ int v; }}")));
+        }
+        handle.join().unwrap();
     }
 }

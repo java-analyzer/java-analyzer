@@ -21,7 +21,7 @@ use std::{
     sync::Arc,
 };
 
-use hir::{
+use ide::{
     infer_workspace_layout_from_sources, is_path_within, normalize_rel_path, FileId, LanguageLevel,
     ModuleDelta, ModuleDependency, Release, RootScope, WorkspaceDelta, WorkspaceLayout,
 };
@@ -198,7 +198,7 @@ pub fn parse_build_tool_kind(s: &str) -> Option<BuildToolKind> {
     }
 }
 
-pub use hir::parse_shebang_level;
+pub use ide::parse_shebang_level;
 
 /// Probes `workspace_dir` strictly read-only following the 3-tier precedence rules.
 pub fn probe_workspace(workspace_dir: &Path) -> WorkspaceProbe {

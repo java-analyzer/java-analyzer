@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, fs, path::Path};
 
-use hir::normalize_rel_path;
+use ide::normalize_rel_path;
 use ignore::{overrides::OverrideBuilder, WalkBuilder};
 
 /// Default fallback directory/path exclusions when scanning a workspace.
