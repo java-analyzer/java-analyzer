@@ -15,6 +15,7 @@ Java LSP in Rust, modeled after `rust-analyzer` using `rowan` (lossless CST) and
    - Preserve Salsa early-cutoff and determinism: never store `TextRange`s in `FileItemTree`/`ModuleIndex`/`WorkspaceIndex` (resolve ranges lazily via `AstIdMap`), return `Arc<T>` directly from `#[salsa::tracked]` queries (no `_data` + `Arc` wrapper pairs), and use deterministic maps (`BTreeMap`, `FxHashMap`, `IndexMap`). Always drop any `Analysis` snapshot before mutating `AnalysisHost`/`RootDatabase` on the same thread (holding a snapshot on the mutating thread deadlocks Salsa).
    - Keep `GlobalState::snapshot()` O(1) (use `Arc` + `Arc::make_mut` on mutating paths). Prefer borrowing, `SmolStr`, and `la-arena` over `.clone()` and `String`/`Vec` allocations; keep visibility as tight as possible (`pub(crate)` or private over `pub`).
 7. **Verification Gate**: Run `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` before committing.
+8. **Project-Local Skills**: Consult the curated Rust skills in `.agents/skills/` (`rust-best-practices`, `ms-rust-guidelines`, `rust-2024-idioms`) when writing, reviewing, or refactoring Rust code, loading only the specific chapter/rule files relevant to the task. Rule 6 takes precedence on any conflict.
 
 ## Tooling
 1. **Prefer jujutsu over git**: `jj` is a modern, feature-rich Git client.
