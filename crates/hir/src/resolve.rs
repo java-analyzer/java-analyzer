@@ -2151,12 +2151,12 @@ fn extract_dotted_name_chain(node: &SyntaxNode) -> Option<Vec<SmolStr>> {
 fn collect_dotted_chain(node: &SyntaxNode, out: &mut Vec<SmolStr>) -> bool {
     match node.kind() {
         NAME_REF_EXPR => {
-            if let Some(nr) = node.children().find(|n| n.kind() == NAME_REF) {
+            match node.children().find(|n| n.kind() == NAME_REF) { Some(nr) => {
                 out.push(node_ident_text(&nr));
                 true
-            } else {
+            } _ => {
                 false
-            }
+            }}
         }
         FIELD_ACCESS_EXPR => {
             let Some(recv) = node.children().next() else {
