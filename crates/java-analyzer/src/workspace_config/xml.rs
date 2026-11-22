@@ -6,14 +6,19 @@ use std::collections::BTreeMap;
 use roxmltree::{Document, Node, ParsingOptions};
 
 pub(super) fn parse_xml(content: &str) -> Option<Document<'_>> {
-    Document::parse_with_options(
+    match Document::parse_with_options(
         content,
         ParsingOptions {
             allow_dtd: true,
             ..Default::default()
         },
-    )
-    .ok()
+    ) {
+        Ok(doc) => Some(doc),
+        Err(err) => {
+            tracing::warn!(%err, "failed to parse XML build manifest");
+            None
+        }
+    }
 }
 
 pub(super) fn is_tag(node: Node<'_, '_>, name: &str) -> bool {
