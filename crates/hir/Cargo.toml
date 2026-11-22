@@ -11,6 +11,7 @@ test-utils = []
 
 [dependencies]
 la-arena.workspace = true
+ristretto_classfile.workspace = true
 rustc-hash.workspace = true
 salsa.workspace = true
 smol_str.workspace = true

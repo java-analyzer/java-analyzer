@@ -24,11 +24,20 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum Command {
-    /// Start the Language Server Protocol server over stdio (default)
+    /// Start the Language Server Protocol server over stdio (default).
+    ///
+    /// Indexes workspace sources, JDK modules, and JAR dependencies for semantic analysis,
+    /// hover (with on-demand Javadoc), and jump-to-definition.
     Lsp,
-    /// Inspect inferred workspace structure, parse health, and symbol index
+    /// Inspect autodiscovered workspace configuration, source/resource roots, and conflicts.
+    ///
+    /// Read-only view of how the LSP discovers build specs, JDK/release settings, and module
+    /// layouts; intentionally avoids indexing binary JDK/JAR bytecode.
     Inspect(InspectArgs),
-    /// Inspect, disambiguate, and configure a Java workspace
+    /// Disambiguate workspace conflicts and write a minimal `.java-analyzer.toml` configuration.
+    ///
+    /// Focused strictly on workspace layout, JDK/release pinning, and dependency overrides;
+    /// does not index binary JDK/JAR bytecode.
     Configure(Box<ConfigureArgs>),
 }
 

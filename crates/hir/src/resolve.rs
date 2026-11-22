@@ -13,6 +13,7 @@ use syntax::{
 
 use crate::{
     DefDatabase, FileId,
+    classpath::{BinaryTarget, ClasspathIndex},
     item_tree::{AstIdMap, FileItemTree, MemberId, TypeId},
     symbols::{
         ImportKind, MemberKind, MemberSymbol, ParamSummary, TypeKind, TypeSymbol, WorkspaceIndex,
@@ -116,6 +117,7 @@ pub struct ResolvedSymbol {
     pub file_id: Option<FileId>,
     pub full_range: Option<TextRange>,
     pub focus_range: Option<TextRange>,
+    pub binary_target: Option<BinaryTarget>,
     pub name: SmolStr,
     pub qualified_name: String,
     pub detail: Option<SymbolDetail>,
@@ -157,6 +159,7 @@ struct TypeParamSymbol {
 enum TypeRefTarget {
     Indexed(FileId, TypeId),
     Local(TypeSymbol),
+    Binary(String),
 }
 
 impl TypeRefTarget {
@@ -170,6 +173,7 @@ impl TypeRefTarget {
                 }
             }
             Self::Local(ty) => ty.qualified_name.clone(),
+            Self::Binary(fqn) => fqn.clone(),
         }
     }
 }
@@ -178,8 +182,13 @@ impl TypeRefTarget {
 enum ResolvedTarget {
     IndexedType(FileId, TypeId),
     LocalType(TypeSymbol),
+    BinaryType(String),
     IndexedMember(FileId, MemberId),
     LocalMember(MemberSymbol),
+    BinaryMember {
+        owner_fqn: String,
+        member_index: usize,
+    },
     Local(LocalSymbol),
     TypeParam(TypeParamSymbol),
     Package(String),
@@ -190,6 +199,7 @@ impl From<TypeRefTarget> for ResolvedTarget {
         match target {
             TypeRefTarget::Indexed(fid, tid) => Self::IndexedType(fid, tid),
             TypeRefTarget::Local(ty) => Self::LocalType(ty),
+            TypeRefTarget::Binary(fqn) => Self::BinaryType(fqn),
         }
     }
 }
@@ -215,7 +225,11 @@ fn member_detail(
 }
 
 impl ResolvedTarget {
-    fn into_resolved_symbol(self, db: &dyn DefDatabase) -> ResolvedSymbol {
+    fn into_resolved_symbol(
+        self,
+        db: &dyn DefDatabase,
+        classpath: &ClasspathIndex,
+    ) -> Option<ResolvedSymbol> {
         match self {
             Self::IndexedType(file_id, type_id) => {
                 let tree = db.file_item_tree(file_id);
@@ -223,28 +237,45 @@ impl ResolvedTarget {
                 let range = db.ast_id_map(file_id).range(t.ast_id);
                 let detail = (!t.type_params.is_empty())
                     .then(|| SymbolDetail::TypeParams(t.type_params.clone()));
-                ResolvedSymbol {
+                Some(ResolvedSymbol {
                     file_id: Some(file_id),
                     full_range: Some(range.full_range),
                     focus_range: Some(range.selection_range),
+                    binary_target: None,
                     name: t.name.clone(),
                     qualified_name: t.qualified_name.clone(),
                     detail,
                     kind: t.kind.into(),
-                }
+                })
             }
             Self::LocalType(t) => {
                 let detail =
                     (!t.type_params.is_empty()).then_some(SymbolDetail::TypeParams(t.type_params));
-                ResolvedSymbol {
+                Some(ResolvedSymbol {
                     file_id: Some(t.file_id),
                     full_range: Some(t.full_range),
                     focus_range: Some(t.selection_range),
+                    binary_target: None,
                     name: t.name,
                     qualified_name: t.qualified_name,
                     detail,
                     kind: t.kind.into(),
-                }
+                })
+            }
+            Self::BinaryType(fqn) => {
+                let t = classpath.type_by_fqn(&fqn)?;
+                let detail = (!t.type_params.is_empty())
+                    .then(|| SymbolDetail::TypeParams(t.type_params.clone()));
+                Some(ResolvedSymbol {
+                    file_id: None,
+                    full_range: None,
+                    focus_range: None,
+                    binary_target: Some(t.to_target(None)),
+                    name: t.name.clone(),
+                    qualified_name: t.qualified_name.clone(),
+                    detail,
+                    kind: t.kind.into(),
+                })
             }
             Self::IndexedMember(file_id, member_id) => {
                 let tree = db.file_item_tree(file_id);
@@ -255,15 +286,16 @@ impl ResolvedTarget {
                     None => m.name.to_string(),
                 };
                 let detail = member_detail(m.kind, m.type_ref.as_deref(), &m.params);
-                ResolvedSymbol {
+                Some(ResolvedSymbol {
                     file_id: Some(file_id),
                     full_range: Some(range.full_range),
                     focus_range: Some(range.selection_range),
+                    binary_target: None,
                     name: m.name.clone(),
                     qualified_name,
                     detail,
                     kind: m.kind.into(),
-                }
+                })
             }
             Self::LocalMember(m) => {
                 let qualified_name = match &m.owner_type {
@@ -271,55 +303,87 @@ impl ResolvedTarget {
                     None => m.name.to_string(),
                 };
                 let detail = member_detail(m.kind, m.type_ref.as_deref(), &m.params);
-                ResolvedSymbol {
+                Some(ResolvedSymbol {
                     file_id: Some(m.file_id),
                     full_range: Some(m.full_range),
                     focus_range: Some(m.selection_range),
+                    binary_target: None,
                     name: m.name,
                     qualified_name,
                     detail,
                     kind: m.kind.into(),
-                }
+                })
+            }
+            Self::BinaryMember {
+                owner_fqn,
+                member_index,
+            } => {
+                let t = classpath.type_by_fqn(&owner_fqn)?;
+                let m = t.members.get(member_index)?;
+                let detail = member_detail(m.kind, m.type_ref.as_deref(), &m.params);
+                Some(ResolvedSymbol {
+                    file_id: None,
+                    full_range: None,
+                    focus_range: None,
+                    binary_target: Some(t.to_target(Some(m.name.clone()))),
+                    name: m.name.clone(),
+                    qualified_name: format!("{}.{}", t.qualified_name, m.name),
+                    detail,
+                    kind: m.kind.into(),
+                })
             }
             Self::Local(l) => {
                 let qualified_name = l.name.to_string();
-                ResolvedSymbol {
+                Some(ResolvedSymbol {
                     file_id: Some(l.file_id),
                     full_range: Some(l.full_range),
                     focus_range: Some(l.selection_range),
+                    binary_target: None,
                     name: l.name,
                     qualified_name,
                     detail: l.type_ref.map(SymbolDetail::TypeRef),
                     kind: l.kind.into(),
-                }
+                })
             }
             Self::TypeParam(tp) => {
                 let detail = (!tp.bounds.is_empty()).then_some(SymbolDetail::Bounds(tp.bounds));
                 let qualified_name = tp.name.to_string();
-                ResolvedSymbol {
+                Some(ResolvedSymbol {
                     file_id: Some(tp.file_id),
                     full_range: Some(tp.full_range),
                     focus_range: Some(tp.selection_range),
+                    binary_target: None,
                     name: tp.name,
                     qualified_name,
                     detail,
                     kind: ResolvedSymbolKind::TypeParam,
-                }
+                })
             }
             Self::Package(name) => {
                 let short = SmolStr::new(name.rsplit('.').next().unwrap_or(&name));
-                ResolvedSymbol {
+                Some(ResolvedSymbol {
                     file_id: None,
                     full_range: None,
                     focus_range: None,
+                    binary_target: None,
                     name: short,
                     qualified_name: name,
                     detail: None,
                     kind: ResolvedSymbolKind::Package,
-                }
+                })
             }
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct ResolveCtx<'a> {
+    db: &'a dyn DefDatabase,
+    file_id: FileId,
+    file_tree: &'a FileItemTree,
+    ast_id_map: &'a AstIdMap,
+    index: &'a WorkspaceIndex,
+    classpath: &'a ClasspathIndex,
 }
 
 /// Resolves the Java identifier at byte `offset` in `file_id`, if any.
@@ -343,14 +407,23 @@ pub fn resolve_at_offset(
     let file_tree = db.file_item_tree(file_id);
     let ast_id_map = db.ast_id_map(file_id);
     let index = db.workspace_index();
+    let classpath = db.classpath_index();
+    let ctx = ResolveCtx {
+        db,
+        file_id,
+        file_tree: &file_tree,
+        ast_id_map: &ast_id_map,
+        index: &index,
+        classpath: &classpath,
+    };
 
     let target = match parent.kind() {
-        NAME => resolve_declaration_site(db, file_id, &file_tree, &ast_id_map, &index, &parent)?,
-        NAME_REF => resolve_reference_site(db, file_id, &file_tree, &ast_id_map, &index, &parent)?,
+        NAME => resolve_declaration_site(ctx, &parent)?,
+        NAME_REF => resolve_reference_site(ctx, &parent)?,
         _ => return None,
     };
 
-    Some(target.into_resolved_symbol(db))
+    target.into_resolved_symbol(db, &classpath)
 }
 
 fn local_symbol_from_node(
@@ -396,36 +469,34 @@ fn local_symbol_with_type(
     }
 }
 
-fn resolve_declaration_site(
-    db: &dyn DefDatabase,
-    file_id: FileId,
-    file_tree: &FileItemTree,
-    ast_id_map: &AstIdMap,
-    index: &WorkspaceIndex,
-    name_node: &SyntaxNode,
-) -> Option<ResolvedTarget> {
+fn resolve_declaration_site(ctx: ResolveCtx<'_>, name_node: &SyntaxNode) -> Option<ResolvedTarget> {
     let decl = name_node.parent()?;
     let range = name_node.text_range();
 
     match decl.kind() {
         k if TypeKind::from_syntax(k).is_some() => {
-            if let Some(ast_id) = ast_id_map.find_by_selection(range)
-                && let Some((type_id, _)) = file_tree.find_type_by_ast_id(ast_id)
+            if let Some(ast_id) = ctx.ast_id_map.find_by_selection(range)
+                && let Some((type_id, _)) = ctx.file_tree.find_type_by_ast_id(ast_id)
             {
-                return Some(ResolvedTarget::IndexedType(file_id, type_id));
+                return Some(ResolvedTarget::IndexedType(ctx.file_id, type_id));
             }
-            extract_local_type_symbol(file_id, &decl).map(ResolvedTarget::LocalType)
+            extract_local_type_symbol(ctx.file_id, &decl).map(ResolvedTarget::LocalType)
         }
         VARIABLE_DECLARATOR => {
             let decl_parent = decl.parent()?;
             match decl_parent.kind() {
                 FIELD_DECL => resolve_member_declaration(
-                    file_id, file_tree, ast_id_map, &decl, name_node, range,
+                    ctx.file_id,
+                    ctx.file_tree,
+                    ctx.ast_id_map,
+                    &decl,
+                    name_node,
+                    range,
                 ),
                 LOCAL_VAR_DECL => {
                     let base_type = decl_parent.children().find(|n| is_type_node(n.kind()));
                     Some(ResolvedTarget::Local(local_symbol_with_type(
-                        file_id,
+                        ctx.file_id,
                         &decl,
                         name_node,
                         LocalKind::LocalVar,
@@ -437,7 +508,14 @@ fn resolve_declaration_site(
             }
         }
         METHOD_DECL | CONSTRUCTOR_DECL | ENUM_CONSTANT | RECORD_COMPONENT => {
-            resolve_member_declaration(file_id, file_tree, ast_id_map, &decl, name_node, range)
+            resolve_member_declaration(
+                ctx.file_id,
+                ctx.file_tree,
+                ctx.ast_id_map,
+                &decl,
+                name_node,
+                range,
+            )
         }
         PARAM => {
             let kind = if decl.parent().is_some_and(|p| p.kind() == LAMBDA_PARAMS) {
@@ -446,32 +524,36 @@ fn resolve_declaration_site(
                 LocalKind::Param
             };
             Some(ResolvedTarget::Local(local_symbol_from_node(
-                file_id, &decl, name_node, kind, true,
+                ctx.file_id,
+                &decl,
+                name_node,
+                kind,
+                true,
             )))
         }
         FOREACH_STMT => Some(ResolvedTarget::Local(local_symbol_from_node(
-            file_id,
+            ctx.file_id,
             &decl,
             name_node,
             LocalKind::ForEachVar,
             false,
         ))),
         CATCH_CLAUSE => Some(ResolvedTarget::Local(local_symbol_from_node(
-            file_id,
+            ctx.file_id,
             &decl,
             name_node,
             LocalKind::CatchParam,
             false,
         ))),
         RESOURCE => Some(ResolvedTarget::Local(local_symbol_from_node(
-            file_id,
+            ctx.file_id,
             &decl,
             name_node,
             LocalKind::ResourceVar,
             false,
         ))),
         TYPE_PATTERN => Some(ResolvedTarget::Local(local_symbol_from_node(
-            file_id,
+            ctx.file_id,
             &decl,
             name_node,
             LocalKind::PatternVar,
@@ -484,7 +566,7 @@ fn resolve_declaration_site(
                 .map(|t| collapsed_text(&t))
                 .collect();
             Some(ResolvedTarget::TypeParam(TypeParamSymbol {
-                file_id,
+                file_id: ctx.file_id,
                 name: node_ident_text(name_node),
                 bounds,
                 full_range: decl.text_range(),
@@ -497,11 +579,9 @@ fn resolve_declaration_site(
             let segs = path_segments(&path_node);
             let seg_refs: Vec<&str> = segs.iter().map(String::as_str).collect();
             let target_name = node_ident_text(name_node);
-            match resolve_type_segments(
-                db, file_id, file_tree, ast_id_map, index, &anno, &seg_refs,
-            )? {
+            match resolve_type_segments(ctx, &anno, &seg_refs)? {
                 ResolvedTarget::IndexedType(ty_file, ty_id) => {
-                    let ty_tree = db.file_item_tree(ty_file);
+                    let ty_tree = ctx.db.file_item_tree(ty_file);
                     ty_tree.types[ty_id]
                         .members
                         .iter()
@@ -517,6 +597,17 @@ fn resolve_declaration_site(
                     .into_iter()
                     .find(|m| m.kind == MemberKind::Method && m.name == target_name)
                     .map(ResolvedTarget::LocalMember),
+                ResolvedTarget::BinaryType(fqn) => {
+                    let anno_ty = ctx.classpath.type_by_fqn(&fqn)?;
+                    anno_ty
+                        .members
+                        .iter()
+                        .position(|m| m.kind == MemberKind::Method && m.name == target_name)
+                        .map(|member_index| ResolvedTarget::BinaryMember {
+                            owner_fqn: fqn,
+                            member_index,
+                        })
+                }
                 _ => None,
             }
         }
@@ -584,71 +675,16 @@ fn resolve_member_declaration(
     Some(ResolvedTarget::LocalMember(local_member))
 }
 
-fn resolve_reference_site(
-    db: &dyn DefDatabase,
-    file_id: FileId,
-    file_tree: &FileItemTree,
-    ast_id_map: &AstIdMap,
-    index: &WorkspaceIndex,
-    ref_node: &SyntaxNode,
-) -> Option<ResolvedTarget> {
+fn resolve_reference_site(ctx: ResolveCtx<'_>, ref_node: &SyntaxNode) -> Option<ResolvedTarget> {
     let ref_parent = ref_node.parent()?;
 
     match ref_parent.kind() {
-        PATH => resolve_path_ref(
-            db,
-            file_id,
-            file_tree,
-            ast_id_map,
-            index,
-            &ref_parent,
-            ref_node,
-        ),
-        PATH_TYPE => resolve_path_type_ref(
-            db,
-            file_id,
-            file_tree,
-            ast_id_map,
-            index,
-            &ref_parent,
-            ref_node,
-        ),
-        FIELD_ACCESS_EXPR => resolve_field_access_ref(
-            db,
-            file_id,
-            file_tree,
-            ast_id_map,
-            index,
-            &ref_parent,
-            ref_node,
-        ),
-        METHOD_CALL_EXPR => resolve_method_call_ref(
-            db,
-            file_id,
-            file_tree,
-            ast_id_map,
-            index,
-            &ref_parent,
-            ref_node,
-        ),
-        METHOD_REF_EXPR => resolve_method_ref(
-            db,
-            file_id,
-            file_tree,
-            ast_id_map,
-            index,
-            &ref_parent,
-            ref_node,
-        ),
-        NAME_REF_EXPR => resolve_name_ref_expr(
-            db,
-            file_id,
-            file_tree,
-            ast_id_map,
-            index,
-            &ref_parent,
-            ref_node,
-        ),
+        PATH => resolve_path_ref(ctx, &ref_parent, ref_node),
+        PATH_TYPE => resolve_path_type_ref(ctx, &ref_parent, ref_node),
+        FIELD_ACCESS_EXPR => resolve_field_access_ref(ctx, &ref_parent, ref_node),
+        METHOD_CALL_EXPR => resolve_method_call_ref(ctx, &ref_parent, ref_node),
+        METHOD_REF_EXPR => resolve_method_ref(ctx, &ref_parent, ref_node),
+        NAME_REF_EXPR => resolve_name_ref_expr(ctx, &ref_parent, ref_node),
         _ => None,
     }
 }
@@ -663,11 +699,7 @@ fn prefix_segments_up_to(container: &SyntaxNode, target_ref: &SyntaxNode) -> Vec
 }
 
 fn resolve_path_ref(
-    db: &dyn DefDatabase,
-    file_id: FileId,
-    file_tree: &FileItemTree,
-    ast_id_map: &AstIdMap,
-    index: &WorkspaceIndex,
+    ctx: ResolveCtx<'_>,
     path_node: &SyntaxNode,
     ref_node: &SyntaxNode,
 ) -> Option<ResolvedTarget> {
@@ -680,8 +712,9 @@ fn resolve_path_ref(
     match owner.kind() {
         PACKAGE_DECL => Some(ResolvedTarget::Package(prefix.join("."))),
         IMPORT_DECL => {
-            let import_ast_id = ast_id_map.find_by_full(owner.text_range())?;
-            let (_, import_tree) = file_tree
+            let import_ast_id = ctx.ast_id_map.find_by_full(owner.text_range())?;
+            let (_, import_tree) = ctx
+                .file_tree
                 .imports
                 .iter()
                 .find(|(_, imp)| imp.ast_id == import_ast_id)?;
@@ -695,43 +728,51 @@ fn resolve_path_ref(
             if import_tree.kind == ImportKind::StaticSingle && is_last && all_segs.len() >= 2 {
                 let type_fqn = all_segs[..all_segs.len() - 1].join(".");
                 let member_name = all_segs.last()?;
-                let (owner_file, owner_id) = lookup_type_by_fqn(file_tree, index, &type_fqn)?;
-                return lookup_static_member_or_nested(
-                    db,
-                    file_tree,
-                    index,
-                    owner_file,
-                    owner_id,
-                    member_name,
-                    None,
-                );
+                if let Some((owner_file, owner_id)) =
+                    lookup_type_by_fqn(ctx.file_tree, ctx.index, &type_fqn)
+                {
+                    return lookup_static_member_or_nested(
+                        ctx,
+                        owner_file,
+                        owner_id,
+                        member_name,
+                        None,
+                    );
+                }
+                if ctx.classpath.type_by_fqn(&type_fqn).is_some() {
+                    return lookup_static_member_or_nested_binary(
+                        ctx,
+                        &type_fqn,
+                        member_name,
+                        None,
+                    );
+                }
+                return None;
             }
 
             let prefix_fqn = prefix.join(".");
-            if let Some((fid, tid)) = lookup_type_by_fqn(file_tree, index, &prefix_fqn) {
+            if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.index, &prefix_fqn) {
                 return Some(ResolvedTarget::IndexedType(fid, tid));
             }
-            if index.has_package_prefix(&prefix_fqn) {
+            if ctx.classpath.type_by_fqn(&prefix_fqn).is_some() {
+                return Some(ResolvedTarget::BinaryType(prefix_fqn));
+            }
+            if ctx.index.has_package_prefix(&prefix_fqn) || ctx.classpath.has_package(&prefix_fqn)
+            {
                 return Some(ResolvedTarget::Package(prefix_fqn));
             }
             None
         }
         ANNOTATION => {
             let seg_refs: Vec<&str> = prefix.iter().map(SmolStr::as_str).collect();
-            resolve_type_segments(
-                db, file_id, file_tree, ast_id_map, index, path_node, &seg_refs,
-            )
+            resolve_type_segments(ctx, path_node, &seg_refs)
         }
         _ => None,
     }
 }
 
 fn resolve_path_type_ref(
-    db: &dyn DefDatabase,
-    file_id: FileId,
-    file_tree: &FileItemTree,
-    ast_id_map: &AstIdMap,
-    index: &WorkspaceIndex,
+    ctx: ResolveCtx<'_>,
     path_type: &SyntaxNode,
     ref_node: &SyntaxNode,
 ) -> Option<ResolvedTarget> {
@@ -745,82 +786,58 @@ fn resolve_path_type_ref(
         && has_direct_token(&new_expr, DOT)
         && let Some(outer_expr) = new_expr.children().next()
     {
-        let outer_ty =
-            resolve_expr_type(db, file_id, file_tree, ast_id_map, index, &outer_expr, 0)?;
-        let mut current_qname = outer_ty.qualified_name(db, file_tree);
+        let outer_ty = resolve_expr_type(ctx, &outer_expr, 0)?;
+        let mut current_qname = outer_ty.qualified_name(ctx.db, ctx.file_tree);
         let mut resolved = None;
         for seg in &prefix {
             let next_fqn = format!("{current_qname}.{seg}");
-            let (fid, tid) = lookup_type_by_fqn(file_tree, index, &next_fqn)?;
+            resolved = Some(lookup_workspace_or_binary_type(ctx, &next_fqn)?);
             current_qname = next_fqn;
-            resolved = Some(ResolvedTarget::IndexedType(fid, tid));
         }
         return resolved;
     }
 
     let seg_refs: Vec<&str> = prefix.iter().map(SmolStr::as_str).collect();
-    resolve_type_segments(
-        db, file_id, file_tree, ast_id_map, index, path_type, &seg_refs,
-    )
+    resolve_type_segments(ctx, path_type, &seg_refs)
 }
 
 fn resolve_field_access_ref(
-    db: &dyn DefDatabase,
-    file_id: FileId,
-    file_tree: &FileItemTree,
-    ast_id_map: &AstIdMap,
-    index: &WorkspaceIndex,
+    ctx: ResolveCtx<'_>,
     field_access: &SyntaxNode,
     ref_node: &SyntaxNode,
 ) -> Option<ResolvedTarget> {
     // 1. Qualified type path check (e.g. `com.example.Foo` or `com.example.Outer.Inner`).
     if let Some(chain) = extract_dotted_name_chain(field_access) {
         let fqn = chain.join(".");
-        if let Some((fid, tid)) = lookup_type_by_fqn(file_tree, index, &fqn) {
-            return Some(ResolvedTarget::IndexedType(fid, tid));
+        if let Some(found) = lookup_workspace_or_binary_type(ctx, &fqn) {
+            return Some(found);
         }
     }
 
     // 2. Resolve receiver expression's type and look up member/nested type on it.
     let receiver = field_access.children().next()?;
-    let recv_ty = resolve_expr_type(db, file_id, file_tree, ast_id_map, index, &receiver, 0)?;
+    let recv_ty = resolve_expr_type(ctx, &receiver, 0)?;
     let member_name = node_ident_text(ref_node);
-    lookup_member_on_type(db, file_tree, index, &recv_ty, &member_name, None, false)
+    lookup_member_on_type(ctx, &recv_ty, &member_name, None, false)
 }
 
 fn resolve_method_call_ref(
-    db: &dyn DefDatabase,
-    file_id: FileId,
-    file_tree: &FileItemTree,
-    ast_id_map: &AstIdMap,
-    index: &WorkspaceIndex,
+    ctx: ResolveCtx<'_>,
     method_call: &SyntaxNode,
     ref_node: &SyntaxNode,
 ) -> Option<ResolvedTarget> {
     let receiver = method_call.children().next()?;
-    let recv_ty = resolve_expr_type(db, file_id, file_tree, ast_id_map, index, &receiver, 0)?;
+    let recv_ty = resolve_expr_type(ctx, &receiver, 0)?;
     let member_name = node_ident_text(ref_node);
     let arg_count = method_call
         .children()
         .find(|n| n.kind() == ARG_LIST)
         .map(|al| count_args(&al));
-    lookup_member_on_type(
-        db,
-        file_tree,
-        index,
-        &recv_ty,
-        &member_name,
-        arg_count,
-        true,
-    )
+    lookup_member_on_type(ctx, &recv_ty, &member_name, arg_count, true)
 }
 
 fn resolve_method_ref(
-    db: &dyn DefDatabase,
-    file_id: FileId,
-    file_tree: &FileItemTree,
-    ast_id_map: &AstIdMap,
-    index: &WorkspaceIndex,
+    ctx: ResolveCtx<'_>,
     method_ref: &SyntaxNode,
     ref_node: &SyntaxNode,
 ) -> Option<ResolvedTarget> {
@@ -828,27 +845,22 @@ fn resolve_method_ref(
     let target_ty = if qualifier.kind() == PATH_TYPE {
         let segs = path_segments(&qualifier);
         let seg_refs: Vec<&str> = segs.iter().map(String::as_str).collect();
-        match resolve_type_segments(
-            db, file_id, file_tree, ast_id_map, index, &qualifier, &seg_refs,
-        )? {
+        match resolve_type_segments(ctx, &qualifier, &seg_refs)? {
             ResolvedTarget::IndexedType(fid, tid) => TypeRefTarget::Indexed(fid, tid),
             ResolvedTarget::LocalType(ty) => TypeRefTarget::Local(ty),
+            ResolvedTarget::BinaryType(fqn) => TypeRefTarget::Binary(fqn),
             _ => return None,
         }
     } else {
-        resolve_expr_type(db, file_id, file_tree, ast_id_map, index, &qualifier, 0)?
+        resolve_expr_type(ctx, &qualifier, 0)?
     };
 
     let member_name = node_ident_text(ref_node);
-    lookup_method_or_member(db, &target_ty, &member_name, file_tree, index)
+    lookup_method_or_member(ctx, &target_ty, &member_name)
 }
 
 fn resolve_name_ref_expr(
-    db: &dyn DefDatabase,
-    file_id: FileId,
-    file_tree: &FileItemTree,
-    ast_id_map: &AstIdMap,
-    index: &WorkspaceIndex,
+    ctx: ResolveCtx<'_>,
     expr_node: &SyntaxNode,
     ref_node: &SyntaxNode,
 ) -> Option<ResolvedTarget> {
@@ -867,12 +879,12 @@ fn resolve_name_ref_expr(
             .map(|al| count_args(&al));
 
         // 1. Enclosing types' methods (innermost to outermost).
-        for ty in enclosing_type_targets(file_id, file_tree, ast_id_map, expr_node) {
+        for ty in enclosing_type_targets(ctx.file_id, ctx.file_tree, ctx.ast_id_map, expr_node) {
             match ty {
                 TypeRefTarget::Indexed(tid_file, tid) => {
-                    let ty_item = &file_tree.types[tid];
+                    let ty_item = &ctx.file_tree.types[tid];
                     if let Some(mid) = select_method_from_tree(
-                        file_tree,
+                        ctx.file_tree,
                         &ty_item.members,
                         &name,
                         arg_count,
@@ -893,22 +905,23 @@ fn resolve_name_ref_expr(
                         return Some(ResolvedTarget::LocalMember(m.clone()));
                     }
                 }
+                TypeRefTarget::Binary(_) => {}
             }
         }
         // Compact-source top-level methods.
         if let Some(mid) = select_method_from_tree(
-            file_tree,
-            &file_tree.top_level_members,
+            ctx.file_tree,
+            &ctx.file_tree.top_level_members,
             &name,
             arg_count,
             false,
             false,
         ) {
-            return Some(ResolvedTarget::IndexedMember(file_id, mid));
+            return Some(ResolvedTarget::IndexedMember(ctx.file_id, mid));
         }
 
         // 2. Static imports (Single first, then OnDemand).
-        if let Some(m) = resolve_via_static_imports(db, file_tree, index, &name, arg_count, true) {
+        if let Some(m) = resolve_via_static_imports(ctx, &name, arg_count, true) {
             return Some(m);
         }
         return None;
@@ -916,39 +929,31 @@ fn resolve_name_ref_expr(
 
     // Non-call unqualified identifier:
     // 1. Lexical local scopes (innermost to outermost).
-    if let Some(local) = resolve_local_scope(file_id, ref_node, &name) {
+    if let Some(local) = resolve_local_scope(ctx.file_id, ref_node, &name) {
         return Some(ResolvedTarget::Local(local));
     }
 
     // 2. Enclosing type(s) members (fields, record components, enum constants, nested types)
     //    plus compact-source top-level fields.
-    for ty in enclosing_type_targets(file_id, file_tree, ast_id_map, expr_node) {
-        if let Some(found) = lookup_non_method_member_or_nested(db, file_tree, index, &ty, &name) {
+    for ty in enclosing_type_targets(ctx.file_id, ctx.file_tree, ctx.ast_id_map, expr_node) {
+        if let Some(found) = lookup_non_method_member_or_nested(ctx, &ty, &name) {
             return Some(found);
         }
     }
-    if let Some(&mid) = file_tree.top_level_members.iter().find(|&&mid| {
-        let m = &file_tree.members[mid];
+    if let Some(&mid) = ctx.file_tree.top_level_members.iter().find(|&&mid| {
+        let m = &ctx.file_tree.members[mid];
         m.kind != MemberKind::Method && m.name == name
     }) {
-        return Some(ResolvedTarget::IndexedMember(file_id, mid));
+        return Some(ResolvedTarget::IndexedMember(ctx.file_id, mid));
     }
 
     // 3. Static imports (fields, enum constants, nested types).
-    if let Some(found) = resolve_via_static_imports(db, file_tree, index, &name, None, false) {
+    if let Some(found) = resolve_via_static_imports(ctx, &name, None, false) {
         return Some(found);
     }
 
     // 4. Type & import resolution (allows `Foo` in `Foo.BAR` or `Foo::bar` to resolve to `Foo`).
-    resolve_type_segments(
-        db,
-        file_id,
-        file_tree,
-        ast_id_map,
-        index,
-        expr_node,
-        &[&name],
-    )
+    resolve_type_segments(ctx, expr_node, &[&name])
 }
 
 // ---- Lexical local scope resolution ----
@@ -1243,13 +1248,8 @@ fn collect_type_pattern(file_id: FileId, node: &SyntaxNode, out: &mut Vec<LocalS
 
 // ---- Type & import resolution ----
 
-#[allow(clippy::too_many_arguments)]
 fn resolve_type_segments(
-    db: &dyn DefDatabase,
-    file_id: FileId,
-    file_tree: &FileItemTree,
-    ast_id_map: &AstIdMap,
-    index: &WorkspaceIndex,
+    ctx: ResolveCtx<'_>,
     site_node: &SyntaxNode,
     segs: &[&str],
 ) -> Option<ResolvedTarget> {
@@ -1260,70 +1260,136 @@ fn resolve_type_segments(
     if segs.len() == 1 {
         let name = segs[0];
 
-        // 1-3. Walk enclosing scopes innermost-to-outermost (local types, method/type params,
+        // 1. Walk enclosing scopes innermost-to-outermost (local types, method/type params,
         // enclosing types and their nested types), stopping type parameter propagation across
         // `static` boundaries.
-        if let Some(found) =
-            resolve_enclosing_type_or_param(file_id, file_tree, ast_id_map, index, site_node, name)
-        {
+        if let Some(found) = resolve_enclosing_type_or_param(
+            ctx.file_id,
+            ctx.file_tree,
+            ctx.ast_id_map,
+            ctx.index,
+            site_node,
+            name,
+        ) {
             return Some(found);
         }
 
-        // 4. Single-type imports.
-        for (_, imp) in file_tree.imports.iter() {
+        // 2. Single-type imports (workspace first, then binary classpath).
+        for (_, imp) in ctx.file_tree.imports.iter() {
             if imp.kind == ImportKind::SingleType
                 && imp.path.last().map(String::as_str) == Some(name)
             {
                 let fqn = imp.path.join(".");
-                if let Some((fid, tid)) = lookup_type_by_fqn(file_tree, index, &fqn) {
+                if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.index, &fqn) {
                     return Some(ResolvedTarget::IndexedType(fid, tid));
                 }
             }
         }
+        for (_, imp) in ctx.file_tree.imports.iter() {
+            if imp.kind == ImportKind::SingleType
+                && imp.path.last().map(String::as_str) == Some(name)
+            {
+                let fqn = imp.path.join(".");
+                if ctx.classpath.type_by_fqn(&fqn).is_some() {
+                    return Some(ResolvedTarget::BinaryType(fqn));
+                }
+            }
+        }
 
-        // 5. Static single imports resolving to a nested type.
-        for (_, imp) in file_tree.imports.iter() {
+        // 3. Static single imports resolving to a nested type (workspace first, then binary).
+        for (_, imp) in ctx.file_tree.imports.iter() {
             if imp.kind == ImportKind::StaticSingle
                 && imp.path.last().map(String::as_str) == Some(name)
             {
                 let fqn = imp.path.join(".");
-                if let Some((fid, tid)) = lookup_type_by_fqn(file_tree, index, &fqn) {
+                if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.index, &fqn) {
                     return Some(ResolvedTarget::IndexedType(fid, tid));
                 }
             }
         }
-
-        // 6. Same-package top-level types.
-        let pkg = file_tree.package.as_deref().unwrap_or("");
-        if let Some(fqn) = index.package_type_map.get(pkg).and_then(|m| m.get(name))
-            && let Some(&(fid, tid)) = index.types_by_fqn.get(fqn)
-        {
-            return Some(ResolvedTarget::IndexedType(fid, tid));
-        }
-        if let Some((tid, _)) = file_tree
-            .types
-            .iter()
-            .find(|(_, t)| t.enclosing_type.is_none() && t.name == name)
-        {
-            return Some(ResolvedTarget::IndexedType(file_id, tid));
+        for (_, imp) in ctx.file_tree.imports.iter() {
+            if imp.kind == ImportKind::StaticSingle
+                && imp.path.last().map(String::as_str) == Some(name)
+            {
+                let fqn = imp.path.join(".");
+                if ctx.classpath.type_by_fqn(&fqn).is_some() {
+                    return Some(ResolvedTarget::BinaryType(fqn));
+                }
+            }
         }
 
-        // 7. Type-import-on-demand (`import a.b.*;`).
-        for (_, imp) in file_tree.imports.iter() {
+        // 4. Same-package top-level types (workspace first, then binary).
+        let pkg = ctx.file_tree.package.as_deref().unwrap_or("");
+        if let Some(found) = lookup_package_type_in_workspace(ctx.file_tree, ctx.index, pkg, name)
+        {
+            return Some(found);
+        }
+        if let Some(ty) = ctx.classpath.type_in_package(pkg, name) {
+            return Some(ResolvedTarget::BinaryType(ty.qualified_name.clone()));
+        }
+
+        // 5. Implicit `java.lang.*` (workspace `java.lang` first if any, then binary `java.lang`).
+        if let Some(found) =
+            lookup_package_type_in_workspace(ctx.file_tree, ctx.index, "java.lang", name)
+        {
+            return Some(found);
+        }
+        if let Some(ty) = ctx.classpath.type_in_package("java.lang", name) {
+            return Some(ResolvedTarget::BinaryType(ty.qualified_name.clone()));
+        }
+
+        // 6. Type-import-on-demand (`import a.b.*;`) (workspace first, then binary).
+        for (_, imp) in ctx.file_tree.imports.iter() {
             if imp.kind == ImportKind::TypeOnDemand {
                 let fqn = format!("{}.{name}", imp.path.join("."));
-                if let Some((fid, tid)) = lookup_type_by_fqn(file_tree, index, &fqn) {
+                if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.index, &fqn) {
                     return Some(ResolvedTarget::IndexedType(fid, tid));
                 }
             }
         }
+        for (_, imp) in ctx.file_tree.imports.iter() {
+            if imp.kind == ImportKind::TypeOnDemand {
+                let fqn = format!("{}.{name}", imp.path.join("."));
+                if ctx.classpath.type_by_fqn(&fqn).is_some() {
+                    return Some(ResolvedTarget::BinaryType(fqn));
+                }
+            }
+        }
 
-        // 8. Static-import-on-demand (`import static a.b.Outer.*;`).
-        for (_, imp) in file_tree.imports.iter() {
+        // 7. Static-import-on-demand (`import static a.b.Outer.*;`) (workspace first, then binary).
+        for (_, imp) in ctx.file_tree.imports.iter() {
             if imp.kind == ImportKind::StaticOnDemand {
                 let fqn = format!("{}.{name}", imp.path.join("."));
-                if let Some((fid, tid)) = lookup_type_by_fqn(file_tree, index, &fqn) {
+                if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.index, &fqn) {
                     return Some(ResolvedTarget::IndexedType(fid, tid));
+                }
+            }
+        }
+        for (_, imp) in ctx.file_tree.imports.iter() {
+            if imp.kind == ImportKind::StaticOnDemand {
+                let fqn = format!("{}.{name}", imp.path.join("."));
+                if ctx.classpath.type_by_fqn(&fqn).is_some() {
+                    return Some(ResolvedTarget::BinaryType(fqn));
+                }
+            }
+        }
+
+        // 8. Module imports (`import module M;`, JEP 511, transitive & cycle-safe).
+        for (_, imp) in ctx.file_tree.imports.iter() {
+            if imp.kind == ImportKind::Module {
+                let module_name = imp.path.join(".");
+                for exported_pkg in ctx.classpath.transitive_module_exports(&module_name) {
+                    if let Some(found) = lookup_package_type_in_workspace(
+                        ctx.file_tree,
+                        ctx.index,
+                        exported_pkg,
+                        name,
+                    ) {
+                        return Some(found);
+                    }
+                    if let Some(ty) = ctx.classpath.type_in_package(exported_pkg, name) {
+                        return Some(ResolvedTarget::BinaryType(ty.qualified_name.clone()));
+                    }
                 }
             }
         }
@@ -1332,37 +1398,60 @@ fn resolve_type_segments(
     }
 
     // Multi-segment `[s0, s1, ..., sk]`:
-    // 1. Direct FQN match (`com.example.Foo`, `com.example.Outer.Inner`).
+    // 1. Direct FQN match (`com.example.Foo`, `java.util.Map.Entry`).
     let joined = segs.join(".");
-    if let Some((fid, tid)) = lookup_type_by_fqn(file_tree, index, &joined) {
-        return Some(ResolvedTarget::IndexedType(fid, tid));
+    if let Some(found) = lookup_workspace_or_binary_type(ctx, &joined) {
+        return Some(found);
     }
 
     // 2. Resolve `s0` as a single-segment type, then walk nested types `s1..=sk`.
-    let first_qname = match resolve_type_segments(
-        db,
-        file_id,
-        file_tree,
-        ast_id_map,
-        index,
-        site_node,
-        &segs[..1],
-    )? {
+    let first_qname = match resolve_type_segments(ctx, site_node, &segs[..1])? {
         ResolvedTarget::IndexedType(fid, tid) => {
-            TypeRefTarget::Indexed(fid, tid).qualified_name(db, file_tree)
+            TypeRefTarget::Indexed(fid, tid).qualified_name(ctx.db, ctx.file_tree)
         }
         ResolvedTarget::LocalType(ty) => ty.qualified_name,
+        ResolvedTarget::BinaryType(fqn) => fqn,
         _ => return None,
     };
     let mut current_qname = first_qname;
     let mut resolved = None;
     for seg in &segs[1..] {
         let next_fqn = format!("{current_qname}.{seg}");
-        let (fid, tid) = lookup_type_by_fqn(file_tree, index, &next_fqn)?;
+        resolved = Some(lookup_workspace_or_binary_type(ctx, &next_fqn)?);
         current_qname = next_fqn;
-        resolved = Some(ResolvedTarget::IndexedType(fid, tid));
     }
     resolved
+}
+
+fn lookup_package_type_in_workspace(
+    file_tree: &FileItemTree,
+    index: &WorkspaceIndex,
+    pkg: &str,
+    name: &str,
+) -> Option<ResolvedTarget> {
+    if let Some(fqn) = index.package_type_map.get(pkg).and_then(|m| m.get(name))
+        && let Some(&(fid, tid)) = index.types_by_fqn.get(fqn)
+    {
+        return Some(ResolvedTarget::IndexedType(fid, tid));
+    }
+    if file_tree.package.as_deref().unwrap_or("") == pkg
+        && let Some((tid, _)) = file_tree
+            .types
+            .iter()
+            .find(|(_, t)| t.enclosing_type.is_none() && t.name == name)
+    {
+        return Some(ResolvedTarget::IndexedType(file_tree.file_id, tid));
+    }
+    None
+}
+
+fn lookup_workspace_or_binary_type(ctx: ResolveCtx<'_>, fqn: &str) -> Option<ResolvedTarget> {
+    if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.index, fqn) {
+        return Some(ResolvedTarget::IndexedType(fid, tid));
+    }
+    ctx.classpath
+        .type_by_fqn(fqn)
+        .map(|_| ResolvedTarget::BinaryType(fqn.to_string()))
 }
 
 fn resolve_enclosing_type_or_param(
@@ -1537,33 +1626,46 @@ fn lookup_type_by_fqn(
 // ---- Member lookup & static imports ----
 
 fn resolve_via_static_imports(
-    db: &dyn DefDatabase,
-    file_tree: &FileItemTree,
-    index: &WorkspaceIndex,
+    ctx: ResolveCtx<'_>,
     name: &str,
     call_arity: Option<usize>,
     prefer_callable: bool,
 ) -> Option<ResolvedTarget> {
-    // 1. Static single imports (`import static a.b.Foo.BAR;`).
-    for (_, imp) in file_tree.imports.iter() {
+    let callable_arity = prefer_callable.then_some(call_arity);
+
+    // 1. Static single imports (`import static a.b.Foo.BAR;`): workspace first, then binary.
+    for (_, imp) in ctx.file_tree.imports.iter() {
         if imp.kind == ImportKind::StaticSingle
             && imp.path.len() >= 2
             && imp.path.last().map(String::as_str) == Some(name)
         {
             let owner_fqn = imp.path[..imp.path.len() - 1].join(".");
-            if let Some((owner_file, owner_id)) = lookup_type_by_fqn(file_tree, index, &owner_fqn)
+            if let Some((owner_file, owner_id)) =
+                lookup_type_by_fqn(ctx.file_tree, ctx.index, &owner_fqn)
                 && let Some(found) = lookup_static_member_or_nested(
-                    db,
-                    file_tree,
-                    index,
+                    ctx,
                     owner_file,
                     owner_id,
                     name,
-                    if prefer_callable {
-                        Some(call_arity)
-                    } else {
-                        None
-                    },
+                    callable_arity,
+                )
+            {
+                return Some(found);
+            }
+        }
+    }
+    for (_, imp) in ctx.file_tree.imports.iter() {
+        if imp.kind == ImportKind::StaticSingle
+            && imp.path.len() >= 2
+            && imp.path.last().map(String::as_str) == Some(name)
+        {
+            let owner_fqn = imp.path[..imp.path.len() - 1].join(".");
+            if ctx.classpath.type_by_fqn(&owner_fqn).is_some()
+                && let Some(found) = lookup_static_member_or_nested_binary(
+                    ctx,
+                    &owner_fqn,
+                    name,
+                    callable_arity,
                 )
             {
                 return Some(found);
@@ -1571,23 +1673,33 @@ fn resolve_via_static_imports(
         }
     }
 
-    // 2. Static-import-on-demand (`import static a.b.Foo.*;`).
-    for (_, imp) in file_tree.imports.iter() {
+    // 2. Static-import-on-demand (`import static a.b.Foo.*;`): workspace first, then binary.
+    for (_, imp) in ctx.file_tree.imports.iter() {
         if imp.kind == ImportKind::StaticOnDemand && !imp.path.is_empty() {
             let owner_fqn = imp.path.join(".");
-            if let Some((owner_file, owner_id)) = lookup_type_by_fqn(file_tree, index, &owner_fqn)
+            if let Some((owner_file, owner_id)) =
+                lookup_type_by_fqn(ctx.file_tree, ctx.index, &owner_fqn)
                 && let Some(found) = lookup_static_member_or_nested(
-                    db,
-                    file_tree,
-                    index,
+                    ctx,
                     owner_file,
                     owner_id,
                     name,
-                    if prefer_callable {
-                        Some(call_arity)
-                    } else {
-                        None
-                    },
+                    callable_arity,
+                )
+            {
+                return Some(found);
+            }
+        }
+    }
+    for (_, imp) in ctx.file_tree.imports.iter() {
+        if imp.kind == ImportKind::StaticOnDemand && !imp.path.is_empty() {
+            let owner_fqn = imp.path.join(".");
+            if ctx.classpath.type_by_fqn(&owner_fqn).is_some()
+                && let Some(found) = lookup_static_member_or_nested_binary(
+                    ctx,
+                    &owner_fqn,
+                    name,
+                    callable_arity,
                 )
             {
                 return Some(found);
@@ -1599,15 +1711,13 @@ fn resolve_via_static_imports(
 }
 
 fn lookup_static_member_or_nested(
-    db: &dyn DefDatabase,
-    file_tree: &FileItemTree,
-    index: &WorkspaceIndex,
+    ctx: ResolveCtx<'_>,
     owner_file: FileId,
     owner_id: TypeId,
     name: &str,
     callable_arity: Option<Option<usize>>,
 ) -> Option<ResolvedTarget> {
-    let owner_tree = db.file_item_tree(owner_file);
+    let owner_tree = ctx.db.file_item_tree(owner_file);
     let owner_ty = &owner_tree.types[owner_id];
 
     if let Some(arity) = callable_arity {
@@ -1624,7 +1734,7 @@ fn lookup_static_member_or_nested(
 
     if owner_ty.nested_types.iter().any(|n| n == name) {
         let nested_fqn = format!("{}.{}", owner_ty.qualified_name, name);
-        if let Some((fid, tid)) = lookup_type_by_fqn(file_tree, index, &nested_fqn) {
+        if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.index, &nested_fqn) {
             return Some(ResolvedTarget::IndexedType(fid, tid));
         }
     }
@@ -1640,10 +1750,58 @@ fn lookup_static_member_or_nested(
     None
 }
 
+fn lookup_static_member_or_nested_binary(
+    ctx: ResolveCtx<'_>,
+    owner_fqn: &str,
+    name: &str,
+    callable_arity: Option<Option<usize>>,
+) -> Option<ResolvedTarget> {
+    let owner_ty = ctx.classpath.type_by_fqn(owner_fqn)?;
+
+    if let Some(arity) = callable_arity {
+        return select_method_from_binary(&owner_ty.members, name, arity, false, true).map(
+            |member_index| ResolvedTarget::BinaryMember {
+                owner_fqn: owner_fqn.to_string(),
+                member_index,
+            },
+        );
+    }
+
+    if let Some(member_index) = owner_ty.members.iter().position(|m| {
+        m.is_static
+            && m.kind != MemberKind::Method
+            && m.kind != MemberKind::Constructor
+            && m.name == name
+    }) {
+        return Some(ResolvedTarget::BinaryMember {
+            owner_fqn: owner_fqn.to_string(),
+            member_index,
+        });
+    }
+
+    if owner_ty.nested_types.iter().any(|n| n == name) {
+        let nested_fqn = format!("{}.{}", owner_ty.qualified_name, name);
+        if let Some(found) = lookup_workspace_or_binary_type(ctx, &nested_fqn) {
+            return Some(found);
+        }
+    }
+
+    if let Some(member_index) = owner_ty
+        .members
+        .iter()
+        .position(|m| m.is_static && m.kind == MemberKind::Method && m.name == name)
+    {
+        return Some(ResolvedTarget::BinaryMember {
+            owner_fqn: owner_fqn.to_string(),
+            member_index,
+        });
+    }
+
+    None
+}
+
 fn lookup_member_on_type(
-    db: &dyn DefDatabase,
-    file_tree: &FileItemTree,
-    index: &WorkspaceIndex,
+    ctx: ResolveCtx<'_>,
     ty: &TypeRefTarget,
     name: &str,
     call_arity: Option<usize>,
@@ -1652,7 +1810,7 @@ fn lookup_member_on_type(
     if prefer_callable {
         return match ty {
             TypeRefTarget::Indexed(ty_file, ty_id) => {
-                let ty_tree = db.file_item_tree(*ty_file);
+                let ty_tree = ctx.db.file_item_tree(*ty_file);
                 let type_item = &ty_tree.types[*ty_id];
                 select_method_from_tree(
                     &ty_tree,
@@ -1673,16 +1831,30 @@ fn lookup_member_on_type(
             )
             .cloned()
             .map(ResolvedTarget::LocalMember),
+            TypeRefTarget::Binary(fqn) => {
+                let bin_ty = ctx.classpath.type_by_fqn(fqn)?;
+                select_method_from_binary(
+                    &bin_ty.members,
+                    name,
+                    call_arity,
+                    bin_ty.kind == TypeKind::Record,
+                    false,
+                )
+                .map(|member_index| ResolvedTarget::BinaryMember {
+                    owner_fqn: fqn.clone(),
+                    member_index,
+                })
+            }
         };
     }
 
-    if let Some(found) = lookup_non_method_member_or_nested(db, file_tree, index, ty, name) {
+    if let Some(found) = lookup_non_method_member_or_nested(ctx, ty, name) {
         return Some(found);
     }
 
     match ty {
         TypeRefTarget::Indexed(ty_file, ty_id) => {
-            let ty_tree = db.file_item_tree(*ty_file);
+            let ty_tree = ctx.db.file_item_tree(*ty_file);
             let type_item = &ty_tree.types[*ty_id];
             select_method_from_tree(&ty_tree, &type_item.members, name, call_arity, false, false)
                 .map(|mid| ResolvedTarget::IndexedMember(*ty_file, mid))
@@ -1692,23 +1864,30 @@ fn lookup_member_on_type(
                 .cloned()
                 .map(ResolvedTarget::LocalMember)
         }
+        TypeRefTarget::Binary(fqn) => {
+            let bin_ty = ctx.classpath.type_by_fqn(fqn)?;
+            select_method_from_binary(&bin_ty.members, name, call_arity, false, false).map(
+                |member_index| ResolvedTarget::BinaryMember {
+                    owner_fqn: fqn.clone(),
+                    member_index,
+                },
+            )
+        }
     }
 }
 
 fn lookup_non_method_member_or_nested(
-    db: &dyn DefDatabase,
-    file_tree: &FileItemTree,
-    index: &WorkspaceIndex,
+    ctx: ResolveCtx<'_>,
     ty: &TypeRefTarget,
     name: &str,
 ) -> Option<ResolvedTarget> {
     match ty {
         TypeRefTarget::Indexed(ty_file, ty_id) => {
             let owned_tree;
-            let ty_tree = if *ty_file == file_tree.file_id {
-                file_tree
+            let ty_tree = if *ty_file == ctx.file_tree.file_id {
+                ctx.file_tree
             } else {
-                owned_tree = db.file_item_tree(*ty_file);
+                owned_tree = ctx.db.file_item_tree(*ty_file);
                 &owned_tree
             };
             let type_item = &ty_tree.types[*ty_id];
@@ -1720,7 +1899,8 @@ fn lookup_non_method_member_or_nested(
             }
             if type_item.nested_types.iter().any(|n| n == name) {
                 let nested_fqn = format!("{}.{}", type_item.qualified_name, name);
-                if let Some((fid, tid)) = lookup_type_by_fqn(file_tree, index, &nested_fqn) {
+                if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.index, &nested_fqn)
+                {
                     return Some(ResolvedTarget::IndexedType(fid, tid));
                 }
             }
@@ -1734,8 +1914,27 @@ fn lookup_non_method_member_or_nested(
             }
             if local_ty.nested_types.iter().any(|n| n == name) {
                 let nested_fqn = format!("{}.{}", local_ty.qualified_name, name);
-                if let Some((fid, tid)) = lookup_type_by_fqn(file_tree, index, &nested_fqn) {
+                if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.index, &nested_fqn)
+                {
                     return Some(ResolvedTarget::IndexedType(fid, tid));
+                }
+            }
+            None
+        }
+        TypeRefTarget::Binary(fqn) => {
+            let bin_ty = ctx.classpath.type_by_fqn(fqn)?;
+            if let Some(member_index) = bin_ty.members.iter().position(|m| {
+                m.kind != MemberKind::Method && m.kind != MemberKind::Constructor && m.name == name
+            }) {
+                return Some(ResolvedTarget::BinaryMember {
+                    owner_fqn: fqn.clone(),
+                    member_index,
+                });
+            }
+            if bin_ty.nested_types.iter().any(|n| n == name) {
+                let nested_fqn = format!("{}.{}", bin_ty.qualified_name, name);
+                if let Some(found) = lookup_workspace_or_binary_type(ctx, &nested_fqn) {
+                    return Some(found);
                 }
             }
             None
@@ -1744,15 +1943,13 @@ fn lookup_non_method_member_or_nested(
 }
 
 fn lookup_method_or_member(
-    db: &dyn DefDatabase,
+    ctx: ResolveCtx<'_>,
     ty: &TypeRefTarget,
     name: &str,
-    file_tree: &FileItemTree,
-    index: &WorkspaceIndex,
 ) -> Option<ResolvedTarget> {
     match ty {
         TypeRefTarget::Indexed(ty_file, ty_id) => {
-            let ty_tree = db.file_item_tree(*ty_file);
+            let ty_tree = ctx.db.file_item_tree(*ty_file);
             let type_item = &ty_tree.types[*ty_id];
             if let Some(mid) = select_method_from_tree(
                 &ty_tree,
@@ -1776,8 +1973,23 @@ fn lookup_method_or_member(
                 return Some(ResolvedTarget::LocalMember(m.clone()));
             }
         }
+        TypeRefTarget::Binary(fqn) => {
+            let bin_ty = ctx.classpath.type_by_fqn(fqn)?;
+            if let Some(member_index) = select_method_from_binary(
+                &bin_ty.members,
+                name,
+                None,
+                bin_ty.kind == TypeKind::Record,
+                false,
+            ) {
+                return Some(ResolvedTarget::BinaryMember {
+                    owner_fqn: fqn.clone(),
+                    member_index,
+                });
+            }
+        }
     }
-    lookup_non_method_member_or_nested(db, file_tree, index, ty, name)
+    lookup_non_method_member_or_nested(ctx, ty, name)
 }
 
 fn select_method_from_tree(
@@ -1824,6 +2036,25 @@ fn select_method_from_slice<'a>(
         only_static,
     )?;
     Some(&members[idx])
+}
+
+fn select_method_from_binary(
+    members: &[crate::classpath::BinaryMemberSymbol],
+    name: &str,
+    call_arity: Option<usize>,
+    include_record_components: bool,
+    only_static: bool,
+) -> Option<usize> {
+    select_method_by(
+        members
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (i, m.kind, m.name.as_str(), m.is_static, m.params.as_slice())),
+        name,
+        call_arity,
+        include_record_components,
+        only_static,
+    )
 }
 
 fn select_method_by<'a, I, ID>(
@@ -1885,11 +2116,7 @@ where
 const MAX_TYPE_DEPTH: u8 = 32;
 
 fn resolve_expr_type(
-    db: &dyn DefDatabase,
-    file_id: FileId,
-    file_tree: &FileItemTree,
-    ast_id_map: &AstIdMap,
-    index: &WorkspaceIndex,
+    ctx: ResolveCtx<'_>,
     expr: &SyntaxNode,
     depth: u8,
 ) -> Option<TypeRefTarget> {
@@ -1900,75 +2127,45 @@ fn resolve_expr_type(
     match expr.kind() {
         THIS_EXPR => {
             if let Some(qualifier) = expr.children().next() {
-                return resolve_expr_type(
-                    db,
-                    file_id,
-                    file_tree,
-                    ast_id_map,
-                    index,
-                    &qualifier,
-                    depth + 1,
-                );
+                return resolve_expr_type(ctx, &qualifier, depth + 1);
             }
-            enclosing_type_targets(file_id, file_tree, ast_id_map, expr)
+            enclosing_type_targets(ctx.file_id, ctx.file_tree, ctx.ast_id_map, expr)
                 .into_iter()
                 .next()
         }
         NAME_REF_EXPR => {
             let ref_node = expr.children().find(|n| n.kind() == NAME_REF)?;
-            let target =
-                resolve_name_ref_expr(db, file_id, file_tree, ast_id_map, index, expr, &ref_node)?;
-            target_to_type_ref(db, index, target, depth + 1)
+            let target = resolve_name_ref_expr(ctx, expr, &ref_node)?;
+            target_to_type_ref(ctx, target, depth + 1)
         }
         FIELD_ACCESS_EXPR => {
-            if let Some(chain) = extract_dotted_name_chain(expr)
-                && let Some((fid, tid)) = lookup_type_by_fqn(file_tree, index, &chain.join("."))
-            {
-                return Some(TypeRefTarget::Indexed(fid, tid));
+            if let Some(chain) = extract_dotted_name_chain(expr) {
+                let fqn = chain.join(".");
+                if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.index, &fqn) {
+                    return Some(TypeRefTarget::Indexed(fid, tid));
+                }
+                if ctx.classpath.type_by_fqn(&fqn).is_some() {
+                    return Some(TypeRefTarget::Binary(fqn));
+                }
             }
             let ref_node = expr.children().find(|n| n.kind() == NAME_REF)?;
             let receiver = expr.children().next()?;
-            let recv_ty = resolve_expr_type(
-                db,
-                file_id,
-                file_tree,
-                ast_id_map,
-                index,
-                &receiver,
-                depth + 1,
-            )?;
+            let recv_ty = resolve_expr_type(ctx, &receiver, depth + 1)?;
             let member_name = node_ident_text(&ref_node);
-            let target =
-                lookup_member_on_type(db, file_tree, index, &recv_ty, &member_name, None, false)?;
-            target_to_type_ref(db, index, target, depth + 1)
+            let target = lookup_member_on_type(ctx, &recv_ty, &member_name, None, false)?;
+            target_to_type_ref(ctx, target, depth + 1)
         }
         METHOD_CALL_EXPR => {
             let ref_node = expr.children().find(|n| n.kind() == NAME_REF)?;
             let receiver = expr.children().next()?;
-            let recv_ty = resolve_expr_type(
-                db,
-                file_id,
-                file_tree,
-                ast_id_map,
-                index,
-                &receiver,
-                depth + 1,
-            )?;
+            let recv_ty = resolve_expr_type(ctx, &receiver, depth + 1)?;
             let arg_count = expr
                 .children()
                 .find(|n| n.kind() == ARG_LIST)
                 .map(|al| count_args(&al));
             let member_name = node_ident_text(&ref_node);
-            let target = lookup_member_on_type(
-                db,
-                file_tree,
-                index,
-                &recv_ty,
-                &member_name,
-                arg_count,
-                true,
-            )?;
-            target_to_type_ref(db, index, target, depth + 1)
+            let target = lookup_member_on_type(ctx, &recv_ty, &member_name, arg_count, true)?;
+            target_to_type_ref(ctx, target, depth + 1)
         }
         CALL_EXPR => {
             let callee = expr.children().next()?;
@@ -1976,57 +2173,50 @@ fn resolve_expr_type(
                 return None;
             }
             let ref_node = callee.children().find(|n| n.kind() == NAME_REF)?;
-            let target = resolve_name_ref_expr(
-                db, file_id, file_tree, ast_id_map, index, &callee, &ref_node,
-            )?;
-            target_to_type_ref(db, index, target, depth + 1)
+            let target = resolve_name_ref_expr(ctx, &callee, &ref_node)?;
+            target_to_type_ref(ctx, target, depth + 1)
         }
         NEW_EXPR => {
             let path_type = expr.children().find(|n| n.kind() == PATH_TYPE)?;
             let segs = path_segments(&path_type);
             if has_direct_token(expr, DOT) {
                 let outer_expr = expr.children().next()?;
-                let outer_ty = resolve_expr_type(
-                    db,
-                    file_id,
-                    file_tree,
-                    ast_id_map,
-                    index,
-                    &outer_expr,
-                    depth + 1,
-                )?;
-                let mut current_qname = outer_ty.qualified_name(db, file_tree);
+                let outer_ty = resolve_expr_type(ctx, &outer_expr, depth + 1)?;
+                let mut current_qname = outer_ty.qualified_name(ctx.db, ctx.file_tree);
                 let mut resolved = None;
                 for seg in &segs {
                     let next_fqn = format!("{current_qname}.{seg}");
-                    let (fid, tid) = lookup_type_by_fqn(file_tree, index, &next_fqn)?;
+                    resolved = match lookup_workspace_or_binary_type(ctx, &next_fqn)? {
+                        ResolvedTarget::IndexedType(fid, tid) => {
+                            Some(TypeRefTarget::Indexed(fid, tid))
+                        }
+                        ResolvedTarget::BinaryType(fqn) => Some(TypeRefTarget::Binary(fqn)),
+                        _ => return None,
+                    };
                     current_qname = next_fqn;
-                    resolved = Some(TypeRefTarget::Indexed(fid, tid));
                 }
                 return resolved;
             }
             let seg_refs: Vec<&str> = segs.iter().map(String::as_str).collect();
-            match resolve_type_segments(
-                db, file_id, file_tree, ast_id_map, index, &path_type, &seg_refs,
-            )? {
+            match resolve_type_segments(ctx, &path_type, &seg_refs)? {
                 ResolvedTarget::IndexedType(fid, tid) => Some(TypeRefTarget::Indexed(fid, tid)),
                 ResolvedTarget::LocalType(ty) => Some(TypeRefTarget::Local(ty)),
+                ResolvedTarget::BinaryType(fqn) => Some(TypeRefTarget::Binary(fqn)),
                 _ => None,
             }
         }
         PAREN_EXPR => {
             let inner = expr.children().next()?;
-            resolve_expr_type(db, file_id, file_tree, ast_id_map, index, &inner, depth + 1)
+            resolve_expr_type(ctx, &inner, depth + 1)
         }
         CAST_EXPR => {
             let path_type = expr.children().find(|n| n.kind() == PATH_TYPE)?;
             let segs = path_segments(&path_type);
             let seg_refs: Vec<&str> = segs.iter().map(String::as_str).collect();
-            match resolve_type_segments(
-                db, file_id, file_tree, ast_id_map, index, &path_type, &seg_refs,
-            )? {
+            match resolve_type_segments(ctx, &path_type, &seg_refs)? {
                 ResolvedTarget::IndexedType(fid, tid) => Some(TypeRefTarget::Indexed(fid, tid)),
                 ResolvedTarget::LocalType(ty) => Some(TypeRefTarget::Local(ty)),
+                ResolvedTarget::BinaryType(fqn) => Some(TypeRefTarget::Binary(fqn)),
                 _ => None,
             }
         }
@@ -2035,8 +2225,7 @@ fn resolve_expr_type(
 }
 
 fn target_to_type_ref(
-    db: &dyn DefDatabase,
-    index: &WorkspaceIndex,
+    ctx: ResolveCtx<'_>,
     target: ResolvedTarget,
     depth: u8,
 ) -> Option<TypeRefTarget> {
@@ -2046,26 +2235,42 @@ fn target_to_type_ref(
     match target {
         ResolvedTarget::IndexedType(fid, tid) => Some(TypeRefTarget::Indexed(fid, tid)),
         ResolvedTarget::LocalType(ty) => Some(TypeRefTarget::Local(ty)),
+        ResolvedTarget::BinaryType(fqn) => Some(TypeRefTarget::Binary(fqn)),
         ResolvedTarget::Local(l) => {
             let ty_str = l.type_ref.as_deref()?;
-            resolve_type_ref_in_file(db, index, l.file_id, l.selection_range.start(), ty_str)
+            resolve_type_ref_in_file(
+                ctx.db,
+                ctx.index,
+                ctx.classpath,
+                l.file_id,
+                l.selection_range.start(),
+                ty_str,
+            )
         }
         ResolvedTarget::IndexedMember(m_file, m_id) => {
-            let decl_tree = db.file_item_tree(m_file);
+            let decl_tree = ctx.db.file_item_tree(m_file);
             let m = &decl_tree.members[m_id];
             match m.kind {
                 MemberKind::Field | MemberKind::RecordComponent | MemberKind::Method => {
                     let ty_str = m.type_ref.as_deref()?;
-                    let decl_offset = db
+                    let decl_offset = ctx
+                        .db
                         .ast_id_map(m_file)
                         .range(m.ast_id)
                         .selection_range
                         .start();
-                    resolve_type_ref_in_file(db, index, m_file, decl_offset, ty_str)
+                    resolve_type_ref_in_file(
+                        ctx.db,
+                        ctx.index,
+                        ctx.classpath,
+                        m_file,
+                        decl_offset,
+                        ty_str,
+                    )
                 }
                 MemberKind::EnumConstant => {
                     let owner_fqn = m.owner_type.as_deref()?;
-                    lookup_type_by_fqn(&decl_tree, index, owner_fqn)
+                    lookup_type_by_fqn(&decl_tree, ctx.index, owner_fqn)
                         .map(|(fid, tid)| TypeRefTarget::Indexed(fid, tid))
                 }
                 MemberKind::Constructor => None,
@@ -2074,23 +2279,69 @@ fn target_to_type_ref(
         ResolvedTarget::LocalMember(m) => match m.kind {
             MemberKind::Field | MemberKind::RecordComponent | MemberKind::Method => {
                 let ty_str = m.type_ref.as_deref()?;
-                resolve_type_ref_in_file(db, index, m.file_id, m.selection_range.start(), ty_str)
+                resolve_type_ref_in_file(
+                    ctx.db,
+                    ctx.index,
+                    ctx.classpath,
+                    m.file_id,
+                    m.selection_range.start(),
+                    ty_str,
+                )
             }
             MemberKind::EnumConstant => {
                 let owner_fqn = m.owner_type.as_deref()?;
-                let decl_tree = db.file_item_tree(m.file_id);
-                lookup_type_by_fqn(&decl_tree, index, owner_fqn)
+                let decl_tree = ctx.db.file_item_tree(m.file_id);
+                lookup_type_by_fqn(&decl_tree, ctx.index, owner_fqn)
                     .map(|(fid, tid)| TypeRefTarget::Indexed(fid, tid))
             }
             MemberKind::Constructor => None,
         },
+        ResolvedTarget::BinaryMember {
+            owner_fqn,
+            member_index,
+        } => {
+            let owner_ty = ctx.classpath.type_by_fqn(&owner_fqn)?;
+            let m = owner_ty.members.get(member_index)?;
+            match m.kind {
+                MemberKind::Field | MemberKind::RecordComponent | MemberKind::Method => {
+                    let ty_str = m.type_ref.as_deref()?;
+                    resolve_binary_type_ref(ctx.index, ctx.classpath, ty_str)
+                }
+                MemberKind::EnumConstant => Some(TypeRefTarget::Binary(owner_fqn)),
+                MemberKind::Constructor => None,
+            }
+        }
         ResolvedTarget::TypeParam(_) | ResolvedTarget::Package(_) => None,
     }
+}
+
+fn resolve_binary_type_ref(
+    index: &WorkspaceIndex,
+    classpath: &ClasspathIndex,
+    type_ref: &str,
+) -> Option<TypeRefTarget> {
+    let segs = parse_type_ref_segments(type_ref)?;
+    let joined = segs.join(".");
+    if let Some(&(fid, tid)) = index.types_by_fqn.get(&joined) {
+        return Some(TypeRefTarget::Indexed(fid, tid));
+    }
+    if classpath.type_by_fqn(&joined).is_some() {
+        return Some(TypeRefTarget::Binary(joined));
+    }
+    let java_lang_fqn = format!("java.lang.{joined}");
+    if let Some(&(fid, tid)) = index.types_by_fqn.get(&java_lang_fqn) {
+        return Some(TypeRefTarget::Indexed(fid, tid));
+    }
+    if classpath.type_by_fqn(&java_lang_fqn).is_some() {
+        return Some(TypeRefTarget::Binary(java_lang_fqn));
+    }
+    None
 }
 
 fn resolve_type_ref_in_file(
     db: &dyn DefDatabase,
     index: &WorkspaceIndex,
+    classpath: &ClasspathIndex,
     decl_file_id: FileId,
     decl_offset: TextSize,
     type_ref: &str,
@@ -2108,17 +2359,18 @@ fn resolve_type_ref_in_file(
     let decl_tree = db.file_item_tree(decl_file_id);
     let decl_map = db.ast_id_map(decl_file_id);
     let seg_refs: Vec<&str> = segs.iter().map(String::as_str).collect();
-    match resolve_type_segments(
+    let decl_ctx = ResolveCtx {
         db,
-        decl_file_id,
-        &decl_tree,
-        &decl_map,
+        file_id: decl_file_id,
+        file_tree: &decl_tree,
+        ast_id_map: &decl_map,
         index,
-        &site_node,
-        &seg_refs,
-    )? {
+        classpath,
+    };
+    match resolve_type_segments(decl_ctx, &site_node, &seg_refs)? {
         ResolvedTarget::IndexedType(fid, tid) => Some(TypeRefTarget::Indexed(fid, tid)),
         ResolvedTarget::LocalType(ty) => Some(TypeRefTarget::Local(ty)),
+        ResolvedTarget::BinaryType(fqn) => Some(TypeRefTarget::Binary(fqn)),
         _ => None,
     }
 }

@@ -1,3 +1,5 @@
+pub mod classfile;
+pub mod classpath;
 pub(crate) mod item_tree;
 pub mod resolve;
 pub(crate) mod symbols;
@@ -9,6 +11,12 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 use salsa::Setter as _;
+
+pub use classfile::{ClassfileError, ParsedClassfile, parse_class_bytes};
+pub use classpath::{
+    BinaryMemberSymbol, BinaryModuleInfo, BinaryOrigin, BinaryTarget, BinaryTypeSymbol,
+    ClasspathIndex, parse_manifest_multi_release, select_mrjar_entries,
+};
 
 pub use item_tree::{
     AstId, AstIdMap, AstRange, FileItemTree, ImportId, ImportTree, MemberId, MemberItem, TypeId,
@@ -50,6 +58,11 @@ pub(crate) struct ModuleFiles {
 #[salsa::input]
 pub(crate) struct WorkspaceModules {
     pub(crate) modules: Arc<Vec<ModuleFiles>>,
+}
+
+#[salsa::input]
+pub(crate) struct ClasspathInput {
+    pub(crate) index: Arc<ClasspathIndex>,
 }
 
 #[salsa::tracked]
@@ -140,6 +153,9 @@ pub trait DefDatabase: SourceDatabase {
 
     /// Aggregated workspace-wide lookup index over `workspace_files`.
     fn workspace_index(&self) -> Arc<WorkspaceIndex>;
+
+    /// Indexed JDK and external JAR binary symbols.
+    fn classpath_index(&self) -> Arc<ClasspathIndex>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +185,7 @@ pub struct RootDatabase {
     files: FxHashMap<FileId, SourceFile>,
     module_files: FxHashMap<ModuleId, ModuleFiles>,
     workspace_modules: Option<WorkspaceModules>,
+    classpath_input: Option<ClasspathInput>,
 }
 
 #[salsa::db]
@@ -253,6 +270,18 @@ impl RootDatabase {
         }
     }
 
+    /// Replaces the indexed binary JDK and JAR classpath symbols, preserving Salsa early-cutoff
+    /// when the new [`ClasspathIndex`] equals the existing one.
+    pub fn set_classpath_index(&mut self, index: Arc<ClasspathIndex>) {
+        if let Some(existing) = self.classpath_input {
+            if existing.index(self).as_ref() != index.as_ref() {
+                existing.set_index(self).to(index);
+            }
+        } else {
+            self.classpath_input = Some(ClasspathInput::new(self, index));
+        }
+    }
+
     /// Removes `file_id` from the tracked file map and prunes it from any module file lists.
     /// Does nothing if `file_id` is absent.
     pub fn remove_file(&mut self, file_id: FileId) {
@@ -332,6 +361,13 @@ impl DefDatabase for RootDatabase {
         match self.workspace_modules {
             Some(ws) => build_workspace_index_query(self, ws).clone(),
             None => Arc::new(WorkspaceIndex::default()),
+        }
+    }
+
+    fn classpath_index(&self) -> Arc<ClasspathIndex> {
+        match self.classpath_input {
+            Some(input) => input.index(self).clone(),
+            None => Arc::new(ClasspathIndex::default()),
         }
     }
 }
@@ -1287,5 +1323,404 @@ class Caller {
         assert!(!ws_after.contains_type("m0.Alpha"));
         assert!(ws_after.contains_type("m0.AlphaRenamed"));
         assert!(ws_after.contains_type("m1.Beta"));
+    }
+
+    fn sample_binary_classpath() -> ClasspathIndex {
+        let base_origin = BinaryOrigin::Jdk {
+            module_name: Some(SmolStr::new("java.base")),
+        };
+        let sql_origin = BinaryOrigin::Jdk {
+            module_name: Some(SmolStr::new("java.sql")),
+        };
+
+        let mut cp = ClasspathIndex::default();
+        cp.insert_module(BinaryModuleInfo {
+            name: SmolStr::new("java.base"),
+            exports: vec![
+                "java.lang".to_string(),
+                "java.util".to_string(),
+                "java.io".to_string(),
+            ],
+            requires_transitive: vec![],
+        });
+        cp.insert_module(BinaryModuleInfo {
+            name: SmolStr::new("java.sql"),
+            exports: vec!["java.sql".to_string()],
+            requires_transitive: vec![SmolStr::new("java.base")],
+        });
+
+        cp.insert_type(BinaryTypeSymbol {
+            name: SmolStr::new("String"),
+            qualified_name: "java.lang.String".to_string(),
+            internal_name: "java/lang/String".to_string(),
+            package: "java.lang".to_string(),
+            enclosing_type: None,
+            kind: TypeKind::Class,
+            is_public: true,
+            is_static: false,
+            is_final: true,
+            is_abstract: false,
+            type_params: vec![],
+            super_class: Some("java.lang.Object".to_string()),
+            interfaces: vec![],
+            permitted_subclasses: vec![],
+            members: vec![
+                BinaryMemberSymbol {
+                    owner_type: "java.lang.String".to_string(),
+                    name: SmolStr::new("length"),
+                    kind: MemberKind::Method,
+                    is_public: true,
+                    is_static: false,
+                    type_ref: Some("int".to_string()),
+                    params: vec![],
+                    is_varargs: false,
+                },
+                BinaryMemberSymbol {
+                    owner_type: "java.lang.String".to_string(),
+                    name: SmolStr::new("valueOf"),
+                    kind: MemberKind::Method,
+                    is_public: true,
+                    is_static: true,
+                    type_ref: Some("String".to_string()),
+                    params: vec![ParamSummary {
+                        name: Some(SmolStr::new("i")),
+                        type_ref: "int".to_string(),
+                        is_varargs: false,
+                    }],
+                    is_varargs: false,
+                },
+            ],
+            nested_types: vec![],
+            origin: base_origin.clone(),
+        });
+
+        cp.insert_type(BinaryTypeSymbol {
+            name: SmolStr::new("PrintStream"),
+            qualified_name: "java.io.PrintStream".to_string(),
+            internal_name: "java/io/PrintStream".to_string(),
+            package: "java.io".to_string(),
+            enclosing_type: None,
+            kind: TypeKind::Class,
+            is_public: true,
+            is_static: false,
+            is_final: false,
+            is_abstract: false,
+            type_params: vec![],
+            super_class: Some("java.lang.Object".to_string()),
+            interfaces: vec![],
+            permitted_subclasses: vec![],
+            members: vec![BinaryMemberSymbol {
+                owner_type: "java.io.PrintStream".to_string(),
+                name: SmolStr::new("println"),
+                kind: MemberKind::Method,
+                is_public: true,
+                is_static: false,
+                type_ref: Some("void".to_string()),
+                params: vec![ParamSummary {
+                    name: Some(SmolStr::new("x")),
+                    type_ref: "String".to_string(),
+                    is_varargs: false,
+                }],
+                is_varargs: false,
+            }],
+            nested_types: vec![],
+            origin: base_origin.clone(),
+        });
+
+        cp.insert_type(BinaryTypeSymbol {
+            name: SmolStr::new("System"),
+            qualified_name: "java.lang.System".to_string(),
+            internal_name: "java/lang/System".to_string(),
+            package: "java.lang".to_string(),
+            enclosing_type: None,
+            kind: TypeKind::Class,
+            is_public: true,
+            is_static: false,
+            is_final: true,
+            is_abstract: false,
+            type_params: vec![],
+            super_class: Some("java.lang.Object".to_string()),
+            interfaces: vec![],
+            permitted_subclasses: vec![],
+            members: vec![BinaryMemberSymbol {
+                owner_type: "java.lang.System".to_string(),
+                name: SmolStr::new("out"),
+                kind: MemberKind::Field,
+                is_public: true,
+                is_static: true,
+                type_ref: Some("java.io.PrintStream".to_string()),
+                params: vec![],
+                is_varargs: false,
+            }],
+            nested_types: vec![],
+            origin: base_origin.clone(),
+        });
+
+        cp.insert_type(BinaryTypeSymbol {
+            name: SmolStr::new("List"),
+            qualified_name: "java.util.List".to_string(),
+            internal_name: "java/util/List".to_string(),
+            package: "java.util".to_string(),
+            enclosing_type: None,
+            kind: TypeKind::Interface,
+            is_public: true,
+            is_static: false,
+            is_final: false,
+            is_abstract: true,
+            type_params: vec![SmolStr::new("E")],
+            super_class: Some("java.lang.Object".to_string()),
+            interfaces: vec![],
+            permitted_subclasses: vec![],
+            members: vec![],
+            nested_types: vec![],
+            origin: base_origin.clone(),
+        });
+
+        cp.insert_type(BinaryTypeSymbol {
+            name: SmolStr::new("Map"),
+            qualified_name: "java.util.Map".to_string(),
+            internal_name: "java/util/Map".to_string(),
+            package: "java.util".to_string(),
+            enclosing_type: None,
+            kind: TypeKind::Interface,
+            is_public: true,
+            is_static: false,
+            is_final: false,
+            is_abstract: true,
+            type_params: vec![SmolStr::new("K"), SmolStr::new("V")],
+            super_class: Some("java.lang.Object".to_string()),
+            interfaces: vec![],
+            permitted_subclasses: vec![],
+            members: vec![],
+            nested_types: vec![],
+            origin: base_origin.clone(),
+        });
+
+        cp.insert_type(BinaryTypeSymbol {
+            name: SmolStr::new("Entry"),
+            qualified_name: "java.util.Map.Entry".to_string(),
+            internal_name: "java/util/Map$Entry".to_string(),
+            package: "java.util".to_string(),
+            enclosing_type: Some("java.util.Map".to_string()),
+            kind: TypeKind::Interface,
+            is_public: true,
+            is_static: true,
+            is_final: false,
+            is_abstract: true,
+            type_params: vec![SmolStr::new("K"), SmolStr::new("V")],
+            super_class: Some("java.lang.Object".to_string()),
+            interfaces: vec![],
+            permitted_subclasses: vec![],
+            members: vec![],
+            nested_types: vec![],
+            origin: base_origin.clone(),
+        });
+
+        cp.insert_type(BinaryTypeSymbol {
+            name: SmolStr::new("Objects"),
+            qualified_name: "java.util.Objects".to_string(),
+            internal_name: "java/util/Objects".to_string(),
+            package: "java.util".to_string(),
+            enclosing_type: None,
+            kind: TypeKind::Class,
+            is_public: true,
+            is_static: false,
+            is_final: true,
+            is_abstract: false,
+            type_params: vec![],
+            super_class: Some("java.lang.Object".to_string()),
+            interfaces: vec![],
+            permitted_subclasses: vec![],
+            members: vec![BinaryMemberSymbol {
+                owner_type: "java.util.Objects".to_string(),
+                name: SmolStr::new("requireNonNull"),
+                kind: MemberKind::Method,
+                is_public: true,
+                is_static: true,
+                type_ref: Some("T".to_string()),
+                params: vec![ParamSummary {
+                    name: Some(SmolStr::new("obj")),
+                    type_ref: "T".to_string(),
+                    is_varargs: false,
+                }],
+                is_varargs: false,
+            }],
+            nested_types: vec![],
+            origin: base_origin,
+        });
+
+        cp.insert_type(BinaryTypeSymbol {
+            name: SmolStr::new("Connection"),
+            qualified_name: "java.sql.Connection".to_string(),
+            internal_name: "java/sql/Connection".to_string(),
+            package: "java.sql".to_string(),
+            enclosing_type: None,
+            kind: TypeKind::Interface,
+            is_public: true,
+            is_static: false,
+            is_final: false,
+            is_abstract: true,
+            type_params: vec![],
+            super_class: Some("java.lang.Object".to_string()),
+            interfaces: vec![],
+            permitted_subclasses: vec![],
+            members: vec![],
+            nested_types: vec![],
+            origin: sql_origin,
+        });
+
+        cp.finalize();
+        cp
+    }
+
+    #[test]
+    fn resolve_binary_jdk_types_members_imports_and_module_imports() {
+        let app = "\
+package com.app;
+import /*imp_pkg*/java./*imp_sub*/util./*imp_list*/List;
+import static java.util.Objects./*imp_static*/requireNonNull;
+
+class Demo {
+    void run(/*str_param*/String s, /*list_ref*/List<String> items, /*qual_entry*/java.util.Map.Entry<String, String> entry) {
+        int n = s./*str_len*/length();
+        System./*sys_out*/out./*ps_println*/println(s);
+        /*stat_req*/requireNonNull(s);
+        Object fn = String::/*mref_valof*/valueOf;
+    }
+}
+";
+        let mod_user = "\
+package com.mod;
+import module java.sql;
+
+class SqlClient {
+    /*conn*/Connection c;
+    /*trans_list*/List<String> xs;
+}
+";
+        let mut db = db_with_files(&[(1, app), (2, mod_user)]);
+        assert!(db.classpath_index().types_by_fqn.is_empty());
+
+        let cp = Arc::new(sample_binary_classpath());
+        db.set_classpath_index(Arc::clone(&cp));
+        // Re-setting an equal ClasspathIndex preserves Salsa pointer identity.
+        db.set_classpath_index(Arc::new(sample_binary_classpath()));
+        assert_eq!(db.classpath_index(), cp);
+
+        let f1 = FileId(1);
+        let imp_pkg = resolve_at_offset(&db, f1, cursor(app, "/*imp_pkg*/")).unwrap();
+        assert_eq!(imp_pkg.kind, ResolvedSymbolKind::Package);
+        assert_eq!(imp_pkg.qualified_name, "java");
+        assert!(imp_pkg.binary_target.is_none());
+
+        let imp_sub = resolve_at_offset(&db, f1, cursor(app, "/*imp_sub*/")).unwrap();
+        assert_eq!(imp_sub.kind, ResolvedSymbolKind::Package);
+        assert_eq!(imp_sub.qualified_name, "java.util");
+
+        let imp_list = resolve_at_offset(&db, f1, cursor(app, "/*imp_list*/")).unwrap();
+        assert_eq!(imp_list.kind, ResolvedSymbolKind::Interface);
+        assert_eq!(imp_list.qualified_name, "java.util.List");
+        assert_eq!(
+            imp_list.binary_target.as_ref().map(|t| t.internal_name.as_str()),
+            Some("java/util/List")
+        );
+
+        let imp_stat = resolve_at_offset(&db, f1, cursor(app, "/*imp_static*/")).unwrap();
+        assert_eq!(imp_stat.kind, ResolvedSymbolKind::Method);
+        assert_eq!(imp_stat.qualified_name, "java.util.Objects.requireNonNull");
+
+        let str_param = resolve_at_offset(&db, f1, cursor(app, "/*str_param*/")).unwrap();
+        assert_eq!(str_param.kind, ResolvedSymbolKind::Class);
+        assert_eq!(str_param.qualified_name, "java.lang.String");
+        assert_eq!(
+            str_param.binary_target,
+            Some(BinaryTarget {
+                origin: BinaryOrigin::Jdk {
+                    module_name: Some(SmolStr::new("java.base")),
+                },
+                internal_name: "java/lang/String".to_string(),
+                qualified_name: "java.lang.String".to_string(),
+                member_name: None,
+            })
+        );
+
+        let list_ref = resolve_at_offset(&db, f1, cursor(app, "/*list_ref*/")).unwrap();
+        assert_eq!(list_ref.qualified_name, "java.util.List");
+
+        let qual_entry_off = cursor(app, "/*qual_entry*/java.util.Map.");
+        let qual_entry = resolve_at_offset(&db, f1, qual_entry_off).unwrap();
+        assert_eq!(qual_entry.kind, ResolvedSymbolKind::Interface);
+        assert_eq!(qual_entry.qualified_name, "java.util.Map.Entry");
+        assert_eq!(
+            qual_entry.binary_target.as_ref().map(|t| t.internal_name.as_str()),
+            Some("java/util/Map$Entry")
+        );
+
+        let str_len = resolve_at_offset(&db, f1, cursor(app, "/*str_len*/")).unwrap();
+        assert_eq!(str_len.kind, ResolvedSymbolKind::Method);
+        assert_eq!(str_len.qualified_name, "java.lang.String.length");
+        assert_eq!(
+            str_len.binary_target.as_ref().and_then(|t| t.member_name.as_deref()),
+            Some("length")
+        );
+
+        let sys_out = resolve_at_offset(&db, f1, cursor(app, "/*sys_out*/")).unwrap();
+        assert_eq!(sys_out.kind, ResolvedSymbolKind::Field);
+        assert_eq!(sys_out.qualified_name, "java.lang.System.out");
+
+        let ps_println = resolve_at_offset(&db, f1, cursor(app, "/*ps_println*/")).unwrap();
+        assert_eq!(ps_println.kind, ResolvedSymbolKind::Method);
+        assert_eq!(ps_println.qualified_name, "java.io.PrintStream.println");
+
+        let stat_req = resolve_at_offset(&db, f1, cursor(app, "/*stat_req*/")).unwrap();
+        assert_eq!(stat_req.kind, ResolvedSymbolKind::Method);
+        assert_eq!(stat_req.qualified_name, "java.util.Objects.requireNonNull");
+
+        let mref = resolve_at_offset(&db, f1, cursor(app, "/*mref_valof*/")).unwrap();
+        assert_eq!(mref.kind, ResolvedSymbolKind::Method);
+        assert_eq!(mref.qualified_name, "java.lang.String.valueOf");
+
+        // Module import `import module java.sql;` brings in `java.sql.Connection` and
+        // transitively `java.util.List` via `requires transitive java.base`.
+        let f2 = FileId(2);
+        let conn = resolve_at_offset(&db, f2, cursor(mod_user, "/*conn*/")).unwrap();
+        assert_eq!(conn.qualified_name, "java.sql.Connection");
+        let trans_list = resolve_at_offset(&db, f2, cursor(mod_user, "/*trans_list*/")).unwrap();
+        assert_eq!(trans_list.qualified_name, "java.util.List");
+    }
+
+    #[test]
+    fn workspace_source_type_shadows_binary_classpath_type() {
+        let ws_list = "package java.util; public interface List<T> {}";
+        let app = "\
+package com.app;
+import java.util.List;
+class Use {
+    /*ref*/List<String> xs;
+}
+";
+        let mut db = db_with_files(&[(1, ws_list), (2, app)]);
+        db.set_classpath_index(Arc::new(sample_binary_classpath()));
+
+        let res = resolve_at_offset(&db, FileId(2), cursor(app, "/*ref*/")).unwrap();
+        assert_eq!(res.qualified_name, "java.util.List");
+        assert_eq!(res.file_id, Some(FileId(1)));
+        assert!(res.binary_target.is_none());
+
+        // Also check implicit java.lang shadowing by same-package workspace class.
+        let ws_string = "package com.app; public class String {}";
+        let app2 = "\
+package com.app;
+class Use2 {
+    /*ref*/String s;
+}
+";
+        let mut db2 = db_with_files(&[(1, ws_string), (2, app2)]);
+        db2.set_classpath_index(Arc::new(sample_binary_classpath()));
+
+        let res2 = resolve_at_offset(&db2, FileId(2), cursor(app2, "/*ref*/")).unwrap();
+        assert_eq!(res2.qualified_name, "com.app.String");
+        assert_eq!(res2.file_id, Some(FileId(1)));
+        assert!(res2.binary_target.is_none());
     }
 }

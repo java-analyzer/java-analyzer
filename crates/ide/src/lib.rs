@@ -1,3 +1,5 @@
+mod binary;
+
 use std::sync::Arc;
 
 use hir::{DefDatabase, ResolvedSymbol, ResolvedSymbolKind, SourceDatabase, SymbolDetail};
@@ -7,11 +9,18 @@ use syntax::{
     syntax_kind::SyntaxKind::*,
 };
 
+pub use binary::{
+    append_javadoc_to_hover, extract_javadoc_from_html, extract_javadoc_from_source,
+    locate_binary_symbol_in_source, synthesize_binary_stub,
+};
 pub use hir::{
-    Cancellable, Cancelled, DeltaSet, FileId, LanguageLevel, ModuleData, ModuleDelta,
-    ModuleDependency, ModuleId, ModuleTarget, Release, ResourceRoot, RootScope, SourceRoot,
+    BinaryMemberSymbol, BinaryModuleInfo, BinaryOrigin, BinaryTarget, BinaryTypeSymbol,
+    Cancellable, Cancelled, ClassfileError, ClasspathIndex, DeltaSet, FileId, LanguageLevel,
+    MemberKind, ModuleData, ModuleDelta, ModuleDependency, ModuleId, ModuleTarget, ParamSummary,
+    ParsedClassfile, Release, ResourceRoot, RootScope, SmolStr, SourceRoot, TypeKind,
     WorkspaceDelta, WorkspaceLayout, infer_workspace_layout_from_sources, is_path_within,
-    normalize_rel_path, parse_shebang_level,
+    normalize_rel_path, parse_class_bytes, parse_manifest_multi_release, parse_shebang_level,
+    select_mrjar_entries,
 };
 pub use syntax::TextRange;
 
@@ -45,6 +54,10 @@ impl AnalysisHost {
 
     pub fn set_workspace_modules(&mut self, modules: Vec<(ModuleId, Arc<Vec<FileId>>)>) {
         self.db.set_workspace_modules(modules);
+    }
+
+    pub fn set_classpath_index(&mut self, index: Arc<ClasspathIndex>) {
+        self.db.set_classpath_index(index);
     }
 
     pub fn remove_file(&mut self, file_id: FileId) {
@@ -95,20 +108,31 @@ impl Analysis {
             (index.package_count(), index.type_count())
         })
     }
+
+    pub fn classpath_index_stats(&self) -> Cancellable<(usize, usize)> {
+        hir::catch_cancelled(|| {
+            let index = self.db.classpath_index();
+            (index.type_count(), index.module_count())
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HoverResult {
     pub content: String,
+    pub binary_target: Option<BinaryTarget>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NavigationTarget {
-    pub file_id: FileId,
-    /// Range of the entire declaration.
-    pub full_range: TextRange,
-    /// Range of the declaration's identifier (`NAME`), used as cursor destination.
-    pub focus_range: TextRange,
+pub enum NavigationTarget {
+    Source {
+        file_id: FileId,
+        /// Range of the entire declaration.
+        full_range: TextRange,
+        /// Range of the declaration's identifier (`NAME`), used as cursor destination.
+        focus_range: TextRange,
+    },
+    Binary(BinaryTarget),
 }
 
 pub fn goto_definition(
@@ -117,18 +141,21 @@ pub fn goto_definition(
     offset: u32,
 ) -> Option<NavigationTarget> {
     let resolved = hir::resolve_at_offset(db, file_id, offset)?;
-    let (file_id, full_range, focus_range) = resolved.location()?;
-    Some(NavigationTarget {
-        file_id,
-        full_range,
-        focus_range,
-    })
+    if let Some((file_id, full_range, focus_range)) = resolved.location() {
+        return Some(NavigationTarget::Source {
+            file_id,
+            full_range,
+            focus_range,
+        });
+    }
+    resolved.binary_target.map(NavigationTarget::Binary)
 }
 
 pub fn hover(db: &dyn DefDatabase, file_id: FileId, offset: u32) -> Option<HoverResult> {
     if let Some(resolved) = hir::resolve_at_offset(db, file_id, offset) {
         return Some(HoverResult {
             content: format_resolved_hover(&resolved),
+            binary_target: resolved.binary_target,
         });
     }
 
@@ -141,16 +168,18 @@ pub fn hover(db: &dyn DefDatabase, file_id: FileId, offset: u32) -> Option<Hover
     match token.kind() {
         CLASS_KW => Some(HoverResult {
             content: "Keyword `class` declares a new class".to_string(),
+            binary_target: None,
         }),
         IDENT => Some(HoverResult {
             content: format!("Identifier `{}`", token.text()),
+            binary_target: None,
         }),
         _ => None,
     }
 }
 
 fn format_resolved_hover(sym: &ResolvedSymbol) -> String {
-    match sym.kind {
+    let base = match sym.kind {
         ResolvedSymbolKind::Class
         | ResolvedSymbolKind::Interface
         | ResolvedSymbolKind::Enum
@@ -230,6 +259,17 @@ fn format_resolved_hover(sym: &ResolvedSymbol) -> String {
             _ => format!("```java\ntype parameter {}\n```", sym.name),
         },
         ResolvedSymbolKind::Package => format!("```java\npackage {}\n```", sym.qualified_name),
+    };
+
+    match &sym.binary_target {
+        Some(target) => match &target.origin {
+            BinaryOrigin::Jdk {
+                module_name: Some(module_name),
+            } => format!("{base}\n*from JDK module `{module_name}`*"),
+            BinaryOrigin::Jdk { module_name: None } => format!("{base}\n*from JDK*"),
+            BinaryOrigin::Jar { label } => format!("{base}\n*from `{label}`*"),
+        },
+        None => base,
     }
 }
 
@@ -540,6 +580,7 @@ class C {
             file_id: None,
             full_range: None,
             focus_range: None,
+            binary_target: None,
             name: "baz".into(),
             qualified_name: "C.baz".to_string(),
             detail: Some(SymbolDetail::Method {
@@ -552,6 +593,25 @@ class C {
             format_resolved_hover(&structured),
             "```java\n@Anno(\")\") String C.baz(@Param(\"(\") int a)\n```"
         );
+    }
+
+    fn assert_source_target(
+        target: NavigationTarget,
+        expected_file_id: FileId,
+    ) -> (TextRange, TextRange) {
+        match target {
+            NavigationTarget::Source {
+                file_id,
+                full_range,
+                focus_range,
+            } => {
+                assert_eq!(file_id, expected_file_id);
+                (full_range, focus_range)
+            }
+            NavigationTarget::Binary(bin) => {
+                panic!("expected NavigationTarget::Source, got Binary({bin:?})");
+            }
+        }
     }
 
     #[test]
@@ -568,24 +628,32 @@ class Calc {
 ";
         let (db, file_id) = db_with(text);
 
-        let param_target = goto_definition(&db, file_id, cursor(text, "/*use_param*/")).unwrap();
-        assert_eq!(param_target.file_id, file_id);
-        assert_eq!(slice(text, param_target.focus_range), "param");
-        assert_eq!(slice(text, param_target.full_range), "int param");
+        let (param_full, param_focus) = assert_source_target(
+            goto_definition(&db, file_id, cursor(text, "/*use_param*/")).unwrap(),
+            file_id,
+        );
+        assert_eq!(slice(text, param_focus), "param");
+        assert_eq!(slice(text, param_full), "int param");
 
-        let field_target = goto_definition(&db, file_id, cursor(text, "/*use_field*/")).unwrap();
-        assert_eq!(field_target.file_id, file_id);
-        assert_eq!(slice(text, field_target.focus_range), "base");
-        assert_eq!(slice(text, field_target.full_range), "base = 10");
+        let (field_full, field_focus) = assert_source_target(
+            goto_definition(&db, file_id, cursor(text, "/*use_field*/")).unwrap(),
+            file_id,
+        );
+        assert_eq!(slice(text, field_focus), "base");
+        assert_eq!(slice(text, field_full), "base = 10");
 
-        let method_target = goto_definition(&db, file_id, cursor(text, "/*use_method*/")).unwrap();
-        assert_eq!(method_target.file_id, file_id);
-        assert_eq!(slice(text, method_target.focus_range), "helper");
-        assert!(slice(text, method_target.full_range).starts_with("int helper(int v)"));
+        let (method_full, method_focus) = assert_source_target(
+            goto_definition(&db, file_id, cursor(text, "/*use_method*/")).unwrap(),
+            file_id,
+        );
+        assert_eq!(slice(text, method_focus), "helper");
+        assert!(slice(text, method_full).starts_with("int helper(int v)"));
 
-        let local_target = goto_definition(&db, file_id, cursor(text, "/*use_local*/")).unwrap();
-        assert_eq!(local_target.file_id, file_id);
-        assert_eq!(slice(text, local_target.focus_range), "local");
+        let (_, local_focus) = assert_source_target(
+            goto_definition(&db, file_id, cursor(text, "/*use_local*/")).unwrap(),
+            file_id,
+        );
+        assert_eq!(slice(text, local_focus), "local");
     }
 
     #[test]
@@ -620,34 +688,47 @@ public class App {
         let app_id = FileId(3);
         let db = db_with_files(&[(1, helper), (2, peer), (3, app)]);
 
-        let imp_target = goto_definition(&db, app_id, cursor(app, "/*imp*/")).unwrap();
-        assert_eq!(imp_target.file_id, helper_id);
-        assert_eq!(slice(helper, imp_target.focus_range), "Helper");
+        let (_, imp_focus) = assert_source_target(
+            goto_definition(&db, app_id, cursor(app, "/*imp*/")).unwrap(),
+            helper_id,
+        );
+        assert_eq!(slice(helper, imp_focus), "Helper");
 
-        let cls_target = goto_definition(&db, app_id, cursor(app, "/*cls*/")).unwrap();
-        assert_eq!(cls_target.file_id, helper_id);
-        assert_eq!(slice(helper, cls_target.focus_range), "Helper");
+        let (_, cls_focus) = assert_source_target(
+            goto_definition(&db, app_id, cursor(app, "/*cls*/")).unwrap(),
+            helper_id,
+        );
+        assert_eq!(slice(helper, cls_focus), "Helper");
 
-        let new_target = goto_definition(&db, app_id, cursor(app, "/*ctor_cls*/")).unwrap();
-        assert_eq!(new_target.file_id, helper_id);
-        assert_eq!(slice(helper, new_target.focus_range), "Helper");
+        let (_, new_focus) = assert_source_target(
+            goto_definition(&db, app_id, cursor(app, "/*ctor_cls*/")).unwrap(),
+            helper_id,
+        );
+        assert_eq!(slice(helper, new_focus), "Helper");
 
-        let field_target = goto_definition(&db, app_id, cursor(app, "/*field*/")).unwrap();
-        assert_eq!(field_target.file_id, helper_id);
-        assert_eq!(slice(helper, field_target.focus_range), "value");
+        let (_, field_focus) = assert_source_target(
+            goto_definition(&db, app_id, cursor(app, "/*field*/")).unwrap(),
+            helper_id,
+        );
+        assert_eq!(slice(helper, field_focus), "value");
 
-        let method_target = goto_definition(&db, app_id, cursor(app, "/*method*/")).unwrap();
-        assert_eq!(method_target.file_id, helper_id);
-        assert_eq!(slice(helper, method_target.focus_range), "work");
+        let (_, method_focus) = assert_source_target(
+            goto_definition(&db, app_id, cursor(app, "/*method*/")).unwrap(),
+            helper_id,
+        );
+        assert_eq!(slice(helper, method_focus), "work");
 
-        let peer_target = goto_definition(&db, app_id, cursor(app, "/*peer*/")).unwrap();
-        assert_eq!(peer_target.file_id, peer_id);
-        assert_eq!(slice(peer, peer_target.focus_range), "Peer");
+        let (_, peer_focus) = assert_source_target(
+            goto_definition(&db, app_id, cursor(app, "/*peer*/")).unwrap(),
+            peer_id,
+        );
+        assert_eq!(slice(peer, peer_focus), "Peer");
 
-        let peer_method_target =
-            goto_definition(&db, app_id, cursor(app, "/*peer_method*/")).unwrap();
-        assert_eq!(peer_method_target.file_id, peer_id);
-        assert_eq!(slice(peer, peer_method_target.focus_range), "ping");
+        let (_, peer_method_focus) = assert_source_target(
+            goto_definition(&db, app_id, cursor(app, "/*peer_method*/")).unwrap(),
+            peer_id,
+        );
+        assert_eq!(slice(peer, peer_method_focus), "ping");
     }
 
     /// Renders the outline as indented `Kind name detail` lines.
@@ -903,5 +984,225 @@ Method main (String[] args)
             host.set_file_text(file1, Arc::new(format!("class Iter{i} {{ int v; }}")));
         }
         handle.join().unwrap();
+    }
+
+    fn sample_ide_classpath() -> ClasspathIndex {
+        let mut cp = ClasspathIndex::default();
+        let jdk_base = BinaryOrigin::Jdk {
+            module_name: Some(SmolStr::new("java.base")),
+        };
+        let jdk8 = BinaryOrigin::Jdk { module_name: None };
+        let jar = BinaryOrigin::Jar {
+            label: "lib/demo-1.0.jar".to_string(),
+        };
+
+        cp.insert_module(BinaryModuleInfo {
+            name: SmolStr::new("java.base"),
+            exports: vec!["java.lang".to_string(), "java.util".to_string()],
+            requires_transitive: vec![],
+        });
+
+        cp.insert_type(BinaryTypeSymbol {
+            name: SmolStr::new("String"),
+            qualified_name: "java.lang.String".to_string(),
+            internal_name: "java/lang/String".to_string(),
+            package: "java.lang".to_string(),
+            enclosing_type: None,
+            kind: TypeKind::Class,
+            is_public: true,
+            is_static: false,
+            is_final: true,
+            is_abstract: false,
+            type_params: vec![],
+            super_class: Some("java.lang.Object".to_string()),
+            interfaces: vec![],
+            permitted_subclasses: vec![],
+            members: vec![BinaryMemberSymbol {
+                owner_type: "java.lang.String".to_string(),
+                name: SmolStr::new("length"),
+                kind: MemberKind::Method,
+                is_public: true,
+                is_static: false,
+                type_ref: Some("int".to_string()),
+                params: vec![],
+                is_varargs: false,
+            }],
+            nested_types: vec![],
+            origin: jdk_base,
+        });
+
+        cp.insert_type(BinaryTypeSymbol {
+            name: SmolStr::new("Legacy"),
+            qualified_name: "java.util.Legacy".to_string(),
+            internal_name: "java/util/Legacy".to_string(),
+            package: "java.util".to_string(),
+            enclosing_type: None,
+            kind: TypeKind::Class,
+            is_public: true,
+            is_static: false,
+            is_final: false,
+            is_abstract: false,
+            type_params: vec![],
+            super_class: Some("java.lang.Object".to_string()),
+            interfaces: vec![],
+            permitted_subclasses: vec![],
+            members: vec![],
+            nested_types: vec![],
+            origin: jdk8,
+        });
+
+        cp.insert_type(BinaryTypeSymbol {
+            name: SmolStr::new("Assert"),
+            qualified_name: "org.demo.Assert".to_string(),
+            internal_name: "org/demo/Assert".to_string(),
+            package: "org.demo".to_string(),
+            enclosing_type: None,
+            kind: TypeKind::Class,
+            is_public: true,
+            is_static: false,
+            is_final: false,
+            is_abstract: false,
+            type_params: vec![],
+            super_class: Some("java.lang.Object".to_string()),
+            interfaces: vec![],
+            permitted_subclasses: vec![],
+            members: vec![BinaryMemberSymbol {
+                owner_type: "org.demo.Assert".to_string(),
+                name: SmolStr::new("VALUE"),
+                kind: MemberKind::Field,
+                is_public: true,
+                is_static: true,
+                type_ref: Some("int".to_string()),
+                params: vec![],
+                is_varargs: false,
+            }],
+            nested_types: vec![],
+            origin: jar,
+        });
+
+        cp.finalize();
+        cp
+    }
+
+    #[test]
+    fn binary_hover_origin_and_navigation_target() {
+        let app = "\
+package com.app;
+import java.util./*leg*/Legacy;
+import org.demo./*jar*/Assert;
+class App {
+    void run(/*str*/String s) {
+        int n = s./*len*/length();
+        int v = Assert./*val*/VALUE;
+    }
+}
+";
+        let mut host = AnalysisHost::new();
+        let file_id = FileId(1);
+        host.set_file_text(file_id, Arc::new(app.to_string()));
+        host.set_workspace_files(Arc::new(vec![file_id]));
+
+        let snap_empty = host.analysis();
+        assert_eq!(snap_empty.classpath_index_stats().unwrap(), (0, 0));
+        drop(snap_empty);
+
+        host.set_classpath_index(Arc::new(sample_ide_classpath()));
+        let snap = host.analysis();
+        assert_eq!(snap.classpath_index_stats().unwrap(), (3, 1));
+
+        let str_hover = snap.hover(file_id, cursor(app, "/*str*/")).unwrap().unwrap();
+        assert_eq!(
+            str_hover.content,
+            "```java\nclass java.lang.String\n```\n*from JDK module `java.base`*"
+        );
+        assert_eq!(
+            str_hover.binary_target.as_ref().map(|t| t.qualified_name.as_str()),
+            Some("java.lang.String")
+        );
+
+        let len_hover = snap.hover(file_id, cursor(app, "/*len*/")).unwrap().unwrap();
+        assert_eq!(
+            len_hover.content,
+            "```java\nint java.lang.String.length()\n```\n*from JDK module `java.base`*"
+        );
+        assert_eq!(
+            len_hover
+                .binary_target
+                .as_ref()
+                .and_then(|t| t.member_name.as_deref()),
+            Some("length")
+        );
+
+        let leg_hover = snap.hover(file_id, cursor(app, "/*leg*/")).unwrap().unwrap();
+        assert_eq!(
+            leg_hover.content,
+            "```java\nclass java.util.Legacy\n```\n*from JDK*"
+        );
+
+        let val_hover = snap.hover(file_id, cursor(app, "/*val*/")).unwrap().unwrap();
+        assert_eq!(
+            val_hover.content,
+            "```java\nint org.demo.Assert.VALUE\n```\n*from `lib/demo-1.0.jar`*"
+        );
+
+        // Binary goto_definition returns NavigationTarget::Binary
+        let str_def = snap
+            .goto_definition(file_id, cursor(app, "/*str*/"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            str_def,
+            NavigationTarget::Binary(BinaryTarget {
+                origin: BinaryOrigin::Jdk {
+                    module_name: Some(SmolStr::new("java.base")),
+                },
+                internal_name: "java/lang/String".to_string(),
+                qualified_name: "java.lang.String".to_string(),
+                member_name: None,
+            })
+        );
+
+        let jar_def = snap
+            .goto_definition(file_id, cursor(app, "/*jar*/"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            jar_def,
+            NavigationTarget::Binary(BinaryTarget {
+                origin: BinaryOrigin::Jar {
+                    label: "lib/demo-1.0.jar".to_string(),
+                },
+                internal_name: "org/demo/Assert".to_string(),
+                qualified_name: "org.demo.Assert".to_string(),
+                member_name: None,
+            })
+        );
+    }
+
+    #[test]
+    fn workspace_source_shadows_binary_in_hover_and_goto_definition() {
+        let ws_assert = "package org.demo;\npublic class Assert {}\n";
+        let app = "\
+package com.app;
+import org.demo./*jar*/Assert;
+class App { Assert a; }
+";
+        let mut host = AnalysisHost::new();
+        host.set_file_text(FileId(1), Arc::new(ws_assert.to_string()));
+        host.set_file_text(FileId(2), Arc::new(app.to_string()));
+        host.set_workspace_files(Arc::new(vec![FileId(1), FileId(2)]));
+        host.set_classpath_index(Arc::new(sample_ide_classpath()));
+
+        let snap = host.analysis();
+        let h = snap.hover(FileId(2), cursor(app, "/*jar*/")).unwrap().unwrap();
+        assert_eq!(h.content, "```java\nclass org.demo.Assert\n```");
+        assert!(h.binary_target.is_none());
+
+        let def = snap
+            .goto_definition(FileId(2), cursor(app, "/*jar*/"))
+            .unwrap()
+            .unwrap();
+        let (_, focus) = assert_source_target(def, FileId(1));
+        assert_eq!(slice(ws_assert, focus), "Assert");
     }
 }

@@ -4,14 +4,14 @@ use std::{
     collections::BTreeMap,
     fs,
     panic::{AssertUnwindSafe, catch_unwind},
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     thread::{self, JoinHandle},
 };
 
 use ide::{
-    Analysis, AnalysisHost, Cancellable, Cancelled, FileId, LanguageLevel, ModuleId,
-    is_path_within, normalize_rel_path,
+    Analysis, AnalysisHost, Cancellable, Cancelled, ClasspathIndex, FileId, LanguageLevel,
+    ModuleId, NavigationTarget, is_path_within, normalize_rel_path,
 };
 use line_index::LineIndex;
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
@@ -19,7 +19,7 @@ use lsp_types::{
     DiagnosticSeverity, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
     HoverProviderCapability, InitializeParams, Location, MarkupContent, MarkupKind, OneOf,
-    PublishDiagnosticsParams, ServerCapabilities, SymbolKind, TextDocumentSyncCapability,
+    PublishDiagnosticsParams, Range, ServerCapabilities, SymbolKind, TextDocumentSyncCapability,
     TextDocumentSyncKind, Uri,
     notification::{
         DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
@@ -30,6 +30,9 @@ use lsp_types::{
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
+    classpath_loader::{
+        JarCompanions, load_classpath, lookup_binary_javadoc, materialize_binary_location,
+    },
     convert::{
         path_to_uri, position_to_offset_with_index, text_range_to_range_with_index, uri_to_path,
     },
@@ -45,6 +48,9 @@ pub struct GlobalState {
     files: Arc<FxHashMap<Uri, FileId>>,
     file_urls: Arc<FxHashMap<FileId, Uri>>,
     line_indexes: Arc<FxHashMap<FileId, Arc<LineIndex>>>,
+    classpath_index: Arc<ClasspathIndex>,
+    jar_companions: Arc<JarCompanions>,
+    resolved_jdk: Option<Arc<PathBuf>>,
     open_files: FxHashSet<Uri>,
     next_file_id: u32,
     workspace_probe: Option<WorkspaceProbe>,
@@ -56,6 +62,9 @@ struct GlobalStateSnapshot {
     files: Arc<FxHashMap<Uri, FileId>>,
     file_urls: Arc<FxHashMap<FileId, Uri>>,
     line_indexes: Arc<FxHashMap<FileId, Arc<LineIndex>>>,
+    classpath_index: Arc<ClasspathIndex>,
+    jar_companions: Arc<JarCompanions>,
+    resolved_jdk: Option<Arc<PathBuf>>,
 }
 
 impl Default for GlobalState {
@@ -71,6 +80,9 @@ impl GlobalState {
             files: Arc::new(FxHashMap::default()),
             file_urls: Arc::new(FxHashMap::default()),
             line_indexes: Arc::new(FxHashMap::default()),
+            classpath_index: Arc::new(ClasspathIndex::default()),
+            jar_companions: Arc::new(JarCompanions::default()),
+            resolved_jdk: None,
             open_files: FxHashSet::default(),
             next_file_id: 0,
             workspace_probe: None,
@@ -110,6 +122,12 @@ impl GlobalState {
             }
         }
         probe.file_contents.clear();
+        let (classpath, companions) = load_classpath(&probe);
+        let classpath = Arc::new(classpath);
+        self.classpath_index = Arc::clone(&classpath);
+        self.jar_companions = Arc::new(companions);
+        self.resolved_jdk = probe.resolved_jdk.as_ref().map(|p| Arc::new(p.clone()));
+        self.host.set_classpath_index(classpath);
         self.workspace_probe = Some(probe);
         self.sync_workspace_files();
     }
@@ -124,6 +142,9 @@ impl GlobalState {
             files: Arc::clone(&self.files),
             file_urls: Arc::clone(&self.file_urls),
             line_indexes: Arc::clone(&self.line_indexes),
+            classpath_index: Arc::clone(&self.classpath_index),
+            jar_companions: Arc::clone(&self.jar_companions),
+            resolved_jdk: self.resolved_jdk.as_ref().map(Arc::clone),
         }
     }
 
@@ -397,9 +418,18 @@ impl GlobalStateSnapshot {
         let Some(offset) = position_to_offset_with_index(&index, &text, pos.position) else {
             return Ok(None);
         };
-        let Some(result) = self.analysis.hover(file_id, offset)? else {
+        let Some(mut result) = self.analysis.hover(file_id, offset)? else {
             return Ok(None);
         };
+        if let Some(target) = &result.binary_target
+            && let Some(javadoc) = lookup_binary_javadoc(
+                self.resolved_jdk.as_deref().map(PathBuf::as_path),
+                &self.jar_companions,
+                target,
+            )
+        {
+            result.content = ide::append_javadoc_to_hover(&result.content, &javadoc);
+        }
         Ok(Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
@@ -425,21 +455,58 @@ impl GlobalStateSnapshot {
         let Some(target) = self.analysis.goto_definition(file_id, offset)? else {
             return Ok(None);
         };
-        let Some(target_uri) = self.file_urls.get(&target.file_id).cloned() else {
-            return Ok(None);
-        };
-        let target_text = self.analysis.file_text(target.file_id)?;
-        let target_index = self.line_index(target.file_id, &target_text);
-        let range = text_range_to_range_with_index(
-            &target_index,
-            &target_text,
-            target.focus_range.start().into(),
-            target.focus_range.end().into(),
-        );
-        Ok(Some(GotoDefinitionResponse::Scalar(Location {
-            uri: target_uri,
-            range,
-        })))
+        match target {
+            NavigationTarget::Source {
+                file_id,
+                focus_range,
+                ..
+            } => {
+                let Some(target_uri) = self.file_urls.get(&file_id).cloned() else {
+                    return Ok(None);
+                };
+                let target_text = self.analysis.file_text(file_id)?;
+                let target_index = self.line_index(file_id, &target_text);
+                let range = text_range_to_range_with_index(
+                    &target_index,
+                    &target_text,
+                    focus_range.start().into(),
+                    focus_range.end().into(),
+                );
+                Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                    uri: target_uri,
+                    range,
+                })))
+            }
+            NavigationTarget::Binary(bin_target) => {
+                let Some((path, source, range_opt)) = materialize_binary_location(
+                    &self.classpath_index,
+                    self.resolved_jdk.as_deref().map(PathBuf::as_path),
+                    &self.jar_companions,
+                    &bin_target,
+                ) else {
+                    return Ok(None);
+                };
+                let Some(target_uri) = path_to_uri(&path) else {
+                    return Ok(None);
+                };
+                let range = match range_opt {
+                    Some(text_range) => {
+                        let target_index = LineIndex::new(&source);
+                        text_range_to_range_with_index(
+                            &target_index,
+                            &source,
+                            text_range.start().into(),
+                            text_range.end().into(),
+                        )
+                    }
+                    None => Range::default(),
+                };
+                Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                    uri: target_uri,
+                    range,
+                })))
+            }
+        }
     }
 }
 
@@ -995,5 +1062,7 @@ mod tests {
         assert!(Arc::ptr_eq(&state.files, &snap.files));
         assert!(Arc::ptr_eq(&state.file_urls, &snap.file_urls));
         assert!(Arc::ptr_eq(&state.line_indexes, &snap.line_indexes));
+        assert!(Arc::ptr_eq(&state.classpath_index, &snap.classpath_index));
+        assert!(Arc::ptr_eq(&state.jar_companions, &snap.jar_companions));
     }
 }

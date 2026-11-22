@@ -194,6 +194,14 @@ fn render_inspect_json<W: Write>(
             .collect::<Vec<_>>()
     });
 
+    let health = serde_json::json!({
+        "total_java_files": probe.file_paths.len(),
+        "files_with_parse_errors": files_with_errors,
+        "indexed_packages": indexed_packages,
+        "indexed_types": indexed_types,
+        "parse_errors": parse_errors_json,
+    });
+
     let payload = serde_json::json!({
         "workspace_dir": probe.workspace_dir.display().to_string(),
         "config_file": probe.config_file.as_ref().map(|p| p.display().to_string()),
@@ -246,13 +254,7 @@ fn render_inspect_json<W: Write>(
             "authoritative_package_info": pm.authoritative_package_info,
             "message": pm.message(),
         })).collect::<Vec<_>>(),
-        "health": {
-            "total_java_files": probe.file_paths.len(),
-            "files_with_parse_errors": files_with_errors,
-            "indexed_packages": indexed_packages,
-            "indexed_types": indexed_types,
-            "parse_errors": parse_errors_json,
-        }
+        "health": health,
     });
 
     let rendered = serde_json::to_string_pretty(&payload).map_err(io::Error::other)?;
