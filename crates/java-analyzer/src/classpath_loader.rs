@@ -24,7 +24,10 @@ use ide::{
 use rustc_hash::{FxHashMap, FxHashSet};
 use zip::{ZipArchive, result::ZipError};
 
-use crate::{jimage::Jimage, workspace_config::WorkspaceProbe};
+use crate::{
+    jimage::Jimage,
+    workspace_config::{WorkspaceProbe, probe_jdk_release},
+};
 
 const JMOD_MAGIC: &[u8; 4] = b"JM\x01\x00";
 
@@ -68,11 +71,11 @@ pub fn load_classpath(probe: &WorkspaceProbe) -> (ClasspathIndex, JarCompanions)
     let mut index = ClasspathIndex::default();
     let mut companions = JarCompanions::default();
 
-    if let Some(jdk_home) = &probe.resolved_jdk {
-        load_jdk_into(&mut index, jdk_home);
-    }
-
     let target_release = probe.resolved_level.release;
+
+    if let Some(jdk_home) = &probe.resolved_jdk {
+        load_jdk_into(&mut index, jdk_home, target_release);
+    }
     let mut seen_paths: BTreeSet<PathBuf> = BTreeSet::new();
 
     for module in &probe.layout.modules {
@@ -120,7 +123,23 @@ pub fn load_classpath(probe: &WorkspaceProbe) -> (ClasspathIndex, JarCompanions)
     (index, companions)
 }
 
-fn load_jdk_into(index: &mut ClasspathIndex, jdk_home: &Path) {
+fn ct_sym_version_char(release: Release) -> Option<char> {
+    char::from_digit(u32::from(release.number()), 36).map(|c| c.to_ascii_uppercase())
+}
+
+fn load_jdk_into(index: &mut ClasspathIndex, jdk_home: &Path, target_release: Release) {
+    let installed_release = probe_jdk_release(jdk_home);
+    if installed_release.is_some_and(|installed| target_release < installed) {
+        let ct_sym_path = jdk_home.join("lib/ct.sym");
+        if ct_sym_path.is_file()
+            && let Some(ct_index) = load_ct_sym(&ct_sym_path, target_release)
+            && ct_index.type_count() > 0
+        {
+            index.merge(ct_index);
+            return;
+        }
+    }
+
     let jmods_dir = jdk_home.join("jmods");
     if jmods_dir.is_dir() {
         load_jmods_dir(index, &jmods_dir);
@@ -144,10 +163,302 @@ fn load_jdk_into(index: &mut ClasspathIndex, jdk_home: &Path) {
     }
 }
 
-struct JimageClassTask {
-    module_name: SmolStr,
+struct ClassParseTask {
+    module_name: Option<SmolStr>,
     entry_name: String,
     bytes: Vec<u8>,
+}
+
+fn parse_jdk_class_tasks_parallel(
+    index: &mut ClasspathIndex,
+    archive_path: &Path,
+    archive_kind: &str,
+    tasks: &[ClassParseTask],
+) {
+    if tasks.is_empty() {
+        return;
+    }
+
+    let worker_count = thread::available_parallelism()
+        .map_or(4, NonZeroUsize::get)
+        .min(tasks.len())
+        .max(1);
+    let chunk_size = tasks.len().div_ceil(worker_count).max(1);
+
+    let mut partials: Vec<ClasspathIndex> = thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(worker_count);
+        for chunk in tasks.chunks(chunk_size) {
+            handles.push(scope.spawn(move || {
+                let mut local = ClasspathIndex::default();
+                for task in chunk {
+                    match parse_class_bytes(
+                        &task.bytes,
+                        BinaryOrigin::Jdk {
+                            module_name: task.module_name.clone(),
+                        },
+                    ) {
+                        Ok(Some(ParsedClassfile::Type(ty))) => local.insert_type(ty),
+                        Ok(Some(ParsedClassfile::Module(_)) | None) => {}
+                        Err(err) => {
+                            tracing::warn!(
+                                path = %archive_path.display(),
+                                entry = %task.entry_name,
+                                kind = archive_kind,
+                                error = %err,
+                                "failed to parse classfile"
+                            );
+                        }
+                    }
+                }
+                local
+            }));
+        }
+
+        let mut collected = Vec::with_capacity(handles.len());
+        for handle in handles {
+            match handle.join() {
+                Ok(partial) => collected.push(partial),
+                Err(_) => {
+                    tracing::warn!(
+                        path = %archive_path.display(),
+                        kind = archive_kind,
+                        "worker thread panicked while indexing JDK archive"
+                    );
+                }
+            }
+        }
+        collected
+    });
+
+    for partial in partials.drain(..) {
+        index.merge(partial);
+    }
+}
+
+fn load_ct_sym(ct_sym_path: &Path, target_release: Release) -> Option<ClasspathIndex> {
+    let ver_char = ct_sym_version_char(target_release)?;
+    let file = match File::open(ct_sym_path) {
+        Ok(f) => f,
+        Err(err) => {
+            tracing::warn!(
+                path = %ct_sym_path.display(),
+                error = %err,
+                "failed to open ct.sym"
+            );
+            return None;
+        }
+    };
+    let mut archive = match ZipArchive::new(BufReader::new(file)) {
+        Ok(a) => a,
+        Err(err) => {
+            tracing::warn!(
+                path = %ct_sym_path.display(),
+                error = %err,
+                "failed to open ct.sym zip archive"
+            );
+            return None;
+        }
+    };
+
+    let is_modular = target_release >= Release::JAVA_9;
+    let mut partial = ClasspathIndex::default();
+    let mut exported_by_module: FxHashMap<SmolStr, FxHashSet<String>> = FxHashMap::default();
+    let mut known_modules: FxHashSet<SmolStr> = FxHashSet::default();
+    let mut buf = Vec::new();
+    let mut entry_name = String::new();
+
+    // Pass 1: discover JPMS modules and exported packages for target_release >= JAVA_9.
+    if is_modular {
+        for i in 0..archive.len() {
+            let mut entry = match archive.by_index(i) {
+                Ok(e) => e,
+                Err(err) => {
+                    tracing::warn!(
+                        path = %ct_sym_path.display(),
+                        index = i,
+                        error = %err,
+                        "failed to read ct.sym entry"
+                    );
+                    continue;
+                }
+            };
+            if entry.is_dir() {
+                continue;
+            }
+            let name_cow = match entry.name() {
+                Ok(n) => n,
+                Err(err) => {
+                    tracing::warn!(
+                        path = %ct_sym_path.display(),
+                        index = i,
+                        error = %err,
+                        "invalid entry name in ct.sym"
+                    );
+                    continue;
+                }
+            };
+            let raw_name = name_cow.strip_prefix('/').unwrap_or(&name_cow);
+            let Some((ver_set, rest)) = raw_name.split_once('/') else {
+                continue;
+            };
+            if ver_set == "META-INF" || ver_set.contains('-') || !ver_set.contains(ver_char) {
+                continue;
+            }
+            let Some(mod_dir) = rest.strip_suffix("/module-info.sig") else {
+                continue;
+            };
+            if mod_dir.is_empty() || mod_dir.contains('/') {
+                continue;
+            }
+
+            entry_name.clear();
+            entry_name.push_str(raw_name);
+            let mod_dir_owned = SmolStr::new(mod_dir);
+            drop(name_cow);
+            buf.clear();
+            if let Err(err) = entry.read_to_end(&mut buf) {
+                tracing::warn!(
+                    path = %ct_sym_path.display(),
+                    entry = %entry_name,
+                    error = %err,
+                    "failed to read module-info.sig in ct.sym"
+                );
+                continue;
+            }
+            drop(entry);
+
+            match parse_class_bytes(&buf, BinaryOrigin::Jdk { module_name: None }) {
+                Ok(Some(ParsedClassfile::Module(info))) => {
+                    known_modules.insert(mod_dir_owned);
+                    known_modules.insert(info.name.clone());
+                    let exported: FxHashSet<String> = info.exports.iter().cloned().collect();
+                    exported_by_module.insert(info.name.clone(), exported);
+                    partial.insert_module(info);
+                }
+                Ok(_) => {
+                    tracing::warn!(
+                        path = %ct_sym_path.display(),
+                        entry = %entry_name,
+                        "unexpected non-module entry in ct.sym"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        path = %ct_sym_path.display(),
+                        entry = %entry_name,
+                        error = %err,
+                        "failed to parse module-info.sig in ct.sym"
+                    );
+                }
+            }
+        }
+    }
+
+    // Pass 2: collect matching `.sig` class payloads and parse in parallel.
+    let mut tasks: Vec<ClassParseTask> = Vec::new();
+    for i in 0..archive.len() {
+        let mut entry = match archive.by_index(i) {
+            Ok(e) => e,
+            Err(err) => {
+                tracing::warn!(
+                    path = %ct_sym_path.display(),
+                    index = i,
+                    error = %err,
+                    "failed to read ct.sym entry"
+                );
+                continue;
+            }
+        };
+        if entry.is_dir() {
+            continue;
+        }
+        let name_cow = match entry.name() {
+            Ok(n) => n,
+            Err(err) => {
+                tracing::warn!(
+                    path = %ct_sym_path.display(),
+                    index = i,
+                    error = %err,
+                    "invalid entry name in ct.sym"
+                );
+                continue;
+            }
+        };
+        let raw_name = name_cow.strip_prefix('/').unwrap_or(&name_cow);
+        let Some((ver_set, rest)) = raw_name.split_once('/') else {
+            continue;
+        };
+        if ver_set == "META-INF" || ver_set.contains('-') || !ver_set.contains(ver_char) {
+            continue;
+        }
+        let Some(rest_no_ext) = rest.strip_suffix(".sig") else {
+            continue;
+        };
+
+        let (mod_dir_opt, rel_no_ext) = match rest_no_ext.split_once('/') {
+            Some((first, tail)) if known_modules.contains(first) || first.contains('.') => {
+                (Some(first), tail)
+            }
+            _ => (None, rest_no_ext),
+        };
+
+        if rel_no_ext == "module-info"
+            || rel_no_ext == "package-info"
+            || rel_no_ext.ends_with("/package-info")
+        {
+            continue;
+        }
+        let class_base = rel_no_ext.rsplit('/').next().unwrap_or(rel_no_ext);
+        if is_anonymous_or_local_class_base(class_base) {
+            continue;
+        }
+
+        let package = rel_no_ext
+            .rsplit_once('/')
+            .map_or_else(String::new, |(pkg, _)| pkg.replace('/', "."));
+
+        if is_modular {
+            if let Some(exported) = mod_dir_opt.and_then(|m| exported_by_module.get(m)) {
+                if is_jdk_internal_package(&package) || !exported.contains(&package) {
+                    continue;
+                }
+            } else if is_jdk8_internal_package(&package) {
+                continue;
+            }
+        } else if is_jdk8_internal_package(&package) {
+            continue;
+        }
+
+        let module_name = if is_modular {
+            mod_dir_opt.map(SmolStr::new)
+        } else {
+            None
+        };
+        entry_name.clear();
+        entry_name.push_str(raw_name);
+        drop(name_cow);
+
+        let mut bytes = Vec::new();
+        if let Err(err) = entry.read_to_end(&mut bytes) {
+            tracing::warn!(
+                path = %ct_sym_path.display(),
+                entry = %entry_name,
+                error = %err,
+                "failed to read classfile bytes in ct.sym"
+            );
+            continue;
+        }
+        drop(entry);
+
+        tasks.push(ClassParseTask {
+            module_name,
+            entry_name: entry_name.clone(),
+            bytes,
+        });
+    }
+
+    parse_jdk_class_tasks_parallel(&mut partial, ct_sym_path, "ct.sym", &tasks);
+    Some(partial)
 }
 
 fn load_jimage_modules(index: &mut ClasspathIndex, modules_path: &Path) {
@@ -238,7 +549,7 @@ fn load_jimage_modules(index: &mut ClasspathIndex, modules_path: &Path) {
     }
 
     // Pass 2: collect exported `.class` payloads, then parse in parallel and merge deterministically.
-    let mut tasks: Vec<JimageClassTask> = Vec::new();
+    let mut tasks: Vec<ClassParseTask> = Vec::new();
     for (idx, entry) in image.entries().enumerate() {
         let resource = match entry {
             Ok(resource) => resource,
@@ -292,69 +603,14 @@ fn load_jimage_modules(index: &mut ClasspathIndex, modules_path: &Path) {
             }
         };
 
-        tasks.push(JimageClassTask {
-            module_name: module_key.clone(),
+        tasks.push(ClassParseTask {
+            module_name: Some(module_key.clone()),
             entry_name: full_name,
             bytes: bytes.to_vec(),
         });
     }
 
-    if tasks.is_empty() {
-        return;
-    }
-
-    let worker_count = thread::available_parallelism()
-        .map_or(4, NonZeroUsize::get)
-        .min(tasks.len())
-        .max(1);
-    let chunk_size = tasks.len().div_ceil(worker_count).max(1);
-
-    let mut partials: Vec<ClasspathIndex> = thread::scope(|scope| {
-        let mut handles = Vec::with_capacity(worker_count);
-        for chunk in tasks.chunks(chunk_size) {
-            handles.push(scope.spawn(move || {
-                let mut local = ClasspathIndex::default();
-                for task in chunk {
-                    match parse_class_bytes(
-                        &task.bytes,
-                        BinaryOrigin::Jdk {
-                            module_name: Some(task.module_name.clone()),
-                        },
-                    ) {
-                        Ok(Some(ParsedClassfile::Type(ty))) => local.insert_type(ty),
-                        Ok(Some(ParsedClassfile::Module(_)) | None) => {}
-                        Err(err) => {
-                            tracing::warn!(
-                                path = %modules_path.display(),
-                                entry = %task.entry_name,
-                                error = %err,
-                                "failed to parse classfile in jimage"
-                            );
-                        }
-                    }
-                }
-                local
-            }));
-        }
-
-        let mut collected = Vec::with_capacity(handles.len());
-        for handle in handles {
-            match handle.join() {
-                Ok(partial) => collected.push(partial),
-                Err(_) => {
-                    tracing::warn!(
-                        path = %modules_path.display(),
-                        "worker thread panicked while indexing jimage"
-                    );
-                }
-            }
-        }
-        collected
-    });
-
-    for partial in partials.drain(..) {
-        index.merge(partial);
-    }
+    parse_jdk_class_tasks_parallel(index, modules_path, "jimage", &tasks);
 }
 
 fn is_anonymous_or_local_class_base(base: &str) -> bool {
@@ -2271,6 +2527,181 @@ mod tests {
         let (index, _) = load_classpath(&probe);
         assert_eq!(index.type_count(), 0);
         assert_eq!(index.module_count(), 0);
+    }
+
+    #[test]
+    fn ct_sym_version_char_encodes_base36_uppercase() {
+        assert_eq!(ct_sym_version_char(Release::JAVA_8), Some('8'));
+        assert_eq!(ct_sym_version_char(Release::JAVA_9), Some('9'));
+        assert_eq!(ct_sym_version_char(Release::JAVA_10), Some('A'));
+        assert_eq!(ct_sym_version_char(Release::JAVA_17), Some('H'));
+        assert_eq!(ct_sym_version_char(Release::JAVA_21), Some('L'));
+        assert_eq!(ct_sym_version_char(Release::JAVA_26), Some('Q'));
+        assert_eq!(ct_sym_version_char(Release::JAVA_27), Some('R'));
+    }
+
+    #[test]
+    fn load_classpath_uses_ct_sym_for_historical_release_and_falls_back_when_absent() {
+        let dir = TestDir::new();
+        let jdk_home = dir.path().join("jdk-21");
+        fs::create_dir_all(&jdk_home).unwrap();
+        fs::write(jdk_home.join("release"), "JAVA_VERSION=\"21.0.2\"\n").unwrap();
+
+        // Fallback JDK 21 jimage contains `FutureOnly` (not in ct.sym for 8/11/17).
+        let jimage_mod = build_module_info_bytes("java.base", &["java/lang"], &[]);
+        let jimage_future = build_simple_class_bytes(
+            65,
+            0x0001,
+            "java/lang/FutureOnly",
+            "java/lang/Object",
+            &[],
+            &[],
+        );
+        write_jimage_file(
+            &jdk_home.join("lib/modules"),
+            &[
+                ("java.base", "", "module-info", "class", &jimage_mod),
+                ("java.base", "java/lang", "FutureOnly", "class", &jimage_future),
+            ],
+        );
+
+        let str_v8 = build_simple_class_bytes(
+            52,
+            0x0001,
+            "java/lang/FakeString",
+            "java/lang/Object",
+            &[("length", "()I", 0x0001)],
+            &[],
+        );
+        let str_v11 = build_simple_class_bytes(
+            55,
+            0x0001,
+            "java/lang/FakeString",
+            "java/lang/Object",
+            &[("length", "()I", 0x0001), ("isBlank", "()Z", 0x0001)],
+            &[],
+        );
+        let obj_shared = build_simple_class_bytes(
+            52,
+            0x0001,
+            "java/lang/FakeObject",
+            "java/lang/Object",
+            &[],
+            &[],
+        );
+        let sun_cls = build_simple_class_bytes(
+            55,
+            0x0001,
+            "sun/nio/Hidden",
+            "java/lang/Object",
+            &[],
+            &[],
+        );
+        let mod_info_9b = build_module_info_bytes("java.base", &["java/lang"], &[]);
+
+        write_zip_file(
+            &jdk_home.join("lib/ct.sym"),
+            &[
+                ("89A/java.base/java/lang/FakeString.sig", &str_v8),
+                ("BC/java.base/java/lang/FakeString.sig", &str_v11),
+                ("89ABC/java.base/java/lang/FakeObject.sig", &obj_shared),
+                ("BC/java.base/sun/nio/Hidden.sig", &sun_cls),
+                ("9ABC/java.base/module-info.sig", &mod_info_9b),
+                ("B-modules/java.base/system-modules", b"ignored"),
+                ("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\n"),
+            ],
+        );
+
+        // Target Java 8 -> matches 89A + 89ABC, module_name = None, no isBlank.
+        let probe_8 = probe_with_deps(&dir, Some(jdk_home.clone()), Release::JAVA_8, vec![]);
+        let (idx_8, _) = load_classpath(&probe_8);
+        let s8 = idx_8
+            .type_by_fqn("java.lang.FakeString")
+            .expect("FakeString at Java 8");
+        assert_eq!(s8.origin, BinaryOrigin::Jdk { module_name: None });
+        assert!(s8.members.iter().any(|m| m.name == "length"));
+        assert!(!s8.members.iter().any(|m| m.name == "isBlank"));
+        assert!(idx_8.type_by_fqn("java.lang.FakeObject").is_some());
+        assert!(idx_8.type_by_fqn("java.lang.FutureOnly").is_none());
+        assert_eq!(idx_8.module_count(), 0);
+
+        // Target Java 11 ('B') -> matches BC + 89ABC + 9ABC module-info, has isBlank & java.base.
+        let probe_11 = probe_with_deps(&dir, Some(jdk_home.clone()), Release::JAVA_11, vec![]);
+        let (idx_11, _) = load_classpath(&probe_11);
+        let s11 = idx_11
+            .type_by_fqn("java.lang.FakeString")
+            .expect("FakeString at Java 11");
+        assert_eq!(
+            s11.origin,
+            BinaryOrigin::Jdk {
+                module_name: Some(SmolStr::new("java.base"))
+            }
+        );
+        assert!(s11.members.iter().any(|m| m.name == "isBlank"));
+        assert!(idx_11.type_by_fqn("sun.nio.Hidden").is_none());
+        assert!(idx_11.type_by_fqn("java.lang.FutureOnly").is_none());
+        let base_11 = idx_11.modules.get("java.base").expect("java.base module");
+        assert!(base_11.exports.iter().any(|p| p == "java.lang"));
+
+        // Target Java 17 ('H') is absent from synthetic ct.sym -> falls back to lib/modules.
+        let probe_17 = probe_with_deps(&dir, Some(jdk_home), Release::JAVA_17, vec![]);
+        let (idx_17, _) = load_classpath(&probe_17);
+        assert!(idx_17.type_by_fqn("java.lang.FutureOnly").is_some());
+        assert!(idx_17.type_by_fqn("java.lang.FakeString").is_none());
+    }
+
+    #[test]
+    fn real_local_jdk_ct_sym_smoke_test_if_installed() {
+        let jdks = discover_jdks(None);
+        let Some(jdk) = jdks.into_iter().find(|j| {
+            j.home.join("lib/ct.sym").is_file()
+                && probe_jdk_release(&j.home).is_some_and(|r| r >= Release::JAVA_18)
+        }) else {
+            return;
+        };
+
+        let dir = TestDir::new();
+        let probe_8 = probe_with_deps(&dir, Some(jdk.home.clone()), Release::JAVA_8, vec![]);
+        let (idx_8, _) = load_classpath(&probe_8);
+        eprintln!(
+            "real_local_jdk_ct_sym_smoke_test ({}, JAVA_8): types={}, modules={}",
+            jdk.home.display(),
+            idx_8.type_count(),
+            idx_8.module_count()
+        );
+        let str_8 = idx_8
+            .type_by_fqn("java.lang.String")
+            .expect("expected java.lang.String in ct.sym at JAVA_8");
+        assert!(str_8.members.iter().any(|m| m.name == "length"));
+        assert!(
+            !str_8.members.iter().any(|m| m.name == "isBlank"),
+            "java.lang.String#isBlank should not exist at JAVA_8"
+        );
+        assert!(
+            idx_8.type_by_fqn("java.lang.Record").is_none(),
+            "java.lang.Record should not exist at JAVA_8"
+        );
+
+        let probe_17 = probe_with_deps(&dir, Some(jdk.home.clone()), Release::JAVA_17, vec![]);
+        let (idx_17, _) = load_classpath(&probe_17);
+        eprintln!(
+            "real_local_jdk_ct_sym_smoke_test ({}, JAVA_17): types={}, modules={}",
+            jdk.home.display(),
+            idx_17.type_count(),
+            idx_17.module_count()
+        );
+        let str_17 = idx_17
+            .type_by_fqn("java.lang.String")
+            .expect("expected java.lang.String in ct.sym at JAVA_17");
+        assert!(
+            str_17.members.iter().any(|m| m.name == "isBlank"),
+            "expected java.lang.String#isBlank in ct.sym at JAVA_17"
+        );
+        assert!(
+            idx_17.type_by_fqn("java.lang.Record").is_some(),
+            "expected java.lang.Record in ct.sym at JAVA_17"
+        );
+        assert!(idx_17.modules.contains_key("java.base"));
     }
 
     #[test]

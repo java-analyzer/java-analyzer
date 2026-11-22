@@ -258,10 +258,11 @@ Workspace source symbols always take precedence over binary classpath symbols (m
 
 ### `crates/java-analyzer`
 1. **JDK & JAR Loader (`crates/java-analyzer/src/classpath_loader.rs`)**:
-   - **JDK 9–27 (`jmods/*.jmod` or `lib/modules` `jimage`)**:
-     - If `$JAVA_HOME/jmods/` exists, scan `*.jmod` in parallel via `std::thread::scope` (strip the 4-byte `JM\x01\x00` header, open as ZIP via `Cursor<&[u8]>`).
+   - **JDK 9–27 (`lib/ct.sym`, `jmods/*.jmod`, or `lib/modules` `jimage`)**:
+     - **Cross-version `--release` accuracy (`$JAVA_HOME/lib/ct.sym`):** When the workspace targets an older Java release (`probe.resolved_level.release < installed_jdk_release`) and `$JAVA_HOME/lib/ct.sym` contains entries for that target release's base-36 version code (`8`→`'8'`, `9`→`'9'`, `10`→`'A'`, …, `26`→`'Q'`), index the historical `.sig` classfiles directly from `lib/ct.sym` so symbols match the exact target Java SE API surface without requiring an older JDK installation.
+     - Otherwise, if `$JAVA_HOME/jmods/` exists, scan `*.jmod` in parallel via `std::thread::scope` (strip the 4-byte `JM\x01\x00` header, open as ZIP via `Cursor<&[u8]>`).
      - Otherwise, if `$JAVA_HOME/lib/modules` exists (including JEP 493 linkable runtimes without `jmods/`), open it via the pure-Rust `jimage` reader (supporting jimage v1.0 and v1.1).
-     - In both cases, parse `module-info.class` first to obtain each module's exported packages, then index public `.class` entries in exported packages (skipping `jdk.internal.*` and non-exported internal packages). Log any corrupt/unreadable archive or classfile via structured `tracing::warn!`.
+     - In all cases, parse `module-info.{class,sig}` first to obtain each module's exported packages, then index public `.class`/`.sig` entries in exported packages (skipping `jdk.internal.*` and non-exported internal packages). Log any corrupt/unreadable archive or classfile via structured `tracing::warn!`.
    - **JDK 8**: Open `$JAVA_HOME/jre/lib/rt.jar` (or `$JAVA_HOME/lib/rt.jar`), indexing public `.class` entries outside `sun.*` / `com.sun.*`.
    - **Workspace local JARs & class directories**: For every `ModuleDependency::Path { path, .. }` across `probe.layout.modules`:
      - If `.jar`: read `META-INF/MANIFEST.MF` via `ide::parse_manifest_multi_release`, apply `ide::select_mrjar_entries` at `probe.resolved_level.release`, and parse `.class` entries via `ide::parse_class_bytes`.
