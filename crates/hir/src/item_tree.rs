@@ -236,27 +236,7 @@ pub(crate) fn file_symbols_from_item_tree(tree: &FileItemTree, map: &AstIdMap) -
     let types = tree
         .types
         .iter()
-        .map(|(_, ty)| {
-            let range = map.range(ty.ast_id);
-            let members = ty
-                .members
-                .iter()
-                .map(|&id| member_symbol_from_item(&tree.members[id], map))
-                .collect();
-            TypeSymbol {
-                file_id: ty.file_id,
-                name: ty.name.clone(),
-                qualified_name: ty.qualified_name.clone(),
-                enclosing_type: ty.enclosing_type.clone(),
-                kind: ty.kind,
-                is_static: ty.is_static,
-                type_params: ty.type_params.clone(),
-                members,
-                nested_types: ty.nested_types.clone(),
-                full_range: range.full_range,
-                selection_range: range.selection_range,
-            }
-        })
+        .map(|(_, ty)| type_symbol_from_item(ty, &tree.members, map))
         .collect();
 
     let top_level_members = tree
@@ -271,6 +251,87 @@ pub(crate) fn file_symbols_from_item_tree(tree: &FileItemTree, map: &AstIdMap) -
         imports,
         types,
         top_level_members,
+    }
+}
+
+pub(crate) fn extract_local_type_symbol(file_id: FileId, node: &SyntaxNode) -> Option<TypeSymbol> {
+    let mut types = Arena::new();
+    let mut members = Arena::new();
+    let mut map = AstIdMap::default();
+    lower_type_decl(
+        file_id,
+        node,
+        None,
+        None,
+        None,
+        &mut types,
+        &mut members,
+        &mut map,
+    )?;
+    let (_, root_ty) = types.iter().next()?;
+    Some(type_symbol_from_item(root_ty, &members, &map))
+}
+
+pub(crate) fn extract_field_decl(
+    file_id: FileId,
+    node: &SyntaxNode,
+    owner_fqn: Option<&str>,
+    owner_kind: Option<TypeKind>,
+    out: &mut Vec<MemberSymbol>,
+) {
+    let mut members = Arena::new();
+    let mut map = AstIdMap::default();
+    let mut ids = Vec::new();
+    lower_field_decl(
+        file_id,
+        node,
+        owner_fqn,
+        owner_kind,
+        &mut members,
+        &mut map,
+        &mut ids,
+    );
+    out.extend(
+        ids.into_iter()
+            .map(|id| member_symbol_from_item(&members[id], &map)),
+    );
+}
+
+pub(crate) fn extract_method_or_ctor(
+    file_id: FileId,
+    node: &SyntaxNode,
+    owner_fqn: Option<&str>,
+    kind: MemberKind,
+) -> Option<MemberSymbol> {
+    let mut members = Arena::new();
+    let mut map = AstIdMap::default();
+    let id = lower_method_or_ctor(file_id, node, owner_fqn, kind, &mut members, &mut map)?;
+    Some(member_symbol_from_item(&members[id], &map))
+}
+
+fn type_symbol_from_item(
+    ty: &TypeItem,
+    members: &Arena<MemberItem>,
+    map: &AstIdMap,
+) -> TypeSymbol {
+    let range = map.range(ty.ast_id);
+    let ty_members = ty
+        .members
+        .iter()
+        .map(|&id| member_symbol_from_item(&members[id], map))
+        .collect();
+    TypeSymbol {
+        file_id: ty.file_id,
+        name: ty.name.clone(),
+        qualified_name: ty.qualified_name.clone(),
+        enclosing_type: ty.enclosing_type.clone(),
+        kind: ty.kind,
+        is_static: ty.is_static,
+        type_params: ty.type_params.clone(),
+        members: ty_members,
+        nested_types: ty.nested_types.clone(),
+        full_range: range.full_range,
+        selection_range: range.selection_range,
     }
 }
 

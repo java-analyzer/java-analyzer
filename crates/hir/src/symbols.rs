@@ -5,10 +5,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use smol_str::SmolStr;
 use syntax::{
-    ext::{
-        has_direct_token, has_modifier, name_child, path_segments, type_child,
-        type_text_with_dims,
-    },
+    ext::{has_direct_token, name_child, path_segments, type_child, type_text_with_dims},
     syntax_kind::SyntaxKind::{self, *},
     SyntaxNode, TextRange,
 };
@@ -348,13 +345,9 @@ pub(crate) fn merge_module_indexes(modules: &[Arc<ModuleIndex>]) -> WorkspaceInd
     index
 }
 
-/// Extracts a standalone [`TypeSymbol`] from a single type declaration node (used for local types
-/// inside method/block bodies).
-pub(crate) fn extract_local_type_symbol(file_id: FileId, node: &SyntaxNode) -> Option<TypeSymbol> {
-    let mut out = Vec::new();
-    extract_type_decl(file_id, node, None, None, None, &mut out);
-    out.into_iter().next()
-}
+pub(crate) use crate::item_tree::{
+    extract_field_decl, extract_local_type_symbol, extract_method_or_ctor,
+};
 
 pub(crate) fn extract_import_parts(node: &SyntaxNode) -> (ImportKind, Vec<String>) {
     let mut has_static = false;
@@ -391,214 +384,6 @@ pub(crate) fn extract_import_parts(node: &SyntaxNode) -> (ImportKind, Vec<String
     };
 
     (kind, path)
-}
-
-fn extract_type_decl(
-    file_id: FileId,
-    node: &SyntaxNode,
-    package: Option<&str>,
-    enclosing_fqn: Option<&str>,
-    enclosing_kind: Option<TypeKind>,
-    out: &mut Vec<TypeSymbol>,
-) -> Option<SmolStr> {
-    let kind = TypeKind::from_syntax(node.kind())?;
-    let name_node = name_child(node)?;
-    let name = node_ident_text(&name_node);
-
-    let qualified_name = match enclosing_fqn {
-        Some(parent) => format!("{parent}.{name}"),
-        None => match package {
-            Some(pkg) => format!("{pkg}.{name}"),
-            None => name.to_string(),
-        },
-    };
-
-    let is_static = has_modifier(node, STATIC_KW)
-        || (enclosing_fqn.is_some()
-            && (matches!(
-                kind,
-                TypeKind::Interface | TypeKind::Enum | TypeKind::Record | TypeKind::Annotation
-            ) || matches!(
-                enclosing_kind,
-                Some(TypeKind::Interface | TypeKind::Annotation)
-            )));
-
-    let type_params = extract_type_param_names(node);
-    let mut members = Vec::new();
-    let mut nested_types = Vec::new();
-    let mut nested_symbols = Vec::new();
-
-    for part in node.children() {
-        match part.kind() {
-            RECORD_COMPONENT_LIST => {
-                for comp in part.children().filter(|n| n.kind() == RECORD_COMPONENT) {
-                    if let Some(comp_name) = name_child(&comp) {
-                        let type_ref = type_child(&comp).map(|t| type_text_with_dims(&t, &comp));
-                        members.push(MemberSymbol {
-                            file_id,
-                            owner_type: Some(qualified_name.clone()),
-                            name: node_ident_text(&comp_name),
-                            kind: MemberKind::RecordComponent,
-                            is_static: false,
-                            type_ref,
-                            params: Vec::new(),
-                            full_range: comp.text_range(),
-                            selection_range: comp_name.text_range(),
-                        });
-                    }
-                }
-            }
-            CLASS_BODY | ENUM_BODY => {
-                for member_node in part.children() {
-                    match member_node.kind() {
-                        ENUM_CONSTANT => {
-                            if let Some(const_name) = name_child(&member_node) {
-                                members.push(MemberSymbol {
-                                    file_id,
-                                    owner_type: Some(qualified_name.clone()),
-                                    name: node_ident_text(&const_name),
-                                    kind: MemberKind::EnumConstant,
-                                    is_static: true,
-                                    type_ref: None,
-                                    params: Vec::new(),
-                                    full_range: member_node.text_range(),
-                                    selection_range: const_name.text_range(),
-                                });
-                            }
-                        }
-                        FIELD_DECL => {
-                            extract_field_decl(
-                                file_id,
-                                &member_node,
-                                Some(&qualified_name),
-                                Some(kind),
-                                &mut members,
-                            );
-                        }
-                        METHOD_DECL => {
-                            if let Some(m) = extract_method_or_ctor(
-                                file_id,
-                                &member_node,
-                                Some(&qualified_name),
-                                MemberKind::Method,
-                            ) {
-                                members.push(m);
-                            }
-                        }
-                        CONSTRUCTOR_DECL => {
-                            if let Some(c) = extract_method_or_ctor(
-                                file_id,
-                                &member_node,
-                                Some(&qualified_name),
-                                MemberKind::Constructor,
-                            ) {
-                                members.push(c);
-                            }
-                        }
-                        k if TypeKind::from_syntax(k).is_some() => {
-                            if let Some(nested_name) = extract_type_decl(
-                                file_id,
-                                &member_node,
-                                package,
-                                Some(&qualified_name),
-                                Some(kind),
-                                &mut nested_symbols,
-                            ) {
-                                nested_types.push(nested_name);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    out.push(TypeSymbol {
-        file_id,
-        name: name.clone(),
-        qualified_name,
-        enclosing_type: enclosing_fqn.map(str::to_string),
-        kind,
-        is_static,
-        type_params,
-        members,
-        nested_types,
-        full_range: node.text_range(),
-        selection_range: name_node.text_range(),
-    });
-    out.extend(nested_symbols);
-
-    Some(name)
-}
-
-pub(crate) fn extract_field_decl(
-    file_id: FileId,
-    node: &SyntaxNode,
-    owner_fqn: Option<&str>,
-    owner_kind: Option<TypeKind>,
-    out: &mut Vec<MemberSymbol>,
-) {
-    let base_type = type_child(node);
-    let is_static = has_modifier(node, STATIC_KW)
-        || matches!(
-            owner_kind,
-            Some(TypeKind::Interface | TypeKind::Annotation)
-        );
-
-    for declarator in node.children().filter(|n| n.kind() == VARIABLE_DECLARATOR) {
-        let Some(name_node) = name_child(&declarator) else {
-            continue;
-        };
-        let type_ref = base_type
-            .as_ref()
-            .map(|t| type_text_with_dims(t, &declarator));
-        out.push(MemberSymbol {
-            file_id,
-            owner_type: owner_fqn.map(str::to_string),
-            name: node_ident_text(&name_node),
-            kind: MemberKind::Field,
-            is_static,
-            type_ref,
-            params: Vec::new(),
-            full_range: declarator.text_range(),
-            selection_range: name_node.text_range(),
-        });
-    }
-}
-
-pub(crate) fn extract_method_or_ctor(
-    file_id: FileId,
-    node: &SyntaxNode,
-    owner_fqn: Option<&str>,
-    kind: MemberKind,
-) -> Option<MemberSymbol> {
-    let name_node = name_child(node)?;
-    let is_static = kind == MemberKind::Method && has_modifier(node, STATIC_KW);
-    let type_ref = if kind == MemberKind::Method {
-        type_child(node).map(|t| type_text_with_dims(&t, node))
-    } else {
-        None
-    };
-
-    let params = node
-        .children()
-        .find(|n| n.kind() == PARAM_LIST)
-        .map(|pl| extract_params(&pl))
-        .unwrap_or_default();
-
-    Some(MemberSymbol {
-        file_id,
-        owner_type: owner_fqn.map(str::to_string),
-        name: node_ident_text(&name_node),
-        kind,
-        is_static,
-        type_ref,
-        params,
-        full_range: node.text_range(),
-        selection_range: name_node.text_range(),
-    })
 }
 
 pub(crate) fn extract_params(param_list: &SyntaxNode) -> Vec<ParamSummary> {

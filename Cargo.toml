@@ -18,7 +18,6 @@ description = "A Java Language Server Protocol implementation in Rust"
 # External crates
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-expect-test = "1"
 ignore = "0.4"
 la-arena = "0.3"
 line-index = "0.1"
