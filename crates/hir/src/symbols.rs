@@ -14,7 +14,7 @@ use syntax::{
 };
 
 use crate::{
-    item_tree::{file_symbols_from_item_tree, lower_file_item_tree, FileItemTree, TypeId},
+    item_tree::{FileItemTree, TypeId},
     FileId,
 };
 
@@ -284,15 +284,8 @@ fn has_package_prefix_in(types_by_package: &BTreeMap<String, Vec<String>>, prefi
         .is_some_and(|(pkg, _)| pkg.starts_with(&prefix_dot))
 }
 
-/// Extracts all package, import, type, and member declarations from `root`, without descending into
-/// method, constructor, or initializer bodies.
-pub fn extract_file_symbols(file_id: FileId, root: &SyntaxNode) -> FileSymbols {
-    let (tree, map) = lower_file_item_tree(file_id, root);
-    file_symbols_from_item_tree(&tree, &map)
-}
-
 /// Builds a deterministic, position-independent [`ModuleIndex`] across a module's [`FileItemTree`]s.
-pub fn build_module_index(files: &[Arc<FileItemTree>]) -> ModuleIndex {
+pub(crate) fn build_module_index(files: &[Arc<FileItemTree>]) -> ModuleIndex {
     let mut index = ModuleIndex::default();
 
     for file in files {
@@ -325,7 +318,7 @@ pub fn build_module_index(files: &[Arc<FileItemTree>]) -> ModuleIndex {
 }
 
 /// Merges per-module [`ModuleIndex`]es into a deterministic [`WorkspaceIndex`].
-pub fn merge_module_indexes(modules: &[Arc<ModuleIndex>]) -> WorkspaceIndex {
+pub(crate) fn merge_module_indexes(modules: &[Arc<ModuleIndex>]) -> WorkspaceIndex {
     let mut index = WorkspaceIndex::default();
 
     for module in modules {
@@ -353,12 +346,6 @@ pub fn merge_module_indexes(modules: &[Arc<ModuleIndex>]) -> WorkspaceIndex {
     }
 
     index
-}
-
-/// Builds a deterministic [`WorkspaceIndex`] across all provided [`FileItemTree`]s.
-pub fn build_workspace_index(files: &[Arc<FileItemTree>]) -> WorkspaceIndex {
-    let module_idx = Arc::new(build_module_index(files));
-    merge_module_indexes(&[module_idx])
 }
 
 /// Extracts a standalone [`TypeSymbol`] from a single type declaration node (used for local types

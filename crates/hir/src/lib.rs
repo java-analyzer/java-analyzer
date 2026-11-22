@@ -1,6 +1,6 @@
-pub mod item_tree;
+pub(crate) mod item_tree;
 pub mod resolve;
-pub mod symbols;
+pub(crate) mod symbols;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_fixture;
 pub mod workspace;
@@ -17,7 +17,6 @@ pub use item_tree::{
 pub use resolve::{resolve_at_offset, LocalKind, ResolvedSymbol, ResolvedSymbolKind, SymbolDetail};
 pub use smol_str::SmolStr;
 pub use symbols::{
-    build_module_index, build_workspace_index, extract_file_symbols, merge_module_indexes,
     FileSymbols, ImportDecl, ImportKind, MemberKind, MemberSymbol, ModuleIndex, ParamSummary,
     TypeKind, TypeSymbol, WorkspaceIndex,
 };
@@ -64,15 +63,10 @@ fn file_syntax_errors(db: &dyn salsa::Database, file: SourceFile) -> Arc<Vec<Syn
 }
 
 #[salsa::tracked]
-fn file_item_tree_data(db: &dyn salsa::Database, file: SourceFile) -> FileItemTree {
+fn file_item_tree(db: &dyn salsa::Database, file: SourceFile) -> Arc<FileItemTree> {
     let root = parse_file(db, file).syntax_node();
     let (tree, _map) = item_tree::lower_file_item_tree(*file.file_id(db), &root);
-    tree
-}
-
-#[salsa::tracked]
-fn file_item_tree(db: &dyn salsa::Database, file: SourceFile) -> Arc<FileItemTree> {
-    Arc::new(file_item_tree_data(db, file).clone())
+    Arc::new(tree)
 }
 
 #[salsa::tracked]
@@ -90,29 +84,11 @@ fn extract_symbols(db: &dyn salsa::Database, file: SourceFile) -> Arc<FileSymbol
 }
 
 #[salsa::tracked]
-fn build_module_index_data(db: &dyn salsa::Database, module: ModuleFiles) -> ModuleIndex {
+fn build_module_index_query(db: &dyn salsa::Database, module: ModuleFiles) -> Arc<ModuleIndex> {
     let files = module.files(db);
     let per_file: Vec<Arc<FileItemTree>> =
         files.iter().map(|&f| file_item_tree(db, f).clone()).collect();
-    symbols::build_module_index(&per_file)
-}
-
-#[salsa::tracked]
-fn build_module_index_query(db: &dyn salsa::Database, module: ModuleFiles) -> Arc<ModuleIndex> {
-    Arc::new(build_module_index_data(db, module).clone())
-}
-
-#[salsa::tracked]
-fn build_workspace_index_data(
-    db: &dyn salsa::Database,
-    workspace: WorkspaceModules,
-) -> WorkspaceIndex {
-    let modules = workspace.modules(db);
-    let per_module: Vec<Arc<ModuleIndex>> = modules
-        .iter()
-        .map(|&m| build_module_index_query(db, m).clone())
-        .collect();
-    symbols::merge_module_indexes(&per_module)
+    Arc::new(symbols::build_module_index(&per_file))
 }
 
 #[salsa::tracked]
@@ -120,7 +96,12 @@ fn build_workspace_index_query(
     db: &dyn salsa::Database,
     workspace: WorkspaceModules,
 ) -> Arc<WorkspaceIndex> {
-    Arc::new(build_workspace_index_data(db, workspace).clone())
+    let modules = workspace.modules(db);
+    let per_module: Vec<Arc<ModuleIndex>> = modules
+        .iter()
+        .map(|&m| build_module_index_query(db, m).clone())
+        .collect();
+    Arc::new(symbols::merge_module_indexes(&per_module))
 }
 
 pub trait SourceDatabase: salsa::Database {
@@ -270,9 +251,24 @@ impl RootDatabase {
         }
     }
 
-    /// Removes `file_id` from the tracked file map. Does nothing if `file_id` is absent.
+    /// Removes `file_id` from the tracked file map and prunes it from any module file lists.
+    /// Does nothing if `file_id` is absent.
     pub fn remove_file(&mut self, file_id: FileId) {
-        self.files.remove(&file_id);
+        let Some(removed) = self.files.remove(&file_id) else {
+            return;
+        };
+        let module_inputs: Vec<ModuleFiles> = self.module_files.values().copied().collect();
+        for module in module_inputs {
+            let current = module.files(self);
+            if current.contains(&removed) {
+                let filtered: Vec<SourceFile> = current
+                    .iter()
+                    .copied()
+                    .filter(|&f| f != removed)
+                    .collect();
+                module.set_files(self).to(Arc::new(filtered));
+            }
+        }
     }
 }
 
@@ -1157,10 +1153,14 @@ class LocalDecls {
         db.set_file_text(f2, Arc::new("package p; class Two {}".to_string()));
         db.set_workspace_files(Arc::new(vec![f1, f2]));
 
-        db.set_workspace_files(Arc::new(vec![f1]));
+        // Removing a file directly without updating workspace_files first prunes it from modules
+        // so workspace_index never retains a dangling FileId.
         db.remove_file(f2);
         assert!(!db.files.contains_key(&f2));
         assert!(db.files.contains_key(&f1));
+        assert_eq!(db.workspace_files().as_slice(), &[f1]);
+        assert!(!db.workspace_index().contains_type("p.Two"));
+        assert!(db.workspace_index().contains_type("p.One"));
 
         // Removing an absent FileId does not panic.
         db.remove_file(f2);
@@ -1202,6 +1202,7 @@ class Caller {
 ";
         let (mut db, file_id) = db_with(initial);
         let tree_before = db.file_item_tree(file_id);
+        let mod_before = db.module_index(ModuleId(0));
         let idx_before = db.workspace_index();
 
         let expected_before_offset = initial.find("Second {\n").unwrap();
@@ -1214,11 +1215,16 @@ class Caller {
 
         db.set_file_text(file_id, Arc::new(edited.to_string()));
         let tree_after = db.file_item_tree(file_id);
+        let mod_after = db.module_index(ModuleId(0));
         let idx_after = db.workspace_index();
 
+        assert_eq!(
+            tree_before, tree_after,
+            "variable-length body edit must keep FileItemTree structurally identical"
+        );
         assert!(
-            Arc::ptr_eq(&tree_before, &tree_after),
-            "variable-length body edit must trigger Salsa early-cutoff for FileItemTree"
+            Arc::ptr_eq(&mod_before, &mod_after),
+            "variable-length body edit must trigger Salsa early-cutoff for ModuleIndex"
         );
         assert!(
             Arc::ptr_eq(&idx_before, &idx_after),

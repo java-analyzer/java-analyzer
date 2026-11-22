@@ -140,7 +140,7 @@ impl FileItemTree {
 
 /// Lowers `root` into a position-independent [`FileItemTree`] and its companion [`AstIdMap`]
 /// without descending into method, constructor, or initializer bodies.
-pub fn lower_file_item_tree(file_id: FileId, root: &SyntaxNode) -> (FileItemTree, AstIdMap) {
+pub(crate) fn lower_file_item_tree(file_id: FileId, root: &SyntaxNode) -> (FileItemTree, AstIdMap) {
     let mut package = None;
     let mut imports = Arena::new();
     let mut types = Arena::new();
@@ -222,7 +222,7 @@ pub fn lower_file_item_tree(file_id: FileId, root: &SyntaxNode) -> (FileItemTree
 }
 
 /// Materializes a legacy [`FileSymbols`] snapshot from a [`FileItemTree`] and [`AstIdMap`].
-pub fn file_symbols_from_item_tree(tree: &FileItemTree, map: &AstIdMap) -> FileSymbols {
+pub(crate) fn file_symbols_from_item_tree(tree: &FileItemTree, map: &AstIdMap) -> FileSymbols {
     let imports = tree
         .imports
         .iter()
