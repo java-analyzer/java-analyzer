@@ -1,0 +1,50 @@
+# Known / expected findings in the real-world workspace corpus (`mise run workspace-corpus`).
+# Matched entries are classified as "Known / Expected" in CONFORMANCE.md instead of "Unexpected".
+
+[[finding]]
+repo = "gson"
+kind = "parse_error"
+path_prefix = "gson/src/test/java/com/google/gson/functional/Java17RecordTest.java"
+reason = "Gson defaults to Java 8 and elevates testRelease to 17 via a JDK-activated Maven profile (deferred in docs/plans/0004-workspace-model-followups.md)."
+
+[[finding]]
+repo = "gson"
+kind = "parse_error"
+path_prefix = "test-graal-native-image/src/test/java/com/google/gson/native_test/Java17RecordReflectionTest.java"
+reason = "Gson defaults to Java 8 and elevates testRelease to 17 via a JDK-activated Maven profile (deferred in docs/plans/0004-workspace-model-followups.md)."
+
+[[finding]]
+repo = "ant"
+kind = "parse_error"
+path_prefix = "src/tests/antunit/taskdefs/javac-dir/bad-src/Bad.java"
+reason = "Intentional negative test fixture for Ant's javac task failure tests."
+
+[[finding]]
+repo = "error-prone"
+kind = "package_mismatch"
+path_prefix = "core/src/test/java/com/google/errorprone/refaster/testdata/"
+reason = "Refaster input/output test fixtures intentionally declare parent package `com.google.errorprone.refaster.testdata`."
+
+[[finding]]
+repo = "checkstyle"
+kind = "package_mismatch"
+path_prefix = "src/it/resources/com/openjdk/checkstyle/test/chapternaming/rulepackagenames/"
+reason = "Intentional bad-package-name test fixtures."
+
+[[finding]]
+repo = "checkstyle"
+kind = "package_mismatch"
+path_prefix = "src/xdocs-examples/resources/com/puppycrawl/tools/checkstyle/checks/coding/packagedeclaration/"
+reason = "Intentional documentation example fixtures with non-matching package declarations."
+
+[[finding]]
+repo = "junit-framework"
+kind = "package_mismatch"
+path_prefix = "platform-tooling-support-tests/projects/reflection-tests/src/test/java/ReflectionTestCase.java"
+reason = "Standalone reflection test fixture placed at the root of src/test/java/."
+
+[[finding]]
+repo = "jfx"
+kind = "package_mismatch"
+path_prefix = "modules/javafx.base/src/main/version-info/VersionInfo.java"
+reason = "Generated version-info template stored outside the standard package directory hierarchy."

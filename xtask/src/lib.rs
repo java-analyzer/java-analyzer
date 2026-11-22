@@ -4,3 +4,4 @@ pub mod cli;
 pub mod conformance;
 pub mod isolate;
 pub mod jtreg;
+pub mod report;

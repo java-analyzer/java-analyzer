@@ -499,3 +499,41 @@ reason = "Exceeds MAX_CHAIN limit"
     let failures = fs::read_to_string(out.join("failures/jdk/completeness.txt")).unwrap();
     assert_eq!(failures, "Unexpected.java\n");
 }
+
+#[test]
+fn plaintext_summary_table_is_aligned_with_totals_and_notes() {
+    let clean = scratch("table-clean");
+    write(&clean, "Clean.java", "class Clean {}");
+    let valid = scratch("table-valid");
+    write(&valid, "A.java", "class A {}");
+    write(&valid, "Known.java", "class Known {");
+    let empty = scratch("table-empty");
+
+    let mut cfg = config(vec![
+        source("commons-lang", &clean, Kind::Valid),
+        source("jdk-27-ga", &valid, Kind::Valid),
+        source("empty-src", &empty, Kind::Valid),
+    ]);
+    cfg.known_divergences = vec![KnownDivergence {
+        path: "Known.java".to_string(),
+        reason: "known limit".to_string(),
+    }];
+
+    let report = conformance::run(&cfg);
+    let table = conformance::format_summary_table(&report);
+
+    let skip_note = format!("skipped (no .java files under {})", empty.display());
+    let note_sep = "-".repeat(skip_note.len());
+    let expected = format!(
+        "\
+Source        Files  Conforming     Rate  Critical  Notes
+------------  -----  ----------  -------  --------  {note_sep}
+commons-lang      1           1  100.0%          0  clean
+jdk-27-ga         2           1  100.0%*         0  1 known divergence(s)
+empty-src         -           -       -          -  {skip_note}
+------------  -----  ----------  -------  --------  {note_sep}
+Total             3           2  100.0%*         0  1 known divergence(s)
+"
+    );
+    assert_eq!(table, expected);
+}

@@ -604,6 +604,149 @@ pub fn write_report(report: &Report, out_dir: &Path) -> io::Result<()> {
     write_failure_lists(report, out_dir)
 }
 
+/// Formats a column-aligned plaintext summary table for terminal output.
+pub fn format_summary_table(report: &Report) -> String {
+    if report.sources.is_empty() {
+        return String::new();
+    }
+
+    let headers = ["Source", "Files", "Conforming", "Rate", "Critical", "Notes"];
+    let mut rows: Vec<[String; 6]> = Vec::with_capacity(report.sources.len() + 1);
+
+    let mut total_files = 0usize;
+    let mut total_conforming = 0usize;
+    let mut total_critical = 0usize;
+    let mut total_gaps = 0usize;
+    let mut total_known = 0usize;
+
+    let any_known = report
+        .sources
+        .iter()
+        .any(|s| s.skipped.is_none() && s.known_divergences().next().is_some());
+
+    for s in &report.sources {
+        if let Some(reason) = &s.skipped {
+            rows.push([
+                s.id.clone(),
+                "-".to_string(),
+                "-".to_string(),
+                if any_known { "- ".to_string() } else { "-".to_string() },
+                "-".to_string(),
+                format!("skipped ({reason})"),
+            ]);
+            continue;
+        }
+        let files = s.results.len();
+        let conforming = s.conforming();
+        let critical = s.critical().count();
+        let gaps = s.gaps().count();
+        let known = s.known_divergences().count();
+
+        total_files += files;
+        total_conforming += conforming;
+        total_critical += critical;
+        total_gaps += gaps;
+        total_known += known;
+
+        let rate = format_rate(conforming, files, known, any_known);
+        let notes = format_notes(gaps, known, critical);
+        rows.push([
+            s.id.clone(),
+            files.to_string(),
+            conforming.to_string(),
+            rate,
+            critical.to_string(),
+            notes,
+        ]);
+    }
+
+    let total_row = (report.sources.len() > 1).then(|| {
+        [
+            "Total".to_string(),
+            total_files.to_string(),
+            total_conforming.to_string(),
+            format_rate(total_conforming, total_files, total_known, any_known),
+            total_critical.to_string(),
+            format_notes(total_gaps, total_known, total_critical),
+        ]
+    });
+
+    let mut widths = headers.map(str::len);
+    for row in rows.iter().chain(total_row.iter()) {
+        for (w, cell) in widths.iter_mut().zip(row.iter()) {
+            *w = (*w).max(cell.len());
+        }
+    }
+
+    let mut out = String::new();
+    write_table_row(&mut out, &headers, &widths);
+    let sep: [String; 6] = widths.map(|w| "-".repeat(w));
+    write_table_row(&mut out, &sep.each_ref().map(String::as_str), &widths);
+    for row in &rows {
+        write_table_row(&mut out, &row.each_ref().map(String::as_str), &widths);
+    }
+    if let Some(total) = &total_row {
+        write_table_row(&mut out, &sep.each_ref().map(String::as_str), &widths);
+        write_table_row(&mut out, &total.each_ref().map(String::as_str), &widths);
+    }
+    out
+}
+
+fn format_rate(conforming: usize, files: usize, known: usize, reserve_star: bool) -> String {
+    let effective = files.saturating_sub(known);
+    if effective == 0 {
+        return if reserve_star {
+            "- ".to_string()
+        } else {
+            "-".to_string()
+        };
+    }
+    let pct = (conforming as f64 / effective as f64) * 100.0;
+    if known > 0 {
+        format!("{pct:.1}%*")
+    } else if reserve_star {
+        format!("{pct:.1}% ")
+    } else {
+        format!("{pct:.1}%")
+    }
+}
+
+fn format_notes(gaps: usize, known: usize, critical: usize) -> String {
+    let mut parts = Vec::new();
+    if gaps > 0 {
+        parts.push(format!("{gaps} gap(s)"));
+    }
+    if known > 0 {
+        parts.push(format!("{known} known divergence(s)"));
+    }
+    if parts.is_empty() && critical == 0 {
+        "clean".to_string()
+    } else if parts.is_empty() {
+        format!("{critical} critical")
+    } else {
+        parts.join(", ")
+    }
+}
+
+fn write_table_row(out: &mut String, cols: &[&str; 6], widths: &[usize; 6]) {
+    use std::fmt::Write as _;
+    let _ = writeln!(
+        out,
+        "{:<w0$}  {:>w1$}  {:>w2$}  {:>w3$}  {:>w4$}  {}",
+        cols[0],
+        cols[1],
+        cols[2],
+        cols[3],
+        cols[4],
+        cols[5],
+        w0 = widths[0],
+        w1 = widths[1],
+        w2 = widths[2],
+        w3 = widths[3],
+        w4 = widths[4],
+    );
+}
+
 /// Used by the CLI to show how long a run took.
 pub fn timed<T>(f: impl FnOnce() -> T) -> (T, Duration) {
     let started = Instant::now();

@@ -32,12 +32,13 @@ fetch_tarball() {
     return 0
   fi
 
-  echo "downloading $id from $url"
-  xh --download --follow --check-status --output "$archive" "$url" Accept-Encoding:gzip
+  echo "[conformance] fetching $id..." >&2
+  xh --quiet --ignore-stdin --download --follow --check-status --output "$archive" GET "$url" Accept-Encoding:gzip
 
   local stage="$tmp_root/$id"
   mkdir -p "$stage"
   tar -xzf "$archive" -C "$stage"
+  rm -f "$archive"
 
   local top
   top="$(find "$stage" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
@@ -48,28 +49,41 @@ fetch_tarball() {
 
   rm -rf "$dest"
   mv "$top/$subdir" "$dest"
-  echo "unpacked: $id -> $dest"
+  echo "[conformance] ready: $id" >&2
 }
 
+pids=()
 fetch_tarball \
   "commons-lang" \
   "https://github.com/apache/commons-lang/archive/refs/tags/rel/commons-lang-3.17.0.tar.gz" \
-  "src/main/java"
+  "src/main/java" &
+pids+=($!)
 
 fetch_tarball \
   "jackson-core" \
   "https://github.com/FasterXML/jackson-core/archive/refs/tags/jackson-core-2.18.2.tar.gz" \
-  "src/main/java"
+  "src/main/java" &
+pids+=($!)
 
 fetch_tarball \
   "guava" \
   "https://github.com/google/guava/archive/refs/tags/v33.4.0.tar.gz" \
-  "guava/src"
+  "guava/src" &
+pids+=($!)
 
 fetch_tarball \
   "google-java-format" \
   "https://github.com/google/google-java-format/archive/refs/tags/v1.24.0.tar.gz" \
-  "core/src/main/java"
+  "core/src/main/java" &
+pids+=($!)
+
+status=0
+for pid in "${pids[@]}"; do
+  if ! wait "$pid"; then
+    status=1
+  fi
+done
+exit "$status"
 '''
 
 [tasks.conformance-fetch-jdk]
@@ -81,11 +95,11 @@ set -euo pipefail
 spec="${1:-${JDK_TAG:-${JDK_VERSION:-latest}}}"
 case "$spec" in
   latest)
-    ver="$(xh --body --check-status https://api.adoptium.net/v3/info/available_releases | jq -r '.most_recent_feature_release')"
+    ver="$(xh --ignore-stdin --body --check-status GET https://api.adoptium.net/v3/info/available_releases | jq -r '.most_recent_feature_release')"
     jdk_tag="jdk-${ver}-ga"
     ;;
   lts)
-    ver="$(xh --body --check-status https://api.adoptium.net/v3/info/available_releases | jq -r '.most_recent_lts')"
+    ver="$(xh --ignore-stdin --body --check-status GET https://api.adoptium.net/v3/info/available_releases | jq -r '.most_recent_lts')"
     jdk_tag="jdk-${ver}-ga"
     ;;
   *[!0-9]*)
@@ -110,12 +124,13 @@ trap 'rm -rf "$tmp_root"' EXIT
 archive="$tmp_root/$jdk_tag.tar.gz"
 
 url="https://github.com/openjdk/jdk/archive/refs/tags/${jdk_tag}.tar.gz"
-echo "downloading $jdk_tag from $url"
-xh --download --follow --check-status --output "$archive" "$url" Accept-Encoding:gzip
+echo "[conformance] fetching $jdk_tag..." >&2
+xh --quiet --ignore-stdin --download --follow --check-status --output "$archive" GET "$url" Accept-Encoding:gzip
 
 # Extract only src/ so tests and build scripts don't bloat disk or skew valid-only results.
 top_dir="jdk-${jdk_tag//+/-}"
 tar -xzf "$archive" -C "$tmp_root" "$top_dir/src"
+rm -f "$archive"
 
 if [ ! -d "$tmp_root/$top_dir/src" ]; then
   echo "error: expected $top_dir/src inside $jdk_tag archive" >&2
@@ -161,14 +176,26 @@ run = '''
 #!/usr/bin/env bash
 set -euo pipefail
 
+jdk_log="$(mktemp "${TMPDIR:-/tmp}/java-corpus-jdk-log.XXXXXX")"
 cleanup() {
-  rm -rf target/conformance/archives target/conformance/corpus target/conformance/jdk
+  rm -rf target/conformance/archives target/conformance/corpus target/conformance/jdk "$jdk_log"
 }
 trap cleanup EXIT
 
-mise run conformance-fetch
-jdk_output="$(mise run conformance-fetch-jdk "$@" | tee /dev/stderr)"
-jdk_path="$(printf '%s\n' "$jdk_output" | sed -nE 's/^.*(cached|unpacked): [^ ]+ (-> )?\(?([^)]+)\)?$/\3/p' | tail -n 1)"
+mise run conformance-fetch &
+pid_libs=$!
+mise run conformance-fetch-jdk "$@" > "$jdk_log" &
+pid_jdk=$!
+
+status=0
+wait "$pid_libs" || status=1
+wait "$pid_jdk" || status=1
+if [ "$status" -ne 0 ]; then
+  cat "$jdk_log" >&2
+  exit "$status"
+fi
+
+jdk_path="$(sed -nE 's/^.*(cached|unpacked): [^ ]+ (-> )?\(?([^)]+)\)?$/\3/p' "$jdk_log" | tail -n 1)"
 
 if [ -z "$jdk_path" ] || [ ! -d "$jdk_path" ]; then
   echo "error: could not locate unpacked JDK corpus" >&2
@@ -187,7 +214,7 @@ cargo xtask conformance "${args[@]}" --out target/conformance
 '''
 
 [tasks.workspace-corpus]
-description = "Sequentially fetch, inspect, and clean up real-world Java repos (optional filter args)"
+description = "Fetch, inspect, and clean up real-world Java repos in parallel (CORPUS_JOBS=4, optional filter args)"
 run = '''
 #!/usr/bin/env bash
 set -euo pipefail
@@ -199,6 +226,7 @@ out_dir="target/workspace-corpus"
 mkdir -p "$out_dir"
 
 tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/java-workspace-corpus.XXXXXX")"
+mkdir -p "$tmp_root/timings"
 trap 'rm -rf "$tmp_root"' EXIT
 
 repos=(
@@ -230,8 +258,43 @@ should_run() {
   return 1
 }
 
-timing_file="$out_dir/timings.tsv"
-: > "$timing_file"
+process_repo() {
+  local id="$1"
+  local slug="$2"
+  local stage="$tmp_root/$id"
+  local archive="$tmp_root/$id.tar.gz"
+  mkdir -p "$stage"
+
+  local url="https://github.com/${slug}/archive/HEAD.tar.gz"
+  xh --quiet --ignore-stdin --download --follow --check-status --output "$archive" GET "$url" Accept-Encoding:gzip
+
+  tar -xzf "$archive" -C "$stage"
+  rm -f "$archive"
+
+  local repo_dir
+  repo_dir="$(fd --type d --max-depth 1 . "$stage" | head -n 1)"
+  if [ -z "$repo_dir" ] || [ ! -d "$repo_dir" ]; then
+    echo "error: failed to locate unpacked directory for $id" >&2
+    rm -rf "$stage"
+    return 1
+  fi
+
+  local start_ms end_ms elapsed_ms
+  start_ms="$(python3 -c 'import time; print(int(time.time() * 1000))')"
+  "$bin" inspect --json --show-errors "$repo_dir" > "$out_dir/$id.json"
+  end_ms="$(python3 -c 'import time; print(int(time.time() * 1000))')"
+  elapsed_ms="$((end_ms - start_ms))"
+  printf '%s\n' "$elapsed_ms" > "$tmp_root/timings/$id.ms"
+
+  rm -rf "$stage"
+  echo "[workspace-corpus] $id done (${elapsed_ms}ms)" >&2
+}
+
+jobs="${CORPUS_JOBS:-4}"
+selected_ids=()
+pids=()
+active=0
+status=0
 
 for entry in "${repos[@]}"; do
   id="${entry%%|*}"
@@ -239,41 +302,117 @@ for entry in "${repos[@]}"; do
   if ! should_run "$id" "$@"; then
     continue
   fi
+  selected_ids+=("$id")
 
-  stage="$tmp_root/$id"
-  archive="$tmp_root/$id.tar.gz"
-  mkdir -p "$stage"
+  process_repo "$id" "$slug" &
+  pids+=($!)
+  active=$((active + 1))
 
-  url="https://github.com/${slug}/archive/HEAD.tar.gz"
-  echo "==> [$id] downloading $url" >&2
-  xh --download --follow --check-status --output "$archive" "$url" Accept-Encoding:gzip
-
-  tar -xzf "$archive" -C "$stage"
-  rm -f "$archive"
-
-  repo_dir="$(fd --type d --max-depth 1 . "$stage" | head -n 1)"
-  if [ -z "$repo_dir" ] || [ ! -d "$repo_dir" ]; then
-    echo "error: failed to locate unpacked directory for $id" >&2
-    rm -rf "$stage"
-    exit 1
+  if [ "$active" -ge "$jobs" ]; then
+    if ! wait -n; then
+      status=1
+    fi
+    active=$((active - 1))
   fi
+done
 
-  start_ms="$(python3 -c 'import time; print(int(time.time() * 1000))')"
-  "$bin" inspect --json --show-errors "$repo_dir" > "$out_dir/$id.json"
-  end_ms="$(python3 -c 'import time; print(int(time.time() * 1000))')"
-  elapsed_ms="$((end_ms - start_ms))"
-  printf '%s\t%s\n' "$id" "$elapsed_ms" >> "$timing_file"
+for pid in "${pids[@]}"; do
+  if ! wait "$pid"; then
+    status=1
+  fi
+done
 
-  rm -rf "$stage"
-  echo "    [$id] done in ${elapsed_ms}ms (cleaned up)" >&2
+if [ "$status" -ne 0 ]; then
+  exit "$status"
+fi
+
+timing_file="$out_dir/timings.tsv"
+: > "$timing_file"
+for id in "${selected_ids[@]}"; do
+  ms="$(cat "$tmp_root/timings/$id.ms")"
+  printf '%s\t%s\n' "$id" "$ms" >> "$timing_file"
 done
 
 echo ""
-echo "| Repo | Build | Release | Modules | Files | Types | Parse Errors | Pkg Mismatches | Conflicts | Time (ms) |"
-echo "|------|-------|---------|---------|-------|-------|--------------|----------------|-----------|-----------|"
-while IFS=$'\t' read -r id ms; do
-  jq -r --arg id "$id" --arg ms "$ms" '
-    "| \($id) | \(.active_build_tool) | Java \(.active_language_level.release) | \(.modules | length) | \(.health.total_java_files) | \(.health.indexed_types) | \(.health.files_with_parse_errors) | \(.package_mismatches | length) | \(.conflicts | length) | \($ms) |"
-  ' "$out_dir/$id.json"
-done < "$timing_file"
+{
+  printf 'Repo\tBuild\tRelease\tModules\tFiles\tTypes\tParse Errors\tPkg Mismatches\tConflicts\tTime (ms)\n'
+  while IFS=$'\t' read -r id ms; do
+    jq -r --arg id "$id" --arg ms "$ms" '
+      "\($id)\t\(.active_build_tool)\tJava \(.active_language_level.release)\t\(.modules | length)\t\(.health.total_java_files)\t\(.health.indexed_types)\t\(.health.files_with_parse_errors)\t\(.package_mismatches | length)\t\(.conflicts | length)\t\($ms)"
+    ' "$out_dir/$id.json"
+  done < "$timing_file"
+} | awk -F'\t' '
+  {
+    for (i = 1; i <= NF; i++) {
+      rows[NR, i] = $i
+      if (length($i) > w[i]) w[i] = length($i)
+    }
+    cols = NF
+  }
+  END {
+    for (r = 1; r <= NR; r++) {
+      for (i = 1; i <= cols; i++) {
+        sep = (i == cols) ? "\n" : "  "
+        if (i <= 3) printf "%-*s%s", w[i], rows[r, i], sep
+        else printf "%*s%s", w[i], rows[r, i], sep
+      }
+      if (r == 1) {
+        for (i = 1; i <= cols; i++) {
+          sep = (i == cols) ? "\n" : "  "
+          dash = ""
+          for (j = 0; j < w[i]; j++) dash = dash "-"
+          printf "%s%s", dash, sep
+        }
+      }
+    }
+  }
+'
+'''
+
+[tasks.conformance-report]
+description = "Run all verification tiers (in parallel where possible) and generate CONFORMANCE.md"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+mkdir -p target/conformance
+
+# Build release binaries once up front so parallel corpus runs don't contend on Cargo locks.
+cargo build --release -p java-analyzer -p xtask
+
+if cargo clippy --workspace --all-targets -- -D warnings; then
+  clippy_status="pass"
+else
+  clippy_status="fail"
+fi
+
+cargo test --workspace --all-targets 2>&1 | tee target/conformance/test-output.txt || true
+
+mise run conformance-jdk &
+pid_conf=$!
+mise run workspace-corpus &
+pid_ws=$!
+
+corpus_status=0
+wait "$pid_conf" || corpus_status=1
+wait "$pid_ws" || corpus_status=1
+if [ "$corpus_status" -ne 0 ]; then
+  exit "$corpus_status"
+fi
+
+if command -v jj >/dev/null 2>&1; then
+  rev="$(jj log -r @- --no-graph -T 'change_id.shortest(8) ++ " (" ++ commit_id.shortest(8) ++ ", " ++ description.first_line() ++ ")"' 2>/dev/null || echo "unknown")"
+else
+  rev="unknown"
+fi
+[ -n "$rev" ] || rev="unknown"
+
+cargo xtask report \
+  --conformance target/conformance/report.json \
+  --workspace-corpus target/workspace-corpus \
+  --test-output target/conformance/test-output.txt \
+  --clippy-status "$clippy_status" \
+  --revision "$rev" \
+  --out target/conformance/CONFORMANCE.md \
+  "$@"
 '''
