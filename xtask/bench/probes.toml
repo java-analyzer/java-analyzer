@@ -1,0 +1,490 @@
+# Benchmark corpus & anchor-based LSP probe manifest (Spec 0018).
+
+[[repos]]
+id = "plain-small"
+tier = "small"
+shapes = ["plain", "single-module"]
+url = ""
+approx_files = 150
+ready_probe = "hover_workspace"
+clean_files = [
+  "src/bench/app/Service.java",
+  "src/bench/app/User.java",
+  "src/bench/app/App.java",
+  "src/bench/chain/Chain8.java",
+  "src/bench/diamond/DiamondImpl.java",
+  "src/bench/wide/Handler01.java",
+]
+
+[repos.probes.hover_workspace]
+file = "src/bench/app/Service.java"
+anchor = "User user = new User(nextId++, name, email);"
+symbol = "user"
+expect = "User"
+
+[repos.probes.hover_jdk]
+file = "src/bench/app/Service.java"
+anchor = "String label = user.getName();"
+symbol = "String"
+expect = "String"
+
+[repos.probes.def_workspace]
+file = "src/bench/app/Service.java"
+anchor = "User user = new User(nextId++, name, email);"
+symbol = "User"
+expect = "User.java"
+
+[repos.probes.def_jdk]
+file = "src/bench/app/Service.java"
+anchor = "private final List<User> users = new ArrayList<>();"
+symbol = "List"
+expect = "List"
+
+[repos.probes.type_def]
+file = "src/bench/app/Service.java"
+anchor = "String label = user.getName();"
+symbol = "user"
+expect = "User.java"
+
+[repos.probes.doc_symbol_small]
+file = "src/bench/app/Service.java"
+expect = "Service"
+
+[repos.probes.doc_symbol_large]
+file = "src/bench/app/LargeFile.java"
+expect = "LargeFile"
+
+[repos.probes.workspace_symbol]
+file = "src/bench/app/Service.java"
+query = "Service"
+expect = "Service"
+
+[repos.probes.impl_simple]
+file = "src/bench/simple/Tag.java"
+anchor = "public interface Tag"
+symbol = "Tag"
+expect = "TagAlpha"
+
+[repos.probes.impl_deep]
+file = "src/bench/chain/Chain0.java"
+anchor = "public int compute(int x)"
+symbol = "compute"
+expect = "Chain8"
+
+[repos.probes.impl_wide]
+file = "src/bench/wide/Handler.java"
+anchor = "public interface Handler"
+symbol = "Handler"
+expect = "Handler01"
+
+[repos.probes.hierarchy_super]
+file = "src/bench/chain/Chain8.java"
+anchor = "public class Chain8 extends Chain7"
+symbol = "Chain8"
+expect = "Chain7"
+
+[repos.probes.hierarchy_sub]
+file = "src/bench/diamond/RootIface.java"
+anchor = "public interface RootIface"
+symbol = "RootIface"
+expect = "LeftIface"
+
+[repos.probes.refs_local]
+file = "src/bench/app/Service.java"
+anchor = "int len = label.length();"
+symbol = "len"
+
+[repos.probes.refs_cross_file]
+file = "src/bench/app/User.java"
+anchor = "public String displayName()"
+symbol = "displayName"
+expect = "Service.java"
+
+[repos.probes.rename_local]
+file = "src/bench/app/Service.java"
+anchor = "int acc = 10;"
+symbol = "acc"
+new_name = "accumulator"
+
+[repos.probes.rename_private]
+file = "src/bench/app/Service.java"
+anchor = "private int computeScore(User user)"
+symbol = "computeScore"
+new_name = "scoreUser"
+
+[repos.probes.rename_public]
+file = "src/bench/app/User.java"
+anchor = "public String displayName()"
+symbol = "displayName"
+new_name = "fullLabel"
+
+[repos.probes.code_action_refactor]
+file = "src/bench/app/Service.java"
+anchor = "int score = computeScore(user);"
+symbol = "computeScore"
+
+[repos.probes.signature_help]
+file = "src/bench/app/Service.java"
+anchor = "String formatted = u.format(\"user\", true);"
+symbol = "\"user\""
+
+[repos.probes.semantic_tokens]
+file = "src/bench/app/LargeFile.java"
+
+[repos.probes.inlay_hints]
+file = "src/bench/app/Service.java"
+anchor = "var summary = summarizeAll();"
+symbol = "summary"
+end_anchor = "return total + summary.size();"
+end_symbol = "size"
+
+[repos.probes.formatting]
+file = "src/bench/app/Service.java"
+
+[repos.edits.code_action_fix]
+file = "src/bench/app/Service.java"
+anchor = "int seedVal = 42;"
+symbol = "seedVal"
+replace = "int seedVal = 42;"
+with = "UnknownType missing = null;"
+hover_anchor = "UnknownType missing = null;"
+hover_symbol = "UnknownType"
+
+[repos.edits.edit_body]
+file = "src/bench/app/Service.java"
+anchor = "int acc = 10;"
+symbol = "acc"
+replace = "int acc = 10;"
+with = "int acc = 20;"
+hover_anchor = "int acc = 20;"
+hover_symbol = "acc"
+expect = "int"
+
+[repos.edits.edit_signature]
+file = "src/bench/app/Service.java"
+anchor = "public String signatureCheck(String input)"
+symbol = "signatureCheck"
+replace = "public String signatureCheck(String input)"
+with = "public String signatureCheck(String input, int count)"
+hover_anchor = "public String signatureCheck(String input, int count)"
+hover_symbol = "signatureCheck"
+expect = "String"
+
+[repos.completions.completion_dot_workspace]
+file = "src/bench/app/Service.java"
+anchor = "String label = user.getName();"
+replace = "user.getName()"
+with = "user."
+cursor_after = "user."
+trigger_character = "."
+expect = "getName"
+
+[repos.completions.completion_dot_jdk]
+file = "src/bench/app/Service.java"
+anchor = "int len = label.length();"
+replace = "label.length()"
+with = "label."
+cursor_after = "label."
+trigger_character = "."
+expect = "length"
+
+[repos.completions.completion_dot_generic]
+file = "src/bench/app/Service.java"
+anchor = "String direct = box.getValue().displayName();"
+replace = "box.getValue().displayName()"
+with = "box.getValue()."
+cursor_after = "box.getValue()."
+trigger_character = "."
+expect = "displayName"
+
+[repos.completions.completion_scope]
+file = "src/bench/app/Service.java"
+anchor = "int localVal = argVal + 1;"
+replace = "return localVal;"
+with = "return loc;"
+cursor_after = "return loc"
+expect = "localVal"
+
+[repos.completions.completion_auto_import]
+file = "src/bench/app/Service.java"
+anchor = "int seedVal = 42;"
+replace = "int seedVal = 42;"
+with = "HashSe"
+cursor_after = "HashSe"
+expect = "HashSet"
+
+[repos.completions.completion_override]
+file = "src/bench/app/Service.java"
+anchor = "public int priority()"
+replace = "public int priority()"
+with = "pri"
+cursor_after = "pri"
+expect = "priority"
+
+[repos.completions.completion_resolve]
+file = "src/bench/app/Service.java"
+anchor = "String label = user.getName();"
+replace = "user.getName()"
+with = "user."
+cursor_after = "user."
+trigger_character = "."
+expect = "getName"
+
+# --- Real-world corpus matrix ---
+
+[[repos]]
+id = "jackson-core"
+tier = "small"
+shapes = ["maven", "single-module"]
+url = "https://github.com/FasterXML/jackson-core/archive/refs/tags/jackson-core-2.18.2.tar.gz"
+approx_files = 250
+ready_probe = "doc_symbol_small"
+clean_files = [
+  "src/main/java/com/fasterxml/jackson/core/JsonParser.java",
+  "src/main/java/com/fasterxml/jackson/core/JsonGenerator.java",
+]
+
+[repos.probes.doc_symbol_small]
+file = "src/main/java/com/fasterxml/jackson/core/JsonToken.java"
+expect = "JsonToken"
+
+[repos.probes.doc_symbol_large]
+file = "src/main/java/com/fasterxml/jackson/core/JsonParser.java"
+expect = "JsonParser"
+
+[repos.probes.hover_workspace]
+file = "src/main/java/com/fasterxml/jackson/core/JsonParser.java"
+anchor = "public abstract class JsonParser"
+symbol = "JsonParser"
+expect = "JsonParser"
+
+[repos.probes.impl_simple]
+file = "src/main/java/com/fasterxml/jackson/core/JsonParser.java"
+anchor = "public abstract class JsonParser"
+symbol = "JsonParser"
+
+[repos.probes.workspace_symbol]
+file = "src/main/java/com/fasterxml/jackson/core/JsonParser.java"
+query = "JsonParser"
+expect = "JsonParser"
+
+[[repos]]
+id = "gson"
+tier = "small"
+shapes = ["maven", "multi-module"]
+url = "https://github.com/google/gson/archive/refs/tags/gson-parent-2.11.0.tar.gz"
+approx_files = 250
+ready_probe = "doc_symbol_small"
+clean_files = [
+  "gson/src/main/java/com/google/gson/Gson.java",
+  "gson/src/main/java/com/google/gson/TypeAdapter.java",
+]
+
+[repos.probes.doc_symbol_small]
+file = "gson/src/main/java/com/google/gson/TypeAdapter.java"
+expect = "TypeAdapter"
+
+[repos.probes.doc_symbol_large]
+file = "gson/src/main/java/com/google/gson/Gson.java"
+expect = "Gson"
+
+[repos.probes.hover_workspace]
+file = "gson/src/main/java/com/google/gson/Gson.java"
+anchor = "public final class Gson"
+symbol = "Gson"
+expect = "Gson"
+
+[repos.probes.impl_wide]
+file = "gson/src/main/java/com/google/gson/TypeAdapter.java"
+anchor = "public abstract class TypeAdapter"
+symbol = "TypeAdapter"
+
+[repos.probes.workspace_symbol]
+file = "gson/src/main/java/com/google/gson/Gson.java"
+query = "TypeAdapter"
+expect = "TypeAdapter"
+
+[[repos]]
+id = "commons-lang"
+tier = "medium"
+shapes = ["maven", "single-module"]
+url = "https://github.com/apache/commons-lang/archive/refs/tags/rel/commons-lang-3.17.0.tar.gz"
+approx_files = 500
+ready_probe = "doc_symbol_small"
+clean_files = [
+  "src/main/java/org/apache/commons/lang3/StringUtils.java",
+  "src/main/java/org/apache/commons/lang3/builder/Builder.java",
+]
+
+[repos.probes.doc_symbol_small]
+file = "src/main/java/org/apache/commons/lang3/builder/Builder.java"
+expect = "Builder"
+
+[repos.probes.doc_symbol_large]
+file = "src/main/java/org/apache/commons/lang3/StringUtils.java"
+expect = "StringUtils"
+
+[repos.probes.hover_workspace]
+file = "src/main/java/org/apache/commons/lang3/StringUtils.java"
+anchor = "public class StringUtils"
+symbol = "StringUtils"
+expect = "StringUtils"
+
+[repos.probes.semantic_tokens]
+file = "src/main/java/org/apache/commons/lang3/StringUtils.java"
+
+[repos.probes.workspace_symbol]
+file = "src/main/java/org/apache/commons/lang3/StringUtils.java"
+query = "StringUtils"
+expect = "StringUtils"
+
+[[repos]]
+id = "ant-ivy"
+tier = "medium"
+shapes = ["ant", "single-module"]
+url = "https://github.com/apache/ant-ivy/archive/refs/tags/rel/2.5.2.tar.gz"
+approx_files = 700
+ready_probe = "doc_symbol_small"
+clean_files = [
+  "src/java/org/apache/ivy/Ivy.java",
+]
+
+[repos.probes.doc_symbol_small]
+file = "src/java/org/apache/ivy/Ivy.java"
+expect = "Ivy"
+
+[repos.probes.hover_workspace]
+file = "src/java/org/apache/ivy/Ivy.java"
+anchor = "public class Ivy"
+symbol = "Ivy"
+expect = "Ivy"
+
+[repos.probes.workspace_symbol]
+file = "src/java/org/apache/ivy/Ivy.java"
+query = "DependencyResolver"
+expect = "DependencyResolver"
+
+[[repos]]
+id = "gradle-medium"
+tier = "medium"
+shapes = ["gradle", "multi-module"]
+url = "https://github.com/remkop/picocli/archive/refs/tags/v4.7.6.tar.gz"
+approx_files = 450
+ready_probe = "doc_symbol_small"
+clean_files = [
+  "src/main/java/picocli/CommandLine.java",
+]
+
+[repos.probes.doc_symbol_small]
+file = "picocli-codegen/src/main/java/picocli/codegen/aot/graalvm/ReflectionConfigGenerator.java"
+expect = "ReflectionConfigGenerator"
+
+[repos.probes.doc_symbol_large]
+file = "src/main/java/picocli/CommandLine.java"
+expect = "CommandLine"
+
+[repos.probes.hover_workspace]
+file = "src/main/java/picocli/CommandLine.java"
+anchor = "public class CommandLine"
+symbol = "CommandLine"
+expect = "CommandLine"
+
+[repos.probes.workspace_symbol]
+file = "src/main/java/picocli/CommandLine.java"
+query = "CommandLine"
+expect = "CommandLine"
+
+[[repos]]
+id = "tomcat"
+tier = "large"
+shapes = ["ant", "multi-module"]
+url = "https://github.com/apache/tomcat/archive/refs/tags/10.1.33.tar.gz"
+approx_files = 2500
+ready_probe = "doc_symbol_small"
+clean_files = [
+  "java/org/apache/catalina/Lifecycle.java",
+  "java/org/apache/catalina/Container.java",
+]
+
+[repos.probes.doc_symbol_small]
+file = "java/org/apache/catalina/Lifecycle.java"
+expect = "Lifecycle"
+
+[repos.probes.doc_symbol_large]
+file = "java/org/apache/catalina/core/StandardContext.java"
+expect = "StandardContext"
+
+[repos.probes.impl_wide]
+file = "java/org/apache/catalina/Lifecycle.java"
+anchor = "public interface Lifecycle"
+symbol = "Lifecycle"
+
+[repos.probes.hierarchy_sub]
+file = "java/org/apache/catalina/Lifecycle.java"
+anchor = "public interface Lifecycle"
+symbol = "Lifecycle"
+
+[repos.probes.workspace_symbol]
+file = "java/org/apache/catalina/Lifecycle.java"
+query = "StandardContext"
+expect = "StandardContext"
+
+[[repos]]
+id = "junit-framework"
+tier = "large"
+shapes = ["gradle", "multi-module"]
+url = "https://github.com/junit-team/junit5/archive/refs/tags/r5.11.3.tar.gz"
+approx_files = 2500
+ready_probe = "doc_symbol_small"
+clean_files = [
+  "junit-jupiter-api/src/main/java/org/junit/jupiter/api/Assertions.java",
+  "junit-jupiter-api/src/main/java/org/junit/jupiter/api/extension/Extension.java",
+]
+
+[repos.probes.doc_symbol_small]
+file = "junit-jupiter-api/src/main/java/org/junit/jupiter/api/extension/Extension.java"
+expect = "Extension"
+
+[repos.probes.doc_symbol_large]
+file = "junit-jupiter-api/src/main/java/org/junit/jupiter/api/Assertions.java"
+expect = "Assertions"
+
+[repos.probes.impl_wide]
+file = "junit-jupiter-api/src/main/java/org/junit/jupiter/api/extension/Extension.java"
+anchor = "public interface Extension"
+symbol = "Extension"
+
+[repos.probes.workspace_symbol]
+file = "junit-jupiter-api/src/main/java/org/junit/jupiter/api/Assertions.java"
+query = "Assertions"
+expect = "Assertions"
+
+[[repos]]
+id = "error-prone"
+tier = "large"
+shapes = ["maven", "multi-module"]
+url = "https://github.com/google/error-prone/archive/refs/tags/v2.36.0.tar.gz"
+approx_files = 3500
+ready_probe = "doc_symbol_small"
+clean_files = [
+  "check_api/src/main/java/com/google/errorprone/bugpatterns/BugChecker.java",
+]
+
+[repos.probes.doc_symbol_small]
+file = "check_api/src/main/java/com/google/errorprone/bugpatterns/BugChecker.java"
+expect = "BugChecker"
+
+[repos.probes.impl_wide]
+file = "check_api/src/main/java/com/google/errorprone/bugpatterns/BugChecker.java"
+anchor = "public abstract class BugChecker"
+symbol = "BugChecker"
+
+[repos.probes.hierarchy_sub]
+file = "check_api/src/main/java/com/google/errorprone/bugpatterns/BugChecker.java"
+anchor = "public abstract class BugChecker"
+symbol = "BugChecker"
+
+[repos.probes.workspace_symbol]
+file = "check_api/src/main/java/com/google/errorprone/bugpatterns/BugChecker.java"
+query = "BugChecker"
+expect = "BugChecker"

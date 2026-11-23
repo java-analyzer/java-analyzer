@@ -3,6 +3,7 @@
 use std::{path::PathBuf, time::Duration};
 
 use crate::{
+    bench::{self, BenchArgs, GenPlainArgs, ServerSpec, probes::{OpCategory, Shape, Tier}},
     conformance::{self, Config, Kind, Source},
     report::{self, ClippyStatus, ReportArgs},
 };
@@ -11,8 +12,10 @@ pub const USAGE: &str = "\
 Usage: cargo xtask <COMMAND> [OPTIONS]
 
 Commands:
-  conformance    Parse Java corpora and write conformance reports
-  report         Assemble unified CONFORMANCE.md from verification outputs
+  conformance      Parse Java corpora and write conformance reports
+  report           Assemble unified CONFORMANCE.md from verification outputs
+  bench            Run the reproducible Java LSP benchmark suite
+  bench-gen-plain  Generate the synthetic plain-small Java corpus
 
 Run `cargo xtask <COMMAND> --help` for command-specific options.
 
@@ -51,8 +54,12 @@ pub struct ConfigArgs {
 pub enum Command {
     Conformance(Args),
     Report(ReportArgs),
+    Bench(Box<BenchArgs>),
+    BenchGenPlain(GenPlainArgs),
     Help,
     ReportHelp,
+    BenchHelp,
+    BenchGenPlainHelp,
 }
 
 pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, String> {
@@ -60,6 +67,8 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, Str
     match args.next().as_deref() {
         Some("conformance") => parse_conformance_args(args),
         Some("report") => parse_report_args(args),
+        Some("bench") => parse_bench_args(args),
+        Some("bench-gen-plain") => parse_gen_plain_args(args),
         Some("-h" | "--help") | None => Ok(Command::Help),
         Some(other) => Err(format!("unknown command `{other}`")),
     }
@@ -133,6 +142,79 @@ fn parse_report_args(mut args: impl Iterator<Item = String>) -> Result<Command, 
     Ok(Command::Report(parsed))
 }
 
+fn parse_bench_args(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
+    let mut parsed = BenchArgs::default();
+    while let Some(arg) = args.next() {
+        let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
+        match arg.as_str() {
+            "--server" => parsed.servers.push(ServerSpec::parse(&value("--server")?)?),
+            "--repo" => parsed.repos.push(bench::parse_repo_arg(&value("--repo")?)?),
+            "--tier" => parsed.tiers.push(Tier::parse(&value("--tier")?)?),
+            "--shape" => parsed.shapes.push(Shape::parse(&value("--shape")?)?),
+            "--ops" => {
+                let raw = value("--ops")?;
+                for part in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    parsed.ops.push(OpCategory::parse(part)?);
+                }
+            }
+            "--probes" => parsed.probes = Some(PathBuf::from(value("--probes")?)),
+            "--warmup" => {
+                let text = value("--warmup")?;
+                parsed.warmup = text
+                    .parse::<usize>()
+                    .map_err(|_| format!("--warmup needs a non-negative integer, got `{text}`"))?;
+            }
+            "--iterations" => {
+                let text = value("--iterations")?;
+                parsed.iterations = text
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|&n| n > 0)
+                    .ok_or_else(|| format!("--iterations needs a positive integer, got `{text}`"))?;
+            }
+            "--ready-timeout" => {
+                let text = value("--ready-timeout")?;
+                parsed.ready_timeout_secs = text
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|&n| n > 0)
+                    .ok_or_else(|| {
+                        format!("--ready-timeout needs a positive number, got `{text}`")
+                    })?;
+            }
+            "--request-timeout" => {
+                let text = value("--request-timeout")?;
+                parsed.request_timeout_secs = text
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|&n| n > 0)
+                    .ok_or_else(|| {
+                        format!("--request-timeout needs a positive number, got `{text}`")
+                    })?;
+            }
+            "--skip-warm-restart" => parsed.skip_warm_restart = true,
+            "--json-out" => parsed.json_out = PathBuf::from(value("--json-out")?),
+            "--md-out" => parsed.md_out = PathBuf::from(value("--md-out")?),
+            "-h" | "--help" => return Ok(Command::BenchHelp),
+            other => return Err(format!("unknown option `{other}`")),
+        }
+    }
+    Ok(Command::Bench(Box::new(parsed)))
+}
+
+fn parse_gen_plain_args(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
+    let mut parsed = GenPlainArgs::default();
+    while let Some(arg) = args.next() {
+        let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
+        match arg.as_str() {
+            "--out" => parsed.out = PathBuf::from(value("--out")?),
+            "-h" | "--help" => return Ok(Command::BenchGenPlainHelp),
+            other => return Err(format!("unknown option `{other}`")),
+        }
+    }
+    Ok(Command::BenchGenPlain(parsed))
+}
+
 /// Source ids are the directory names, made unique by a numeric suffix if needed.
 fn source_ids(sources: &[(Kind, PathBuf)]) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
@@ -178,11 +260,16 @@ pub fn to_config(args: &ConfigArgs) -> Config {
 /// Runs the command and returns the process exit code.
 pub fn run(args: impl IntoIterator<Item = String>) -> i32 {
     let args: Vec<String> = args.into_iter().collect();
-    let is_report = args.first().is_some_and(|a| a == "report");
+    let subcmd = args.first().cloned();
     let command = match parse_args(args) {
         Ok(command) => command,
         Err(message) => {
-            let usage = if is_report { report::USAGE } else { USAGE };
+            let usage = match subcmd.as_deref() {
+                Some("report") => report::USAGE,
+                Some("bench") => bench::USAGE,
+                Some("bench-gen-plain") => bench::GEN_PLAIN_USAGE,
+                _ => USAGE,
+            };
             eprintln!("error: {message}\n\n{usage}");
             return 2;
         }
@@ -196,7 +283,17 @@ pub fn run(args: impl IntoIterator<Item = String>) -> i32 {
             print!("{}", report::USAGE);
             return 0;
         }
+        Command::BenchHelp => {
+            print!("{}", bench::USAGE);
+            return 0;
+        }
+        Command::BenchGenPlainHelp => {
+            print!("{}", bench::GEN_PLAIN_USAGE);
+            return 0;
+        }
         Command::Report(report_args) => return report::run(&report_args),
+        Command::Bench(bench_args) => return bench::run(&bench_args),
+        Command::BenchGenPlain(gen_args) => return bench::run_gen_plain(&gen_args),
         Command::Conformance(args) => args,
     };
 

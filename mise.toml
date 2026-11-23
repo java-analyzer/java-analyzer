@@ -416,3 +416,323 @@ cargo xtask report \
   --out target/conformance/CONFORMANCE.md \
   "$@"
 '''
+
+[tasks.bench-fetch]
+description = "Download and unpack pinned benchmark corpora and external Java LSPs using xh (SERVERS_ONLY=1, CORPORA_ONLY=1, FORCE=1, optional filter args)"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+corpus_dir="target/bench/corpus"
+server_dir="target/bench/servers"
+mkdir -p "$corpus_dir" "$server_dir"
+
+tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/java-bench-fetch.XXXXXX")"
+trap 'rm -rf "$tmp_root"' EXIT
+
+should_run() {
+  local id="$1"
+  shift
+  if [ "$#" -eq 0 ]; then
+    return 0
+  fi
+  for f in "$@"; do
+    if [ "$f" = "$id" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+fetch_corpus() {
+  local id="$1"
+  local slug="$2"
+  local tag="$3"
+  local dest="$corpus_dir/$id"
+  local archive="$tmp_root/$id.tar.gz"
+  local url="https://github.com/${slug}/archive/refs/tags/${tag}.tar.gz"
+
+  if [ -d "$dest" ] && [ "${FORCE:-0}" != "1" ]; then
+    echo "cached: $id ($dest)"
+    return 0
+  fi
+
+  echo "[bench-fetch] fetching corpus $id ($tag)..." >&2
+  xh --quiet --ignore-stdin --download --follow --check-status --output "$archive" GET "$url" Accept-Encoding:gzip
+
+  local stage="$tmp_root/corpus-$id"
+  mkdir -p "$stage"
+  tar -xzf "$archive" -C "$stage"
+  rm -f "$archive"
+
+  local top
+  top="$(fd --no-ignore --type d --max-depth 1 . "$stage" | head -n 1)"
+  top="${top%/}"
+  if [ -z "$top" ] || [ ! -d "$top" ]; then
+    echo "error: failed to locate unpacked directory for $id" >&2
+    return 1
+  fi
+
+  rm -rf "$dest"
+  mv "$top" "$dest"
+  echo "[bench-fetch] ready: $id ($dest)" >&2
+}
+
+gen_plain_small() {
+  local dest="$corpus_dir/plain-small"
+  if [ -d "$dest" ] && [ "${FORCE:-0}" != "1" ]; then
+    echo "cached: plain-small ($dest)"
+    return 0
+  fi
+
+  echo "[bench-fetch] generating plain-small..." >&2
+  rm -rf "$dest"
+  cargo run --release -p xtask -- bench-gen-plain "$dest"
+  echo "[bench-fetch] ready: plain-small ($dest)" >&2
+}
+
+fetch_jdtls() {
+  local dest="$server_dir/jdtls"
+  local archive="$tmp_root/jdtls.tar.gz"
+  local stage="$tmp_root/server-jdtls"
+  local url="https://download.eclipse.org/jdtls/snapshots/jdt-language-server-latest.tar.gz"
+
+  if [ -d "$dest" ] && [ "${FORCE:-0}" != "1" ]; then
+    echo "cached: jdtls ($dest)"
+    return 0
+  fi
+
+  echo "[bench-fetch] fetching server jdtls..." >&2
+  xh --quiet --ignore-stdin --download --follow --check-status --output "$archive" GET "$url"
+  mkdir -p "$stage"
+  tar -xzf "$archive" -C "$stage"
+  rm -f "$archive"
+
+  local src_dir=""
+  if [ -f "$stage/bin/jdtls" ]; then
+    src_dir="$stage"
+  else
+    local sub
+    sub="$(fd --no-ignore --type d --max-depth 1 . "$stage" | head -n 1)"
+    sub="${sub%/}"
+    if [ -n "$sub" ] && [ -f "$sub/bin/jdtls" ]; then
+      src_dir="$sub"
+    fi
+  fi
+
+  if [ -z "$src_dir" ]; then
+    echo "[bench-fetch] warning: jdtls binary not found in archive" >&2
+    return 1
+  fi
+
+  chmod +x "$src_dir/bin/jdtls"
+  rm -rf "$dest"
+  mv "$src_dir" "$dest"
+  echo "[bench-fetch] ready: jdtls ($dest)" >&2
+}
+
+unpack_vsix() {
+  local archive="$1"
+  local stage="$2"
+  mkdir -p "$stage"
+  if gzip -t "$archive" 2>/dev/null; then
+    gzip -dc "$archive" > "$archive.vsix"
+    rm -f "$archive"
+    unzip -q -o "$archive.vsix" -d "$stage"
+    rm -f "$archive.vsix"
+  else
+    unzip -q -o "$archive" -d "$stage"
+    rm -f "$archive"
+  fi
+}
+
+fetch_jls() {
+  local dest="$server_dir/jls"
+  local archive="$tmp_root/jls.vsix"
+  local stage="$tmp_root/server-jls"
+  local url="https://marketplace.visualstudio.com/_apis/public/gallery/publishers/georgewfraser/vsextensions/vscode-javac/latest/vspackage"
+
+  if [ -d "$dest" ] && [ "${FORCE:-0}" != "1" ]; then
+    echo "cached: jls ($dest)"
+    return 0
+  fi
+
+  echo "[bench-fetch] fetching server jls..." >&2
+  xh --quiet --ignore-stdin --download --follow --check-status --output "$archive" GET "$url"
+  unpack_vsix "$archive" "$stage"
+
+  if [ ! -d "$stage/extension/dist" ]; then
+    echo "[bench-fetch] warning: jls extension/dist not found in archive" >&2
+    return 1
+  fi
+
+  chmod +x "$stage"/extension/dist/*.sh 2>/dev/null || true
+  rm -rf "$dest"
+  mv "$stage" "$dest"
+  echo "[bench-fetch] ready: jls ($dest)" >&2
+}
+
+fetch_nbls() {
+  local dest="$server_dir/nbls"
+  local archive="$tmp_root/nbls.vsix"
+  local stage="$tmp_root/server-nbls"
+
+  if [ -d "$dest" ] && [ "${FORCE:-0}" != "1" ]; then
+    echo "cached: nbls ($dest)"
+    return 0
+  fi
+
+  echo "[bench-fetch] fetching server nbls..." >&2
+  local download_url
+  download_url="$(xh --ignore-stdin --body --check-status GET "https://open-vsx.org/api/oracle/oracle-java/latest" | jq -r '.files.download // empty')"
+  if [ -z "$download_url" ]; then
+    echo "[bench-fetch] warning: could not resolve nbls download URL from Open VSX" >&2
+    return 1
+  fi
+
+  xh --quiet --ignore-stdin --download --follow --check-status --output "$archive" GET "$download_url"
+  unpack_vsix "$archive" "$stage"
+
+  if [ ! -f "$stage/extension/nbcode/bin/nbcode" ]; then
+    echo "[bench-fetch] warning: nbls nbcode binary not found in archive" >&2
+    return 1
+  fi
+
+  chmod +x "$stage/extension/nbcode/bin/nbcode" 2>/dev/null || true
+  chmod +x "$stage"/extension/nbcode/platform*/lib/nbexec 2>/dev/null || true
+  rm -rf "$dest"
+  mv "$stage" "$dest"
+  echo "[bench-fetch] ready: nbls ($dest)" >&2
+}
+
+corpora=(
+  "jackson-core|FasterXML/jackson-core|jackson-core-2.18.2"
+  "gson|google/gson|gson-parent-2.11.0"
+  "commons-lang|apache/commons-lang|rel/commons-lang-3.17.0"
+  "ant-ivy|apache/ant-ivy|rel/2.5.2"
+  "gradle-medium|remkop/picocli|v4.7.6"
+  "tomcat|apache/tomcat|11.0.2"
+  "junit-framework|junit-team/junit-framework|r5.11.4"
+  "error-prone|google/error-prone|v2.36.0"
+)
+
+required_pids=()
+optional_pids=()
+
+if [ "${SERVERS_ONLY:-0}" != "1" ]; then
+  for entry in "${corpora[@]}"; do
+    IFS='|' read -r id slug tag <<< "$entry"
+    if should_run "$id" "$@"; then
+      fetch_corpus "$id" "$slug" "$tag" &
+      required_pids+=("$!")
+    fi
+  done
+
+  if should_run "plain-small" "$@"; then
+    gen_plain_small &
+    required_pids+=("$!")
+  fi
+fi
+
+if [ "${CORPORA_ONLY:-0}" != "1" ]; then
+  if should_run "jdtls" "$@"; then
+    fetch_jdtls &
+    optional_pids+=("jdtls:$!")
+  fi
+  if should_run "jls" "$@"; then
+    fetch_jls &
+    optional_pids+=("jls:$!")
+  fi
+  if should_run "nbls" "$@"; then
+    fetch_nbls &
+    optional_pids+=("nbls:$!")
+  fi
+fi
+
+status=0
+for pid in "${required_pids[@]}"; do
+  if ! wait "$pid"; then
+    status=1
+  fi
+done
+
+for entry in "${optional_pids[@]}"; do
+  sid="${entry%%:*}"
+  pid="${entry#*:}"
+  if ! wait "$pid"; then
+    echo "[bench-fetch] warning: failed to fetch optional server '$sid'; continuing with available servers" >&2
+  fi
+done
+
+exit "$status"
+'''
+
+[tasks.bench]
+description = "Build release binaries, fetch benchmark assets, and run the LSP benchmark suite"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+cargo build --release -p java-analyzer -p xtask
+mise run bench-fetch
+
+args=(
+  --server "java-analyzer=target/release/java-analyzer lsp"
+)
+
+if [ -x "target/bench/servers/jdtls/bin/jdtls" ]; then
+  args+=(--server "jdtls=target/bench/servers/jdtls/bin/jdtls -data {cache_dir}")
+elif command -v jdtls >/dev/null 2>&1; then
+  args+=(--server "jdtls=$(command -v jdtls) -data {cache_dir}")
+fi
+
+case "$(uname -s)" in
+  Darwin)
+    jls_script="target/bench/servers/jls/extension/dist/lang_server_mac.sh"
+    ;;
+  *)
+    jls_script="target/bench/servers/jls/extension/dist/lang_server_linux.sh"
+    ;;
+esac
+if [ -x "$jls_script" ]; then
+  args+=(--server "jls=$jls_script")
+elif [ -x "target/bench/servers/jls/extension/dist/lang_server_mac.sh" ]; then
+  args+=(--server "jls=target/bench/servers/jls/extension/dist/lang_server_mac.sh")
+elif [ -x "target/bench/servers/jls/extension/dist/lang_server_linux.sh" ]; then
+  args+=(--server "jls=target/bench/servers/jls/extension/dist/lang_server_linux.sh")
+fi
+
+if [ -x "target/bench/servers/nbls/extension/nbcode/bin/nbcode" ]; then
+  args+=(--server "nbls=target/bench/servers/nbls/extension/nbcode/bin/nbcode --userdir {cache_dir} --start-java-language-server")
+fi
+
+has_explicit_repo=0
+for arg in "$@"; do
+  case "$arg" in
+    --repo|--repo=*)
+      has_explicit_repo=1
+      break
+      ;;
+  esac
+done
+
+if [ "$has_explicit_repo" -eq 0 ]; then
+  for id in plain-small jackson-core gson commons-lang ant-ivy gradle-medium tomcat junit-framework error-prone; do
+    if [ -d "target/bench/corpus/$id" ]; then
+      args+=(--repo "${id}=target/bench/corpus/${id}")
+    fi
+  done
+fi
+
+if command -v jj >/dev/null 2>&1; then
+  rev="$(jj log -r @- --no-graph -T 'change_id.shortest(8) ++ " (" ++ commit_id.shortest(8) ++ ", " ++ description.first_line() ++ ")"' 2>/dev/null || echo "unknown")"
+else
+  rev="unknown"
+fi
+[ -n "$rev" ] || rev="unknown"
+
+target/release/xtask bench \
+  "${args[@]}" \
+  --revision "$rev" \
+  "$@"
+'''
