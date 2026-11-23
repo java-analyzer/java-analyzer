@@ -362,10 +362,38 @@
         renderCharts();
       }
 
-      function scaleConfig() {
-        return state.scale === 'log'
-          ? { type: 'log', base: 10, nice: true }
-          : { type: 'linear', zero: true, nice: true };
+      function computeLogFloor(values, defaultFloor) {
+        let minPos = Infinity;
+        for (const v of values) {
+          if (Number.isFinite(v) && v > 0 && v < minPos) minPos = v;
+        }
+        if (!Number.isFinite(minPos)) return defaultFloor;
+        const exp = Math.floor(Math.log10(minPos));
+        return Math.min(defaultFloor, Math.pow(10, exp));
+      }
+
+      function yEncoding(field, title, values, defaultFloor) {
+        if (state.scale === 'log') {
+          const floor = computeLogFloor(values, defaultFloor);
+          return {
+            y: {
+              field,
+              type: 'quantitative',
+              title,
+              stack: null,
+              scale: { type: 'log', base: 10, domainMin: floor, nice: true }
+            },
+            y2: { datum: floor }
+          };
+        }
+        return {
+          y: {
+            field,
+            type: 'quantitative',
+            title,
+            scale: { type: 'linear', zero: true, nice: true }
+          }
+        };
       }
 
       function posVal(v) {
@@ -477,6 +505,7 @@
           }
         }
 
+        const firstY = yEncoding('value', 'First Response (ms)', firstRows.map((d) => d.value), 1);
         const firstSpec = {
           $schema: 'https://vega.github.io/schema/vega-lite/v5.json',
           background: 'transparent',
@@ -487,7 +516,7 @@
           encoding: {
             x: { field: 'repo', type: 'nominal', title: 'Repository' },
             xOffset: { field: 'series', type: 'nominal' },
-            y: { field: 'value', type: 'quantitative', title: 'First Response (ms)', scale: scaleConfig() },
+            ...firstY,
             color: { field: 'server', type: 'nominal', title: 'Server' },
             opacity: { field: 'phase', type: 'nominal', scale: { domain: ['Cold', 'Warm'], range: [1.0, 0.55] } },
             tooltip: [
@@ -500,6 +529,7 @@
           }
         };
 
+        const readyY = yEncoding('value', 'Ready Time (ms)', readyRows.map((d) => d.value), 1);
         const readySpec = {
           $schema: 'https://vega.github.io/schema/vega-lite/v5.json',
           background: 'transparent',
@@ -510,7 +540,7 @@
           encoding: {
             x: { field: 'repo', type: 'nominal', title: 'Repository' },
             xOffset: { field: 'series', type: 'nominal' },
-            y: { field: 'value', type: 'quantitative', title: 'Ready Time (ms)', scale: scaleConfig() },
+            ...readyY,
             color: { field: 'server', type: 'nominal', title: 'Server' },
             opacity: { field: 'phase', type: 'nominal', scale: { domain: ['Cold', 'Warm'], range: [1.0, 0.55] } },
             tooltip: [
@@ -546,11 +576,13 @@
           }
         };
 
+        const opsY = yEncoding('p50_plot', 'p50 (ms)', opsRows.map((d) => d.p50_plot), 0.01);
         const opsSpec = {
           $schema: 'https://vega.github.io/schema/vega-lite/v5.json',
           background: 'transparent',
           data: { values: opsRows },
           facet: { row: { field: 'repo', type: 'nominal', title: 'Repository' } },
+          resolve: { scale: { x: 'independent', y: 'independent' } },
           spec: {
             width: { step: 34 },
             height: 190,
@@ -558,7 +590,7 @@
             encoding: {
               x: { field: 'op', type: 'nominal', title: 'Operation', axis: { labelAngle: -35 } },
               xOffset: { field: 'server', type: 'nominal' },
-              y: { field: 'p50_plot', type: 'quantitative', title: 'p50 (ms)', scale: scaleConfig() },
+              ...opsY,
               color: { field: 'server', type: 'nominal', title: 'Server' },
               tooltip: [
                 { field: 'repo', title: 'Repo' },

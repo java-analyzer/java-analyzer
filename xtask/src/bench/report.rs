@@ -380,6 +380,8 @@ pub fn format_markdown_with_charts(
 ) -> String {
     let mut out = String::new();
     out.push_str("# Java LSP Benchmarks\n\n");
+    out.push_str("> [!NOTE]\n");
+    out.push_str("> **Incomplete Benchmark:** This report reflects a preliminary, incomplete benchmark run. It skips parts of full benchmarking setup (such as OS disk-cache clearing, isolated per-server workspace resets, and build-tool dependency prefetching) as well as some long-running scenarios and unimplemented LSP capabilities; treat numbers as directional rather than a strict apples-to-apples comparison.\n\n");
 
     out.push_str("## Environment & Revisions\n\n");
     let _ = writeln!(

@@ -119,7 +119,6 @@ struct OpRow<'a> {
     shapes: String,
     server: &'a str,
     op_id: &'static str,
-    status: &'static str,
     supported: bool,
     ms_cells: [MsCell; 4],
     err_pct_data_value: String,
@@ -130,7 +129,7 @@ struct OpRow<'a> {
 
 struct CapRow<'a> {
     server: &'a str,
-    values: [&'static str; 16],
+    values: [bool; 16],
 }
 
 #[derive(Template)]
@@ -234,11 +233,6 @@ pub fn format_html_report(report: &BenchReport) -> String {
                     continue;
                 };
                 let supported = stats.status == OpStatus::Supported;
-                let status = if supported {
-                    "supported"
-                } else {
-                    "unsupported"
-                };
                 let ms_cells = if supported {
                     [
                         MsCell::new("first_ms", stats.first_ms),
@@ -261,7 +255,6 @@ pub fn format_html_report(report: &BenchReport) -> String {
                     shapes: shapes_str.clone(),
                     server: &res.server,
                     op_id,
-                    status,
                     supported,
                     ms_cells,
                     err_pct_data_value: format!("{:.3}", stats.error_rate_pct),
@@ -283,13 +276,7 @@ pub fn format_html_report(report: &BenchReport) -> String {
         .into_iter()
         .map(|(server, caps)| CapRow {
             server,
-            values: CAPABILITY_COLUMNS.map(|cap| {
-                if caps.get(cap).copied().unwrap_or(false) {
-                    "supported"
-                } else {
-                    "N/A"
-                }
-            }),
+            values: CAPABILITY_COLUMNS.map(|cap| caps.get(cap).copied().unwrap_or(false)),
         })
         .collect();
 

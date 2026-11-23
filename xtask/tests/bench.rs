@@ -863,6 +863,9 @@ fn html_report_embeds_escaped_json_vega_lite_v5_and_accessible_tables() {
     assert!(!html.contains("<option value=\"ant\">ant</option>"));
     assert!(html.contains("activeScopeResults()"));
     assert!(html.contains("syncFilterOptionsToScope()"));
+    assert!(html.contains("y2: { datum: floor }"));
+    assert!(html.contains("resolve: { scale: { x: 'independent', y: 'independent' } }"));
+    assert!(html.contains("class=\"cap-icon-yes\""));
 
     let marker = "<script id=\"bench-data\" type=\"application/json\">";
     let start = html.find(marker).expect("missing bench-data script") + marker.len();

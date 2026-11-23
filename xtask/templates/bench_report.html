@@ -39,6 +39,9 @@
         <button type="button" id="clear-baseline" class="btn-secondary" hidden>Clear Baseline</button>
       </div>
     </div>
+    <aside class="methodology-note" role="note">
+      <strong>Note — Incomplete Benchmark:</strong> This report reflects a preliminary, incomplete benchmark run. It skips parts of full benchmarking setup (such as OS disk-cache clearing, isolated per-server workspace resets, and build-tool dependency prefetching) as well as some long-running scenarios and unimplemented LSP capabilities; treat numbers as directional rather than a strict apples-to-apples comparison.
+    </aside>
     <div id="baseline-banner" class="baseline-banner" hidden></div>
   </header>
   <main>
@@ -152,7 +155,7 @@
               <td><code>{{ row.repo }}</code></td>
               <td><code>{{ row.server }}</code></td>
               <td><code>{{ row.op_id }}</code></td>
-              <td>{{ row.status }}</td>
+              <td class="cap-cell">{% if row.supported %}<svg class="cap-icon-yes" viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="9"/><path d="M6 10.3l2.6 2.6L14.2 7.3" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="sr-only">supported</span>{% else %}<span class="cap-na">N/A</span>{% endif %}</td>
               {% if row.supported %}
               {% for cell in row.ms_cells %}
               <td class="num" data-metric="{{ cell.metric }}" data-value="{{ cell.data_value }}">{{ cell.display }}<span class="delta-slot"></span></td>
@@ -186,8 +189,8 @@
             {% for row in cap_rows %}
             <tr data-server="{{ row.server }}">
               <td><code>{{ row.server }}</code></td>
-              {% for label in row.values %}
-              <td>{{ label }}</td>
+              {% for supported in row.values %}
+              <td class="cap-cell">{% if *supported %}<svg class="cap-icon-yes" viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="9"/><path d="M6 10.3l2.6 2.6L14.2 7.3" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="sr-only">supported</span>{% else %}<span class="cap-na">N/A</span>{% endif %}</td>
               {% endfor %}
             </tr>
             {% endfor %}

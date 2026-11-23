@@ -1,0 +1,227 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2666 350" width="2666" height="350" role="img" aria-label="Workspace Ready Time — Cold vs. Warm (ms, log10 scale)">
+<style>
+  svg { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  .bg { fill: #ffffff; }
+  .panel-bg { fill: #f8fafc; stroke: #e2e8f0; stroke-width: 1; }
+  .title { fill: #0f172a; font-size: 15px; font-weight: 700; }
+  .subtitle { fill: #475569; font-size: 11px; }
+  .panel-title { fill: #0f172a; font-size: 12px; font-weight: 700; }
+  .axis-label { fill: #334155; font-size: 11px; font-weight: 600; }
+  .tick-label { fill: #64748b; font-size: 10px; }
+  .bar-label { fill: #0f172a; font-size: 9.5px; font-weight: 600; }
+  .na-label { fill: #94a3b8; font-size: 9px; font-style: italic; }
+  .legend-text { fill: #334155; font-size: 11px; }
+  .grid { stroke: #e2e8f0; stroke-width: 1; stroke-dasharray: 2,3; }
+  .axis { stroke: #94a3b8; stroke-width: 1.2; }
+  .srv-0 { fill: #0072B2; }
+  .srv-0-alt { fill: #0072B2; fill-opacity: 0.32; stroke: #0072B2; stroke-width: 1.6; }
+  .srv-1 { fill: #D55E00; }
+  .srv-1-alt { fill: #D55E00; fill-opacity: 0.32; stroke: #D55E00; stroke-width: 1.6; }
+  .srv-2 { fill: #009E73; }
+  .srv-2-alt { fill: #009E73; fill-opacity: 0.32; stroke: #009E73; stroke-width: 1.6; }
+  .srv-3 { fill: #CC79A7; }
+  .srv-3-alt { fill: #CC79A7; fill-opacity: 0.32; stroke: #CC79A7; stroke-width: 1.6; }
+  @media (prefers-color-scheme: dark) {
+    .bg { fill: #0d1117; }
+    .panel-bg { fill: #161b22; stroke: #30363d; }
+    .title { fill: #f0f6fc; }
+    .subtitle { fill: #8b949e; }
+    .panel-title { fill: #f0f6fc; }
+    .axis-label { fill: #c9d1d9; }
+    .tick-label { fill: #8b949e; }
+    .bar-label { fill: #e6edf3; }
+    .na-label { fill: #6e7681; }
+    .legend-text { fill: #c9d1d9; }
+    .grid { stroke: #21262d; }
+    .axis { stroke: #484f58; }
+    .srv-0 { fill: #38BDF8; }
+    .srv-0-alt { fill: #38BDF8; fill-opacity: 0.32; stroke: #38BDF8; stroke-width: 1.6; }
+    .srv-1 { fill: #FB923C; }
+    .srv-1-alt { fill: #FB923C; fill-opacity: 0.32; stroke: #FB923C; stroke-width: 1.6; }
+    .srv-2 { fill: #34D399; }
+    .srv-2-alt { fill: #34D399; fill-opacity: 0.32; stroke: #34D399; stroke-width: 1.6; }
+    .srv-3 { fill: #F472B6; }
+    .srv-3-alt { fill: #F472B6; fill-opacity: 0.32; stroke: #F472B6; stroke-width: 1.6; }
+  }
+</style>
+<rect class="bg" x="0" y="0" width="2666" height="350" rx="8"/>
+<text class="title" x="68.0" y="28">Workspace Ready Time — Cold vs. Warm (ms, log10 scale)</text>
+<text class="subtitle" x="68.0" y="45">Spawn to readiness probe passing · solid = Cold Ready, outlined = Warm Ready · lower is better</text>
+<rect class="srv-0" x="68.0" y="54.5" width="11" height="11" rx="2"/>
+<text class="legend-text" x="84.0" y="64.0">java-analyzer</text>
+<rect class="srv-1" x="190.4" y="54.5" width="11" height="11" rx="2"/>
+<text class="legend-text" x="206.4" y="64.0">jdtls</text>
+<rect class="srv-2" x="258.4" y="54.5" width="11" height="11" rx="2"/>
+<text class="legend-text" x="274.4" y="64.0">jls</text>
+<rect class="srv-3" x="312.8" y="54.5" width="11" height="11" rx="2"/>
+<text class="legend-text" x="328.8" y="64.0">nbls</text>
+<rect class="axis-label" x="374.0" y="54.5" width="11" height="11" rx="2" fill-opacity="0.8"/>
+<text class="legend-text" x="390.0" y="64.0">Cold</text>
+<rect x="432.4" y="54.5" width="11" height="11" rx="2" fill="none" stroke="currentColor" class="axis" stroke-width="1.5"/>
+<text class="legend-text" x="448.4" y="64.0">Warm</text>
+<line class="grid" x1="68.0" y1="295.0" x2="2642.0" y2="295.0"/>
+<text class="tick-label" x="60.0" y="298.5" text-anchor="end">100ms</text>
+<line class="grid" x1="68.0" y1="244.2" x2="2642.0" y2="244.2"/>
+<text class="tick-label" x="60.0" y="247.8" text-anchor="end">1s</text>
+<line class="grid" x1="68.0" y1="193.5" x2="2642.0" y2="193.5"/>
+<text class="tick-label" x="60.0" y="197.0" text-anchor="end">10s</text>
+<line class="grid" x1="68.0" y1="142.8" x2="2642.0" y2="142.8"/>
+<text class="tick-label" x="60.0" y="146.2" text-anchor="end">100s</text>
+<line class="grid" x1="68.0" y1="92.0" x2="2642.0" y2="92.0"/>
+<text class="tick-label" x="60.0" y="95.5" text-anchor="end">1000s</text>
+<line class="axis" x1="68.0" y1="92.0" x2="68.0" y2="295.0"/>
+<line class="axis" x1="68.0" y1="295.0" x2="2642.0" y2="295.0"/>
+<text class="axis-label" x="211.0" y="315.0" text-anchor="middle">plain-small</text>
+<rect class="srv-0" x="89.0" y="256.5" width="24.0" height="38.5" rx="2.5"/>
+<text class="bar-label" x="101.0" y="251.5" text-anchor="middle">574ms</text>
+<rect class="srv-0-alt" x="117.0" y="265.3" width="24.0" height="29.7" rx="2.5"/>
+<text class="bar-label" x="129.0" y="250.3" text-anchor="middle">385ms</text>
+<rect class="srv-1" x="153.0" y="215.4" width="24.0" height="79.6" rx="2.5"/>
+<text class="bar-label" x="165.0" y="210.4" text-anchor="middle">3.71s</text>
+<rect class="srv-1-alt" x="181.0" y="230.8" width="24.0" height="64.2" rx="2.5"/>
+<text class="bar-label" x="193.0" y="215.8" text-anchor="middle">1.84s</text>
+<rect class="srv-2" x="217.0" y="245.8" width="24.0" height="49.2" rx="2.5"/>
+<text class="bar-label" x="229.0" y="240.8" text-anchor="middle">932ms</text>
+<rect class="srv-2-alt" x="245.0" y="252.3" width="24.0" height="42.7" rx="2.5"/>
+<text class="bar-label" x="257.0" y="237.3" text-anchor="middle">694ms</text>
+<rect class="srv-3" x="281.0" y="205.4" width="24.0" height="89.6" rx="2.5"/>
+<text class="bar-label" x="293.0" y="200.4" text-anchor="middle">5.83s</text>
+<rect class="srv-3-alt" x="309.0" y="211.3" width="24.0" height="83.7" rx="2.5"/>
+<text class="bar-label" x="321.0" y="196.3" text-anchor="middle">4.46s</text>
+<text class="axis-label" x="497.0" y="315.0" text-anchor="middle">jackson-core</text>
+<rect class="srv-0" x="375.0" y="244.3" width="24.0" height="50.7" rx="2.5"/>
+<text class="bar-label" x="387.0" y="239.3" text-anchor="middle">998ms</text>
+<rect class="srv-0-alt" x="403.0" y="260.0" width="24.0" height="35.0" rx="2.5"/>
+<text class="bar-label" x="415.0" y="245.0" text-anchor="middle">490ms</text>
+<rect class="srv-1" x="439.0" y="217.1" width="24.0" height="77.9" rx="2.5"/>
+<text class="bar-label" x="451.0" y="212.1" text-anchor="middle">3.42s</text>
+<rect class="srv-1-alt" x="467.0" y="210.0" width="24.0" height="85.0" rx="2.5"/>
+<text class="bar-label" x="479.0" y="195.0" text-anchor="middle">4.72s</text>
+<rect class="srv-2" x="503.0" y="243.0" width="24.0" height="52.0" rx="2.5"/>
+<text class="bar-label" x="515.0" y="238.0" text-anchor="middle">1.06s</text>
+<rect class="srv-2-alt" x="531.0" y="246.0" width="24.0" height="49.0" rx="2.5"/>
+<text class="bar-label" x="543.0" y="231.0" text-anchor="middle">922ms</text>
+<rect class="srv-3" x="567.0" y="204.0" width="24.0" height="91.0" rx="2.5"/>
+<text class="bar-label" x="579.0" y="199.0" text-anchor="middle">6.21s</text>
+<rect class="srv-3-alt" x="595.0" y="214.0" width="24.0" height="81.0" rx="2.5"/>
+<text class="bar-label" x="607.0" y="199.0" text-anchor="middle">3.94s</text>
+<text class="axis-label" x="783.0" y="315.0" text-anchor="middle">gson</text>
+<rect class="srv-0" x="661.0" y="244.2" width="24.0" height="50.8" rx="2.5"/>
+<text class="bar-label" x="673.0" y="239.2" text-anchor="middle">1.00s</text>
+<rect class="srv-0-alt" x="689.0" y="260.4" width="24.0" height="34.6" rx="2.5"/>
+<text class="bar-label" x="701.0" y="245.4" text-anchor="middle">480ms</text>
+<rect class="srv-1" x="725.0" y="212.5" width="24.0" height="82.5" rx="2.5"/>
+<text class="bar-label" x="737.0" y="207.5" text-anchor="middle">4.22s</text>
+<rect class="srv-1-alt" x="753.0" y="206.8" width="24.0" height="88.2" rx="2.5"/>
+<text class="bar-label" x="765.0" y="191.8" text-anchor="middle">5.48s</text>
+<rect class="srv-2" x="789.0" y="225.2" width="24.0" height="69.8" rx="2.5"/>
+<text class="bar-label" x="801.0" y="220.2" text-anchor="middle">2.37s</text>
+<rect class="srv-2-alt" x="817.0" y="226.9" width="24.0" height="68.1" rx="2.5"/>
+<text class="bar-label" x="829.0" y="211.9" text-anchor="middle">2.20s</text>
+<rect class="srv-3" x="853.0" y="213.1" width="24.0" height="81.9" rx="2.5"/>
+<text class="bar-label" x="865.0" y="208.1" text-anchor="middle">4.10s</text>
+<rect class="srv-3-alt" x="881.0" y="214.9" width="24.0" height="80.1" rx="2.5"/>
+<text class="bar-label" x="893.0" y="199.9" text-anchor="middle">3.79s</text>
+<text class="axis-label" x="1069.0" y="315.0" text-anchor="middle">commons-lang</text>
+<rect class="srv-0" x="947.0" y="231.9" width="24.0" height="63.1" rx="2.5"/>
+<text class="bar-label" x="959.0" y="226.9" text-anchor="middle">1.75s</text>
+<rect class="srv-0-alt" x="975.0" y="255.3" width="24.0" height="39.7" rx="2.5"/>
+<text class="bar-label" x="987.0" y="240.3" text-anchor="middle">607ms</text>
+<rect class="srv-1" x="1011.0" y="210.2" width="24.0" height="84.8" rx="2.5"/>
+<text class="bar-label" x="1023.0" y="205.2" text-anchor="middle">4.69s</text>
+<rect class="srv-1-alt" x="1039.0" y="208.1" width="24.0" height="86.9" rx="2.5"/>
+<text class="bar-label" x="1051.0" y="193.1" text-anchor="middle">5.17s</text>
+<rect class="srv-2" x="1075.0" y="245.1" width="24.0" height="49.9" rx="2.5"/>
+<text class="bar-label" x="1087.0" y="240.1" text-anchor="middle">962ms</text>
+<rect class="srv-2-alt" x="1103.0" y="248.6" width="24.0" height="46.4" rx="2.5"/>
+<text class="bar-label" x="1115.0" y="233.6" text-anchor="middle">821ms</text>
+<rect class="srv-3" x="1139.0" y="214.0" width="24.0" height="81.0" rx="2.5"/>
+<text class="bar-label" x="1151.0" y="209.0" text-anchor="middle">3.94s</text>
+<rect class="srv-3-alt" x="1167.0" y="209.0" width="24.0" height="86.0" rx="2.5"/>
+<text class="bar-label" x="1179.0" y="194.0" text-anchor="middle">4.96s</text>
+<text class="axis-label" x="1355.0" y="315.0" text-anchor="middle">ant-ivy</text>
+<rect class="srv-0" x="1233.0" y="228.1" width="24.0" height="66.9" rx="2.5"/>
+<text class="bar-label" x="1245.0" y="223.1" text-anchor="middle">2.08s</text>
+<rect class="srv-0-alt" x="1261.0" y="252.1" width="24.0" height="42.9" rx="2.5"/>
+<text class="bar-label" x="1273.0" y="237.1" text-anchor="middle">702ms</text>
+<rect class="srv-1" x="1297.0" y="222.9" width="24.0" height="72.1" rx="2.5"/>
+<text class="bar-label" x="1309.0" y="217.9" text-anchor="middle">2.63s</text>
+<rect class="srv-1-alt" x="1325.0" y="230.0" width="24.0" height="65.0" rx="2.5"/>
+<text class="bar-label" x="1337.0" y="215.0" text-anchor="middle">1.91s</text>
+<rect class="srv-2" x="1361.0" y="232.2" width="24.0" height="62.8" rx="2.5"/>
+<text class="bar-label" x="1373.0" y="227.2" text-anchor="middle">1.73s</text>
+<rect class="srv-2-alt" x="1389.0" y="233.5" width="24.0" height="61.5" rx="2.5"/>
+<text class="bar-label" x="1401.0" y="218.5" text-anchor="middle">1.63s</text>
+<rect class="srv-3" x="1425.0" y="219.8" width="24.0" height="75.2" rx="2.5"/>
+<text class="bar-label" x="1437.0" y="214.8" text-anchor="middle">3.04s</text>
+<rect class="srv-3-alt" x="1453.0" y="216.9" width="24.0" height="78.1" rx="2.5"/>
+<text class="bar-label" x="1465.0" y="201.9" text-anchor="middle">3.45s</text>
+<text class="axis-label" x="1641.0" y="315.0" text-anchor="middle">gradle-medium</text>
+<rect class="srv-0" x="1519.0" y="240.7" width="24.0" height="54.3" rx="2.5"/>
+<text class="bar-label" x="1531.0" y="235.7" text-anchor="middle">1.17s</text>
+<rect class="srv-0-alt" x="1547.0" y="256.5" width="24.0" height="38.5" rx="2.5"/>
+<text class="bar-label" x="1559.0" y="241.5" text-anchor="middle">574ms</text>
+<rect class="srv-1" x="1583.0" y="140.6" width="24.0" height="154.4" rx="2.5"/>
+<text class="bar-label" x="1595.0" y="135.6" text-anchor="middle">110.16s</text>
+<rect class="srv-1-alt" x="1611.0" y="226.2" width="24.0" height="68.8" rx="2.5"/>
+<text class="bar-label" x="1623.0" y="211.2" text-anchor="middle">2.27s</text>
+<rect class="srv-2" x="1647.0" y="230.2" width="24.0" height="64.8" rx="2.5"/>
+<text class="bar-label" x="1659.0" y="225.2" text-anchor="middle">1.89s</text>
+<rect class="srv-2-alt" x="1675.0" y="237.3" width="24.0" height="57.7" rx="2.5"/>
+<text class="bar-label" x="1687.0" y="222.3" text-anchor="middle">1.37s</text>
+<rect class="srv-3" x="1711.0" y="200.9" width="24.0" height="94.1" rx="2.5"/>
+<text class="bar-label" x="1723.0" y="195.9" text-anchor="middle">7.14s</text>
+<rect class="srv-3-alt" x="1739.0" y="209.0" width="24.0" height="86.0" rx="2.5"/>
+<text class="bar-label" x="1751.0" y="194.0" text-anchor="middle">4.96s</text>
+<text class="axis-label" x="1927.0" y="315.0" text-anchor="middle">tomcat</text>
+<rect class="srv-0" x="1805.0" y="202.7" width="24.0" height="92.3" rx="2.5"/>
+<text class="bar-label" x="1817.0" y="197.7" text-anchor="middle">6.57s</text>
+<rect class="srv-0-alt" x="1833.0" y="240.0" width="24.0" height="55.0" rx="2.5"/>
+<text class="bar-label" x="1845.0" y="225.0" text-anchor="middle">1.21s</text>
+<rect class="srv-1" x="1869.0" y="213.4" width="24.0" height="81.6" rx="2.5"/>
+<text class="bar-label" x="1881.0" y="208.4" text-anchor="middle">4.05s</text>
+<rect class="srv-1-alt" x="1897.0" y="220.2" width="24.0" height="74.8" rx="2.5"/>
+<text class="bar-label" x="1909.0" y="205.2" text-anchor="middle">2.98s</text>
+<rect class="srv-2" x="1933.0" y="236.1" width="24.0" height="58.9" rx="2.5"/>
+<text class="bar-label" x="1945.0" y="231.1" text-anchor="middle">1.45s</text>
+<rect class="srv-2-alt" x="1961.0" y="243.1" width="24.0" height="51.9" rx="2.5"/>
+<text class="bar-label" x="1973.0" y="228.1" text-anchor="middle">1.05s</text>
+<rect class="srv-3" x="1997.0" y="181.2" width="24.0" height="113.8" rx="2.5"/>
+<text class="bar-label" x="2009.0" y="176.2" text-anchor="middle">17.50s</text>
+<rect class="srv-3-alt" x="2025.0" y="212.1" width="24.0" height="82.9" rx="2.5"/>
+<text class="bar-label" x="2037.0" y="197.1" text-anchor="middle">4.30s</text>
+<text class="axis-label" x="2213.0" y="315.0" text-anchor="middle">junit-framework</text>
+<rect class="srv-0" x="2091.0" y="215.9" width="24.0" height="79.1" rx="2.5"/>
+<text class="bar-label" x="2103.0" y="210.9" text-anchor="middle">3.63s</text>
+<rect class="srv-0-alt" x="2119.0" y="247.4" width="24.0" height="47.6" rx="2.5"/>
+<text class="bar-label" x="2131.0" y="232.4" text-anchor="middle">866ms</text>
+<rect class="srv-1" x="2155.0" y="177.8" width="24.0" height="117.2" rx="2.5"/>
+<text class="bar-label" x="2167.0" y="172.8" text-anchor="middle">20.40s</text>
+<rect class="srv-1-alt" x="2183.0" y="197.0" width="24.0" height="98.0" rx="2.5"/>
+<text class="bar-label" x="2195.0" y="182.0" text-anchor="middle">8.53s</text>
+<rect class="srv-2" x="2219.0" y="239.5" width="24.0" height="55.5" rx="2.5"/>
+<text class="bar-label" x="2231.0" y="234.5" text-anchor="middle">1.24s</text>
+<rect class="srv-2-alt" x="2247.0" y="242.2" width="24.0" height="52.8" rx="2.5"/>
+<text class="bar-label" x="2259.0" y="227.2" text-anchor="middle">1.10s</text>
+<rect class="srv-3" x="2283.0" y="206.7" width="24.0" height="88.3" rx="2.5"/>
+<text class="bar-label" x="2295.0" y="201.7" text-anchor="middle">5.48s</text>
+<rect class="srv-3-alt" x="2311.0" y="210.5" width="24.0" height="84.5" rx="2.5"/>
+<text class="bar-label" x="2323.0" y="195.5" text-anchor="middle">4.61s</text>
+<text class="axis-label" x="2499.0" y="315.0" text-anchor="middle">error-prone</text>
+<rect class="srv-0" x="2377.0" y="213.0" width="24.0" height="82.0" rx="2.5"/>
+<text class="bar-label" x="2389.0" y="208.0" text-anchor="middle">4.14s</text>
+<rect class="srv-0-alt" x="2405.0" y="250.0" width="24.0" height="45.0" rx="2.5"/>
+<text class="bar-label" x="2417.0" y="235.0" text-anchor="middle">772ms</text>
+<rect class="srv-1" x="2441.0" y="208.6" width="24.0" height="86.4" rx="2.5"/>
+<text class="bar-label" x="2453.0" y="203.6" text-anchor="middle">5.04s</text>
+<rect class="srv-1-alt" x="2469.0" y="229.5" width="24.0" height="65.5" rx="2.5"/>
+<text class="bar-label" x="2481.0" y="214.5" text-anchor="middle">1.96s</text>
+<rect class="srv-2" x="2505.0" y="221.1" width="24.0" height="73.9" rx="2.5"/>
+<text class="bar-label" x="2517.0" y="216.1" text-anchor="middle">2.85s</text>
+<rect class="srv-2-alt" x="2533.0" y="224.0" width="24.0" height="71.0" rx="2.5"/>
+<text class="bar-label" x="2545.0" y="209.0" text-anchor="middle">2.50s</text>
+<rect class="srv-3" x="2569.0" y="213.3" width="24.0" height="81.7" rx="2.5"/>
+<text class="bar-label" x="2581.0" y="208.3" text-anchor="middle">4.07s</text>
+<rect class="srv-3-alt" x="2597.0" y="213.9" width="24.0" height="81.1" rx="2.5"/>
+<text class="bar-label" x="2609.0" y="198.9" text-anchor="middle">3.96s</text>
+</svg>
