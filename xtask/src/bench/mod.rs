@@ -32,39 +32,6 @@ use self::{
     synth::generate_plain_small,
 };
 
-pub const USAGE: &str = "\
-Usage: cargo xtask bench [OPTIONS]
-
-Run the reproducible Java LSP benchmark suite across servers and repositories.
-
-Options:
-  --server <NAME=CMD>         Server spec to benchmark (repeatable)
-  --repo <ID=PATH>            Repository path to benchmark (repeatable)
-  --tier <small|medium|large> Filter matrix by size tier (repeatable)
-  --shape <SHAPE>             Filter matrix by shape: plain|maven|gradle|ant|single-module|multi-module
-  --ops <CATEGORIES>          Comma-separated op categories: lifecycle,nav,hierarchy,refactor,completion,edit,present [all]
-  --probes <PATH>             TOML probe manifest [embedded xtask/bench/probes.toml]
-  --warmup <N>                Warmup iterations per probe [5]
-  --iterations <N>            Measured iterations per probe [15]
-  --ready-timeout <SECS>      Max seconds to wait for server readiness [180]
-  --request-timeout <SECS>    Max seconds per individual LSP request [30]
-  --skip-warm-restart         Skip Phase 4 warm-restart measurement
-  --revision <TEXT>           Revision string for the report header [auto-detected]
-  --json-out <PATH>           Output JSON path [target/bench/results.json]
-  --md-out <PATH>             Output Markdown path [target/bench/BENCHMARKS.md]
-  -h, --help                  Show this help
-";
-
-pub const GEN_PLAIN_USAGE: &str = "\
-Usage: cargo xtask bench-gen-plain [OPTIONS]
-
-Generate the deterministic plain-Java synthetic corpus (`plain-small`).
-
-Options:
-  --out <DIR>    Destination directory [target/bench/corpus/plain-small]
-  -h, --help     Show this help
-";
-
 /// Server definition parsed from `--server <NAME=CMD>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerSpec {
@@ -90,6 +57,14 @@ impl ServerSpec {
             name: name.to_string(),
             cmd: cmd.to_string(),
         })
+    }
+}
+
+impl std::str::FromStr for ServerSpec {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
     }
 }
 
@@ -134,8 +109,11 @@ impl Default for BenchArgs {
 }
 
 /// Parsed CLI options for `cargo xtask bench-gen-plain`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, usage::Args)]
+#[usage(crate = usage)]
 pub struct GenPlainArgs {
+    /// Destination directory
+    #[usage(long, value_name = "DIR", default = "target/bench/corpus/plain-small")]
     pub out: PathBuf,
 }
 
@@ -303,6 +281,14 @@ fn resolve_repos(
                     completions: BTreeMap::new(),
                 },
             };
+            if !args.tiers.is_empty() && !args.tiers.contains(&spec.tier) {
+                continue;
+            }
+            if !args.shapes.is_empty()
+                && !args.shapes.iter().any(|wanted| spec.shapes.contains(wanted))
+            {
+                continue;
+            }
             if !path.is_dir() {
                 return Err(format!(
                     "repository `{id}` path does not exist: {}",
@@ -406,6 +392,12 @@ fn run_single_pair(
 
     let cold_ready_ms =
         wait_until_ready(&mut client, &caps, repo, repo_dir, &file_cache, cold_spawn, ready_timeout, request_timeout);
+    eprintln!(
+        "[bench]   cold: init={:.0}ms, 1st={}, ready={}",
+        cold_init_ms,
+        cold_first_response_ms.map_or_else(|| "N/A".to_string(), |v| format!("{v:.0}ms")),
+        cold_ready_ms.map_or_else(|| "timeout".to_string(), |v| format!("{v:.0}ms")),
+    );
 
     // Open all clean & probe files so diagnostics and operations have live buffers.
     let mut open_uris = BTreeMap::new();
@@ -765,43 +757,76 @@ fn wait_until_ready(
     client.wait_for_progress_settle(ready_timeout);
     let deadline = spawn_instant + ready_timeout;
 
-    let ready_id = repo
-        .ready_probe
-        .as_deref()
-        .unwrap_or("hover_workspace");
-    let Some(spec) = repo.probes.get(ready_id) else {
-        return Some(spawn_instant.elapsed().as_secs_f64() * 1000.0);
-    };
-    let Some(text) = file_cache.get(&spec.file) else {
-        return Some(spawn_instant.elapsed().as_secs_f64() * 1000.0);
-    };
-    let full = repo_dir.join(&spec.file);
-    let Ok(uri) = client.ensure_open(&full, text) else {
-        return None;
-    };
+    let primary_id = repo.ready_probe.as_deref().unwrap_or("hover_workspace");
+    let mut candidate_ids: Vec<&str> = vec![primary_id];
+    for fallback in ["def_workspace", "hover_workspace", "hover_jdk"] {
+        if !candidate_ids.contains(&fallback) {
+            candidate_ids.push(fallback);
+        }
+    }
 
     let mut open_uris = BTreeMap::new();
-    open_uris.insert(spec.file.clone(), uri);
-    let planned = PlannedOp {
-        id: ready_id.to_string(),
-        supported: op_supported_by_caps(ready_id, caps),
-        kind: OpKind::Probe(spec.clone()),
-    };
+    let mut candidates = Vec::new();
+    for id in candidate_ids {
+        if !op_supported_by_caps(id, caps) {
+            continue;
+        }
+        let Some(spec) = repo.probes.get(id) else {
+            continue;
+        };
+        let Some(text) = file_cache.get(&spec.file) else {
+            continue;
+        };
+        let full = repo_dir.join(&spec.file);
+        if let Ok(uri) = client.ensure_open(&full, text) {
+            open_uris.insert(spec.file.clone(), uri);
+            candidates.push(PlannedOp {
+                id: id.to_string(),
+                supported: true,
+                kind: OpKind::Probe(spec.clone()),
+            });
+        }
+    }
 
-    if !planned.supported {
+    if candidates.is_empty() {
         return Some(spawn_instant.elapsed().as_secs_f64() * 1000.0);
     }
+
+    const SETTLED_MISS_GRACE: Duration = Duration::from_secs(10);
+    let mut settled_since: Option<Instant> = None;
 
     loop {
         let now = Instant::now();
         if now >= deadline {
             return None;
         }
-        let remaining = deadline.saturating_duration_since(now).min(request_timeout);
-        let outcome = execute_op(client, caps, repo_dir, file_cache, &open_uris, &planned, remaining);
-        if !outcome.error && outcome.hit {
-            return Some(spawn_instant.elapsed().as_secs_f64() * 1000.0);
+
+        let mut all_non_error = true;
+        for planned in &candidates {
+            let cur = Instant::now();
+            if cur >= deadline {
+                return None;
+            }
+            let remaining = deadline.saturating_duration_since(cur).min(request_timeout);
+            let outcome =
+                execute_op(client, caps, repo_dir, file_cache, &open_uris, planned, remaining);
+            if !outcome.error && outcome.hit {
+                return Some(spawn_instant.elapsed().as_secs_f64() * 1000.0);
+            }
+            if outcome.error {
+                all_non_error = false;
+            }
         }
+
+        if all_non_error && !client.has_active_progress() {
+            let started = *settled_since.get_or_insert_with(Instant::now);
+            if started.elapsed() >= SETTLED_MISS_GRACE {
+                return None;
+            }
+        } else {
+            settled_since = None;
+        }
+
         if Instant::now() + Duration::from_millis(100) >= deadline {
             return None;
         }

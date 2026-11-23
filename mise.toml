@@ -87,12 +87,20 @@ exit "$status"
 '''
 
 [tasks.conformance-fetch-jdk]
-description = "Download and unpack OpenJDK source tree (arg or JDK_VERSION: latest|lts|<N>|<tag>)"
+description = "Download and unpack OpenJDK source tree (latest|lts|<N>|<tag>)"
+usage = '''
+flag "-f --force" help="Re-download and overwrite cached OpenJDK source tree"
+arg "[jdk_spec]" help="OpenJDK release spec: latest, lts, <N>, or <tag>" default="latest"
+'''
 run = '''
 #!/usr/bin/env bash
 set -euo pipefail
 
-spec="${1:-${JDK_TAG:-${JDK_VERSION:-latest}}}"
+if [ "${usage_force:-false}" = "true" ]; then
+  export FORCE=1
+fi
+
+spec="${usage_jdk_spec:-${JDK_TAG:-${JDK_VERSION:-latest}}}"
 case "$spec" in
   latest)
     ver="$(xh --ignore-stdin --body --check-status GET https://api.adoptium.net/v3/info/available_releases | jq -r '.most_recent_feature_release')"
@@ -171,10 +179,18 @@ cargo xtask conformance "${args[@]}" --out target/conformance
 '''
 
 [tasks.conformance-jdk]
-description = "Fetch library corpora + OpenJDK (arg or JDK_VERSION: latest|lts|<N>|<tag>) and run conformance"
+description = "Fetch library corpora + OpenJDK (latest|lts|<N>|<tag>) and run conformance"
+usage = '''
+flag "-f --force" help="Re-download and overwrite cached corpora and OpenJDK source tree"
+arg "[jdk_spec]" help="OpenJDK release spec: latest, lts, <N>, or <tag>" default="latest"
+'''
 run = '''
 #!/usr/bin/env bash
 set -euo pipefail
+
+if [ "${usage_force:-false}" = "true" ]; then
+  export FORCE=1
+fi
 
 jdk_log="$(mktemp "${TMPDIR:-/tmp}/java-corpus-jdk-log.XXXXXX")"
 cleanup() {
@@ -182,9 +198,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
+fetch_jdk_args=("${usage_jdk_spec:-latest}")
+if [ "${FORCE:-0}" = "1" ]; then
+  fetch_jdk_args+=(--force)
+fi
+
 mise run conformance-fetch &
 pid_libs=$!
-mise run conformance-fetch-jdk "$@" > "$jdk_log" &
+mise run conformance-fetch-jdk "${fetch_jdk_args[@]}" > "$jdk_log" &
 pid_jdk=$!
 
 status=0
@@ -214,7 +235,11 @@ cargo xtask conformance "${args[@]}" --out target/conformance
 '''
 
 [tasks.workspace-corpus]
-description = "Fetch, inspect, and clean up real-world Java repos in parallel (CORPUS_JOBS=4, optional filter args)"
+description = "Fetch, inspect, and clean up real-world Java repos in parallel"
+usage = '''
+flag "-j --jobs <n>" help="Number of parallel repo jobs" default="4" env="CORPUS_JOBS"
+arg "[repos]" var=#true help="Optional repository IDs to inspect (defaults to all)"
+'''
 run = '''
 #!/usr/bin/env bash
 set -euo pipefail
@@ -290,7 +315,11 @@ process_repo() {
   echo "[workspace-corpus] $id done (${elapsed_ms}ms)" >&2
 }
 
-jobs="${CORPUS_JOBS:-4}"
+jobs="${usage_jobs:-${CORPUS_JOBS:-4}}"
+filter_repos=()
+if [ -n "${usage_repos:-}" ]; then
+  eval "filter_repos=($usage_repos)"
+fi
 selected_ids=()
 pids=()
 active=0
@@ -299,7 +328,7 @@ status=0
 for entry in "${repos[@]}"; do
   id="${entry%%|*}"
   slug="${entry#*|}"
-  if ! should_run "$id" "$@"; then
+  if ! should_run "$id" ${filter_repos[@]+"${filter_repos[@]}"}; then
     continue
   fi
   selected_ids+=("$id")
@@ -371,6 +400,10 @@ echo ""
 
 [tasks.conformance-report]
 description = "Run all verification tiers (in parallel where possible) and generate CONFORMANCE.md"
+usage = '''
+flag "--out <path>" help="Output Markdown path" default="target/conformance/CONFORMANCE.md"
+flag "--strict" help="Exit 1 if clippy/tests failed or any unexpected findings exist"
+'''
 run = '''
 #!/usr/bin/env bash
 set -euo pipefail
@@ -407,21 +440,47 @@ else
 fi
 [ -n "$rev" ] || rev="unknown"
 
-cargo xtask report \
-  --conformance target/conformance/report.json \
-  --workspace-corpus target/workspace-corpus \
-  --test-output target/conformance/test-output.txt \
-  --clippy-status "$clippy_status" \
-  --revision "$rev" \
-  --out target/conformance/CONFORMANCE.md \
-  "$@"
+report_args=(
+  --conformance target/conformance/report.json
+  --workspace-corpus target/workspace-corpus
+  --test-output target/conformance/test-output.txt
+  --clippy-status "$clippy_status"
+  --revision "$rev"
+  --out "${usage_out:-target/conformance/CONFORMANCE.md}"
+)
+if [ "${usage_strict:-false}" = "true" ]; then
+  report_args+=(--strict)
+fi
+
+cargo xtask report "${report_args[@]}"
 '''
 
 [tasks.bench-fetch]
-description = "Download and unpack pinned benchmark corpora and external Java LSPs using xh (SERVERS_ONLY=1, CORPORA_ONLY=1, FORCE=1, optional filter args)"
+description = "Download and unpack pinned benchmark corpora and external Java LSPs using xh"
+usage = '''
+flag "--servers-only" help="Fetch only external LSP servers"
+flag "--corpora-only" help="Fetch only benchmark corpora"
+flag "-f --force" help="Re-download and overwrite cached assets"
+arg "[targets]" var=#true help="Optional server/corpus IDs to fetch (defaults to all)"
+'''
 run = '''
 #!/usr/bin/env bash
 set -euo pipefail
+
+if [ "${usage_servers_only:-false}" = "true" ]; then
+  export SERVERS_ONLY=1
+fi
+if [ "${usage_corpora_only:-false}" = "true" ]; then
+  export CORPORA_ONLY=1
+fi
+if [ "${usage_force:-false}" = "true" ]; then
+  export FORCE=1
+fi
+
+targets=()
+if [ -n "${usage_targets:-}" ]; then
+  eval "targets=($usage_targets)"
+fi
 
 corpus_dir="target/bench/corpus"
 server_dir="target/bench/servers"
@@ -631,28 +690,28 @@ optional_pids=()
 if [ "${SERVERS_ONLY:-0}" != "1" ]; then
   for entry in "${corpora[@]}"; do
     IFS='|' read -r id slug tag <<< "$entry"
-    if should_run "$id" "$@"; then
+    if should_run "$id" ${targets[@]+"${targets[@]}"}; then
       fetch_corpus "$id" "$slug" "$tag" &
       required_pids+=("$!")
     fi
   done
 
-  if should_run "plain-small" "$@"; then
+  if should_run "plain-small" ${targets[@]+"${targets[@]}"}; then
     gen_plain_small &
     required_pids+=("$!")
   fi
 fi
 
 if [ "${CORPORA_ONLY:-0}" != "1" ]; then
-  if should_run "jdtls" "$@"; then
+  if should_run "jdtls" ${targets[@]+"${targets[@]}"}; then
     fetch_jdtls &
     optional_pids+=("jdtls:$!")
   fi
-  if should_run "jls" "$@"; then
+  if should_run "jls" ${targets[@]+"${targets[@]}"}; then
     fetch_jls &
     optional_pids+=("jls:$!")
   fi
-  if should_run "nbls" "$@"; then
+  if should_run "nbls" ${targets[@]+"${targets[@]}"}; then
     fetch_nbls &
     optional_pids+=("nbls:$!")
   fi
@@ -678,6 +737,26 @@ exit "$status"
 
 [tasks.bench]
 description = "Build release binaries, fetch benchmark assets, and run the LSP benchmark suite"
+usage = '''
+flag "--tier <tier>" var=#true help="Filter matrix by size tier (repeatable)" {
+  choices "small" "medium" "large"
+}
+flag "--shape <shape>" var=#true help="Filter matrix by shape (repeatable)" {
+  choices "plain" "maven" "gradle" "ant" "single-module" "multi-module"
+}
+flag "--ops <categories>" var=#true help="Comma-separated op categories [all]"
+flag "--repo <id=path>" var=#true help="Repository path to benchmark (repeatable)"
+flag "--server <name=cmd>" var=#true help="Server spec to benchmark (repeatable)"
+flag "--probes <path>" help="TOML probe manifest"
+flag "--warmup <n>" help="Warmup iterations per probe"
+flag "--iterations <n>" help="Measured iterations per probe"
+flag "--ready-timeout <secs>" help="Max seconds to wait for server readiness"
+flag "--request-timeout <secs>" help="Max seconds per individual LSP request"
+flag "--skip-warm-restart" help="Skip Phase 4 warm-restart measurement"
+flag "--revision <text>" help="Revision string for the report header"
+flag "--json-out <path>" help="Output JSON path"
+flag "--md-out <path>" help="Output Markdown path"
+'''
 run = '''
 #!/usr/bin/env bash
 set -euo pipefail
@@ -685,57 +764,101 @@ set -euo pipefail
 cargo build --release -p java-analyzer -p xtask
 mise run bench-fetch
 
-args=(
-  --server "java-analyzer=target/release/java-analyzer lsp"
-)
+args=()
 
-if [ -x "target/bench/servers/jdtls/bin/jdtls" ]; then
-  args+=(--server "jdtls=target/bench/servers/jdtls/bin/jdtls -data {cache_dir}")
-elif command -v jdtls >/dev/null 2>&1; then
-  args+=(--server "jdtls=$(command -v jdtls) -data {cache_dir}")
-fi
+if [ -n "${usage_server:-}" ]; then
+  eval "explicit_servers=($usage_server)"
+  for s in "${explicit_servers[@]}"; do
+    args+=(--server "$s")
+  done
+else
+  args+=(--server "java-analyzer=target/release/java-analyzer lsp")
 
-case "$(uname -s)" in
-  Darwin)
-    jls_script="target/bench/servers/jls/extension/dist/lang_server_mac.sh"
-    ;;
-  *)
-    jls_script="target/bench/servers/jls/extension/dist/lang_server_linux.sh"
-    ;;
-esac
-if [ -x "$jls_script" ]; then
-  args+=(--server "jls=$jls_script")
-elif [ -x "target/bench/servers/jls/extension/dist/lang_server_mac.sh" ]; then
-  args+=(--server "jls=target/bench/servers/jls/extension/dist/lang_server_mac.sh")
-elif [ -x "target/bench/servers/jls/extension/dist/lang_server_linux.sh" ]; then
-  args+=(--server "jls=target/bench/servers/jls/extension/dist/lang_server_linux.sh")
-fi
+  if [ -x "target/bench/servers/jdtls/bin/jdtls" ]; then
+    args+=(--server "jdtls=target/bench/servers/jdtls/bin/jdtls -data {cache_dir}")
+  elif command -v jdtls >/dev/null 2>&1; then
+    args+=(--server "jdtls=$(command -v jdtls) -data {cache_dir}")
+  fi
 
-if [ -x "target/bench/servers/nbls/extension/nbcode/bin/nbcode.sh" ]; then
-  args+=(--server "nbls=target/bench/servers/nbls/extension/nbcode/bin/nbcode.sh --userdir {cache_dir} --start-java-language-server")
-elif [ -x "target/bench/servers/nbls/extension/nbcode/bin/nbcode" ]; then
-  args+=(--server "nbls=target/bench/servers/nbls/extension/nbcode/bin/nbcode --userdir {cache_dir} --start-java-language-server")
-fi
-
-has_explicit_repo=0
-for arg in "$@"; do
-  case "$arg" in
-    --repo|--repo=*)
-      has_explicit_repo=1
-      break
+  case "$(uname -s)" in
+    Darwin)
+      jls_script="target/bench/servers/jls/extension/dist/lang_server_mac.sh"
+      ;;
+    *)
+      jls_script="target/bench/servers/jls/extension/dist/lang_server_linux.sh"
       ;;
   esac
-done
+  if [ -x "$jls_script" ]; then
+    args+=(--server "jls=$jls_script")
+  elif [ -x "target/bench/servers/jls/extension/dist/lang_server_mac.sh" ]; then
+    args+=(--server "jls=target/bench/servers/jls/extension/dist/lang_server_mac.sh")
+  elif [ -x "target/bench/servers/jls/extension/dist/lang_server_linux.sh" ]; then
+    args+=(--server "jls=target/bench/servers/jls/extension/dist/lang_server_linux.sh")
+  fi
 
-if [ "$has_explicit_repo" -eq 0 ]; then
-  for id in plain-small jackson-core gson commons-lang ant-ivy gradle-medium tomcat junit-framework error-prone; do
-    if [ -d "target/bench/corpus/$id" ]; then
-      args+=(--repo "${id}=target/bench/corpus/${id}")
-    fi
+  if [ -x "target/bench/servers/nbls/extension/nbcode/bin/nbcode.sh" ]; then
+    args+=(--server "nbls=target/bench/servers/nbls/extension/nbcode/bin/nbcode.sh --userdir {cache_dir} --start-java-language-server")
+  elif [ -x "target/bench/servers/nbls/extension/nbcode/bin/nbcode" ]; then
+    args+=(--server "nbls=target/bench/servers/nbls/extension/nbcode/bin/nbcode --userdir {cache_dir} --start-java-language-server")
+  fi
+fi
+
+if [ -n "${usage_repo:-}" ]; then
+  eval "explicit_repos=($usage_repo)"
+  for r in "${explicit_repos[@]}"; do
+    args+=(--repo "$r")
   done
 fi
 
-if command -v jj >/dev/null 2>&1; then
+if [ -n "${usage_tier:-}" ]; then
+  eval "tiers=($usage_tier)"
+  for t in "${tiers[@]}"; do
+    args+=(--tier "$t")
+  done
+fi
+
+if [ -n "${usage_shape:-}" ]; then
+  eval "shapes=($usage_shape)"
+  for s in "${shapes[@]}"; do
+    args+=(--shape "$s")
+  done
+fi
+
+if [ -n "${usage_ops:-}" ]; then
+  eval "ops_list=($usage_ops)"
+  for o in "${ops_list[@]}"; do
+    args+=(--ops "$o")
+  done
+fi
+
+if [ -n "${usage_probes:-}" ]; then
+  args+=(--probes "$usage_probes")
+fi
+if [ -n "${usage_warmup:-}" ]; then
+  args+=(--warmup "$usage_warmup")
+fi
+if [ -n "${usage_iterations:-}" ]; then
+  args+=(--iterations "$usage_iterations")
+fi
+if [ -n "${usage_ready_timeout:-}" ]; then
+  args+=(--ready-timeout "$usage_ready_timeout")
+fi
+if [ -n "${usage_request_timeout:-}" ]; then
+  args+=(--request-timeout "$usage_request_timeout")
+fi
+if [ "${usage_skip_warm_restart:-false}" = "true" ]; then
+  args+=(--skip-warm-restart)
+fi
+if [ -n "${usage_json_out:-}" ]; then
+  args+=(--json-out "$usage_json_out")
+fi
+if [ -n "${usage_md_out:-}" ]; then
+  args+=(--md-out "$usage_md_out")
+fi
+
+if [ -n "${usage_revision:-}" ]; then
+  rev="$usage_revision"
+elif command -v jj >/dev/null 2>&1; then
   rev="$(jj log -r @- --no-graph -T 'change_id.shortest(8) ++ " (" ++ commit_id.shortest(8) ++ ", " ++ description.first_line() ++ ")"' 2>/dev/null || echo "unknown")"
 else
   rev="unknown"
@@ -744,6 +867,5 @@ fi
 
 target/release/xtask bench \
   "${args[@]}" \
-  --revision "$rev" \
-  "$@"
+  --revision "$rev"
 '''

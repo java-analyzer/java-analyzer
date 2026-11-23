@@ -1,0 +1,139 @@
+name xtask
+bin "cargo xtask"
+unknown_flags error
+flag "-h --help" help="Print help" action=help builtin=#true
+cmd conformance help="Parse Java corpora and write conformance reports" {
+    long_help #"""
+Parses every .java file under the given directories and writes a report.
+
+Report only: the exit code is 0 whatever the conformance results are, and non-zero only if the tool itself fails.
+"""#
+    flag --valid help="A directory of files that must parse without errors (repeatable)" var=#true {
+        arg <DIR>
+    }
+    flag --invalid help="A directory of files that must produce at least one error (repeatable)" var=#true {
+        arg <DIR>
+    }
+    flag --release help="Declared Java release version for parsing (default: latest)" {
+        arg <N>
+    }
+    flag --preview help="Enable preview features at the declared release"
+    flag --out help="Where to write report.json, report.md and failures/" default="target/conformance" {
+        arg <DIR>
+    }
+    flag --timeout help="Per-file parse limit in seconds; a file over it is a critical finding" default="5" {
+        arg <SECS>
+    }
+    flag "-h --help" help="Print help" action=help builtin=#true
+}
+cmd report help="Assemble unified CONFORMANCE.md from verification outputs" {
+    flag --conformance help="Path to conformance report.json" default="target/conformance/report.json" {
+        arg <PATH>
+    }
+    flag --workspace-corpus help="Directory containing timings.tsv and <repo>.json" default="target/workspace-corpus" {
+        arg <DIR>
+    }
+    flag --test-output help="Captured stdout from `cargo test --workspace --all-targets`" {
+        arg <PATH>
+    }
+    flag --clippy-status help="Clippy result: pass | fail | skipped" default=skipped {
+        arg <STATUS> {
+            choices {
+                choice pass
+                choice fail
+                choice skipped
+            }
+        }
+    }
+    flag --known-findings help="TOML file of known workspace findings [embedded default]" {
+        arg <PATH>
+    }
+    flag --revision help="Revision string for the report header (e.g. jj change/commit)" {
+        arg <TEXT>
+    }
+    flag --date help="Date string for the report header [current UTC date]" {
+        arg <YYYY-MM-DD>
+    }
+    flag --out help="Output Markdown path" default="target/conformance/CONFORMANCE.md" {
+        arg <PATH>
+    }
+    flag --strict help="Exit 1 if clippy/tests failed or any unexpected findings exist"
+    flag "-h --help" help="Print help" action=help builtin=#true
+}
+cmd bench help="Run the reproducible Java LSP benchmark suite" {
+    flag --server help="Server spec to benchmark (repeatable)" var=#true {
+        arg "<NAME=CMD>"
+    }
+    flag --repo help="Repository path to benchmark (repeatable)" var=#true {
+        arg "<ID=PATH>"
+    }
+    flag --tier help="Filter matrix by size tier (repeatable)" var=#true {
+        arg <TIER> {
+            choices {
+                choice small
+                choice medium
+                choice large
+            }
+        }
+    }
+    flag --shape help="Filter matrix by shape (repeatable)" var=#true {
+        arg <SHAPE> {
+            choices {
+                choice plain
+                choice maven
+                choice gradle
+                choice ant
+                choice single-module
+                choice multi-module
+            }
+        }
+    }
+    flag --ops help="Comma-separated op categories [all]" var=#true delimiter=, {
+        arg <CATEGORIES> {
+            choices {
+                choice lifecycle
+                choice nav
+                choice hierarchy
+                choice refactor
+                choice completion
+                choice edit
+                choice present
+            }
+        }
+    }
+    flag --probes help="TOML probe manifest [embedded xtask/bench/probes.toml]" {
+        arg <PATH>
+    }
+    flag --warmup help="Warmup iterations per probe" default="5" {
+        arg <N>
+    }
+    flag --iterations help="Measured iterations per probe" default="15" {
+        arg <N>
+    }
+    flag --ready-timeout help="Max seconds to wait for server readiness" default="180" {
+        arg <SECS>
+    }
+    flag --request-timeout help="Max seconds per individual LSP request" default="30" {
+        arg <SECS>
+    }
+    flag --skip-warm-restart help="Skip Phase 4 warm-restart measurement"
+    flag --revision help="Revision string for the report header [auto-detected]" {
+        arg <TEXT>
+    }
+    flag --json-out help="Output JSON path" default="target/bench/results.json" {
+        arg <PATH>
+    }
+    flag --md-out help="Output Markdown path" default="target/bench/BENCHMARKS.md" {
+        arg <PATH>
+    }
+    flag "-h --help" help="Print help" action=help builtin=#true
+}
+cmd bench-gen-plain help="Generate the synthetic plain-small Java corpus" {
+    flag --out help="Destination directory" default="target/bench/corpus/plain-small" {
+        arg <DIR>
+    }
+    flag "-h --help" help="Print help" action=help builtin=#true
+}
+cmd usage-spec help="Print the canonical KDL usage spec for xtask to stdout" {
+    flag "-h --help" help="Print help" action=help builtin=#true
+}

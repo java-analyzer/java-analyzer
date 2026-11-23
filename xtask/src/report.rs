@@ -10,58 +10,46 @@ use std::{
 
 use serde::Deserialize;
 
-pub const USAGE: &str = "\
-Usage: cargo xtask report [OPTIONS]
-
-Assembles a unified Markdown conformance report from test output, parser conformance
-JSON, and workspace-corpus JSON files.
-
-Options:
-  --conformance <PATH>       Path to conformance report.json [target/conformance/report.json]
-  --workspace-corpus <DIR>   Directory containing timings.tsv and <repo>.json [target/workspace-corpus]
-  --test-output <PATH>       Captured stdout from `cargo test --workspace --all-targets`
-  --clippy-status <STATUS>   Clippy result: pass | fail | skipped [skipped]
-  --known-findings <PATH>    TOML file of known workspace findings [embedded default]
-  --revision <TEXT>          Revision string for the report header (e.g. jj change/commit)
-  --date <YYYY-MM-DD>        Date string for the report header [current UTC date]
-  --out <PATH>               Output Markdown path [target/conformance/CONFORMANCE.md]
-  --strict                   Exit 1 if clippy/tests failed or any unexpected findings exist
-  -h, --help                 Show this help
-";
-
 pub const EMBEDDED_KNOWN_FINDINGS: &str =
     include_str!("../conformance/workspace-known-findings.toml");
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, usage::ValueEnum)]
+#[usage(crate = usage)]
 pub enum ClippyStatus {
     Pass,
     Fail,
     Skipped,
 }
 
-impl ClippyStatus {
-    pub fn parse(s: &str) -> Result<Self, String> {
-        match s {
-            "pass" => Ok(Self::Pass),
-            "fail" => Ok(Self::Fail),
-            "skipped" => Ok(Self::Skipped),
-            other => Err(format!(
-                "--clippy-status must be `pass`, `fail`, or `skipped`, got `{other}`"
-            )),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, usage::Args)]
+#[usage(crate = usage)]
 pub struct ReportArgs {
+    /// Path to conformance report.json
+    #[usage(long, value_name = "PATH", default = "target/conformance/report.json")]
     pub conformance: PathBuf,
+    /// Directory containing timings.tsv and <repo>.json
+    #[usage(long, value_name = "DIR", default = "target/workspace-corpus")]
     pub workspace_corpus: PathBuf,
+    /// Captured stdout from `cargo test --workspace --all-targets`
+    #[usage(long, value_name = "PATH")]
     pub test_output: Option<PathBuf>,
+    /// Clippy result: pass | fail | skipped
+    #[usage(long, value_enum, value_name = "STATUS", default = "skipped")]
     pub clippy_status: ClippyStatus,
+    /// TOML file of known workspace findings [embedded default]
+    #[usage(long, value_name = "PATH")]
     pub known_findings: Option<PathBuf>,
+    /// Revision string for the report header (e.g. jj change/commit)
+    #[usage(long, value_name = "TEXT")]
     pub revision: Option<String>,
+    /// Date string for the report header [current UTC date]
+    #[usage(long, value_name = "YYYY-MM-DD")]
     pub date: Option<String>,
+    /// Output Markdown path
+    #[usage(long, value_name = "PATH", default = "target/conformance/CONFORMANCE.md")]
     pub out: PathBuf,
+    /// Exit 1 if clippy/tests failed or any unexpected findings exist
+    #[usage(long)]
     pub strict: bool,
 }
 

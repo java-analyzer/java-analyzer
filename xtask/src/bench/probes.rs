@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 pub const EMBEDDED_PROBES_TOML: &str = include_str!("../../bench/probes.toml");
 
 /// Corpus size tier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, usage::ValueEnum)]
 #[serde(rename_all = "lowercase")]
+#[usage(crate = usage)]
 pub enum Tier {
     Small,
     Medium,
@@ -17,17 +18,6 @@ pub enum Tier {
 }
 
 impl Tier {
-    pub fn parse(s: &str) -> Result<Self, String> {
-        match s {
-            "small" => Ok(Self::Small),
-            "medium" => Ok(Self::Medium),
-            "large" => Ok(Self::Large),
-            other => Err(format!(
-                "invalid tier `{other}` (expected small, medium, or large)"
-            )),
-        }
-    }
-
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Small => "small",
@@ -38,8 +28,9 @@ impl Tier {
 }
 
 /// Repository build tool and module shape classification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, usage::ValueEnum)]
 #[serde(rename_all = "kebab-case")]
+#[usage(crate = usage)]
 pub enum Shape {
     Plain,
     Maven,
@@ -50,20 +41,6 @@ pub enum Shape {
 }
 
 impl Shape {
-    pub fn parse(s: &str) -> Result<Self, String> {
-        match s {
-            "plain" => Ok(Self::Plain),
-            "maven" => Ok(Self::Maven),
-            "gradle" => Ok(Self::Gradle),
-            "ant" => Ok(Self::Ant),
-            "single-module" => Ok(Self::SingleModule),
-            "multi-module" => Ok(Self::MultiModule),
-            other => Err(format!(
-                "invalid shape `{other}` (expected plain, maven, gradle, ant, single-module, or multi-module)"
-            )),
-        }
-    }
-
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Plain => "plain",
@@ -77,8 +54,9 @@ impl Shape {
 }
 
 /// Benchmark operation category filter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, usage::ValueEnum)]
 #[serde(rename_all = "lowercase")]
+#[usage(crate = usage)]
 pub enum OpCategory {
     Lifecycle,
     Nav,
@@ -90,21 +68,6 @@ pub enum OpCategory {
 }
 
 impl OpCategory {
-    pub fn parse(s: &str) -> Result<Self, String> {
-        match s {
-            "lifecycle" => Ok(Self::Lifecycle),
-            "nav" => Ok(Self::Nav),
-            "hierarchy" => Ok(Self::Hierarchy),
-            "refactor" => Ok(Self::Refactor),
-            "completion" => Ok(Self::Completion),
-            "edit" => Ok(Self::Edit),
-            "present" => Ok(Self::Present),
-            other => Err(format!(
-                "invalid op category `{other}` (expected lifecycle, nav, hierarchy, refactor, completion, edit, or present)"
-            )),
-        }
-    }
-
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Lifecycle => "lifecycle",

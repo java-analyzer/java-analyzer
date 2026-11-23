@@ -483,6 +483,16 @@ impl LspClient {
         }
     }
 
+    /// Returns `true` if any `$/progress` work item is currently active.
+    pub fn has_active_progress(&self) -> bool {
+        let (lock, _) = &*self.shared;
+        let guard = match lock.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        !guard.active_progress.is_empty()
+    }
+
     /// Returns the latest diagnostic `ERROR` count recorded for `uri`.
     pub fn diagnostics_error_count(&self, uri: &str) -> Option<usize> {
         let (lock, _) = &*self.shared;
