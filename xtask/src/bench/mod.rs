@@ -1,6 +1,8 @@
 //! Pure-Rust Java LSP benchmark harness (`cargo xtask bench`, Spec 0018).
 
+pub mod charts;
 pub mod client;
+pub mod html;
 pub mod probes;
 pub mod report;
 pub mod rss;
@@ -26,7 +28,8 @@ use self::{
     },
     report::{
         BenchReport, EnvironmentInfo, LifecycleStats, OpStats, REPORT_SCHEMA_VERSION,
-        RepoServerResult, format_markdown, format_stdout_tables,
+        RepoServerResult, format_lifecycle_csv, format_markdown_with_charts, format_ops_csv,
+        format_stdout_tables,
     },
     rss::RssSampler,
     synth::generate_plain_small,
@@ -68,6 +71,47 @@ impl std::str::FromStr for ServerSpec {
     }
 }
 
+/// Output artifact format for `bench` and `bench-plot`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, usage::ValueEnum)]
+#[usage(crate = usage, ignore_case)]
+pub enum OutputFormat {
+    Json,
+    Csv,
+    #[usage(visible_alias = "markdown")]
+    Md,
+    Html,
+}
+
+impl OutputFormat {
+    /// All supported output formats in canonical order.
+    pub const ALL: [Self; 4] = [Self::Json, Self::Csv, Self::Md, Self::Html];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Csv => "csv",
+            Self::Md => "md",
+            Self::Html => "html",
+        }
+    }
+}
+
+impl std::str::FromStr for OutputFormat {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "json" => Ok(Self::Json),
+            "csv" => Ok(Self::Csv),
+            "md" | "markdown" => Ok(Self::Md),
+            "html" => Ok(Self::Html),
+            other => Err(format!(
+                "invalid output format `{other}` (expected one of: json, csv, md, markdown, html)"
+            )),
+        }
+    }
+}
+
 /// Parsed CLI options for `cargo xtask bench`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BenchArgs {
@@ -83,8 +127,11 @@ pub struct BenchArgs {
     pub request_timeout_secs: u64,
     pub skip_warm_restart: bool,
     pub revision: Option<String>,
-    pub json_out: PathBuf,
-    pub md_out: PathBuf,
+    pub out: Vec<OutputFormat>,
+    pub out_dir: PathBuf,
+    pub json_out: Option<PathBuf>,
+    pub md_out: Option<PathBuf>,
+    pub html_out: Option<PathBuf>,
 }
 
 impl Default for BenchArgs {
@@ -102,8 +149,48 @@ impl Default for BenchArgs {
             request_timeout_secs: 30,
             skip_warm_restart: false,
             revision: None,
-            json_out: PathBuf::from("target/bench/results.json"),
-            md_out: PathBuf::from("target/bench/BENCHMARKS.md"),
+            out: Vec::new(),
+            out_dir: PathBuf::from("target/bench"),
+            json_out: None,
+            md_out: None,
+            html_out: None,
+        }
+    }
+}
+
+/// Parsed CLI options for `cargo xtask bench-plot`.
+#[derive(Debug, Clone, PartialEq, Eq, usage::Args)]
+#[usage(crate = usage)]
+pub struct BenchPlotArgs {
+    /// Input schema-v1 benchmark JSON path
+    #[usage(long, value_name = "PATH", default = "target/bench/results.json")]
+    pub input: PathBuf,
+    /// Output formats to generate (repeatable or comma-separated; emits all if omitted)
+    #[usage(long = "out", var, delimiter = ',', value_enum, value_name = "FORMAT")]
+    pub out: Vec<OutputFormat>,
+    /// Output directory for generated artifacts
+    #[usage(long = "out-dir", value_name = "DIR", default = "target/bench")]
+    pub out_dir: PathBuf,
+    /// Override output JSON path
+    #[usage(long = "json-out", value_name = "PATH")]
+    pub json_out: Option<PathBuf>,
+    /// Override output Markdown path
+    #[usage(long = "md-out", value_name = "PATH")]
+    pub md_out: Option<PathBuf>,
+    /// Override output HTML path
+    #[usage(long = "html-out", value_name = "PATH")]
+    pub html_out: Option<PathBuf>,
+}
+
+impl Default for BenchPlotArgs {
+    fn default() -> Self {
+        Self {
+            input: PathBuf::from("target/bench/results.json"),
+            out: Vec::new(),
+            out_dir: PathBuf::from("target/bench"),
+            json_out: None,
+            md_out: None,
+            html_out: None,
         }
     }
 }
@@ -162,14 +249,12 @@ pub fn run_gen_plain(args: &GenPlainArgs) -> i32 {
 /// Runs `cargo xtask bench` and returns the exit code.
 pub fn run(args: &BenchArgs) -> i32 {
     match run_inner(args) {
-        Ok(report) => {
+        Ok((report, written)) => {
             let stdout_tables = format_stdout_tables(&report);
             print!("{stdout_tables}");
-            println!(
-                "wrote JSON report to {} and Markdown report to {}",
-                args.json_out.display(),
-                args.md_out.display()
-            );
+            for path in written {
+                println!("wrote {}", path.display());
+            }
             0
         }
         Err(e) => {
@@ -179,7 +264,44 @@ pub fn run(args: &BenchArgs) -> i32 {
     }
 }
 
-fn run_inner(args: &BenchArgs) -> Result<BenchReport, String> {
+/// Runs `cargo xtask bench-plot` offline from a saved schema-v1 JSON report.
+pub fn run_bench_plot(args: &BenchPlotArgs) -> i32 {
+    match run_bench_plot_inner(args) {
+        Ok(written) => {
+            for path in written {
+                println!("wrote {}", path.display());
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            1
+        }
+    }
+}
+
+fn run_bench_plot_inner(args: &BenchPlotArgs) -> Result<Vec<PathBuf>, String> {
+    let text = fs::read_to_string(&args.input)
+        .map_err(|e| format!("failed to read {}: {e}", args.input.display()))?;
+    let report: BenchReport = serde_json::from_str(&text)
+        .map_err(|e| format!("failed to parse benchmark JSON {}: {e}", args.input.display()))?;
+    if report.schema_version != REPORT_SCHEMA_VERSION {
+        return Err(format!(
+            "unsupported benchmark JSON schema_version {} (expected {REPORT_SCHEMA_VERSION})",
+            report.schema_version
+        ));
+    }
+    write_selected_outputs(
+        &report,
+        &args.out,
+        &args.out_dir,
+        args.json_out.as_deref(),
+        args.md_out.as_deref(),
+        args.html_out.as_deref(),
+    )
+}
+
+fn run_inner(args: &BenchArgs) -> Result<(BenchReport, Vec<PathBuf>), String> {
     let manifest = match &args.probes {
         Some(path) => {
             let text = fs::read_to_string(path)
@@ -228,8 +350,15 @@ fn run_inner(args: &BenchArgs) -> Result<BenchReport, String> {
         results,
     };
 
-    write_report_files(&report, &args.json_out, &args.md_out)?;
-    Ok(report)
+    let written = write_selected_outputs(
+        &report,
+        &args.out,
+        &args.out_dir,
+        args.json_out.as_deref(),
+        args.md_out.as_deref(),
+        args.html_out.as_deref(),
+    )?;
+    Ok((report, written))
 }
 
 fn resolve_servers(args: &BenchArgs) -> Result<Vec<ServerSpec>, String> {
@@ -1432,32 +1561,94 @@ fn count_java_files(dir: &Path) -> usize {
     count
 }
 
-fn write_report_files(
-    report: &BenchReport,
-    json_out: &Path,
-    md_out: &Path,
-) -> Result<(), String> {
-    if let Some(parent) = json_out.parent()
+fn ensure_parent_dir(path: &Path) -> Result<(), String> {
+    if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
         fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
     }
-    let json_text = serde_json::to_string_pretty(report)
-        .map_err(|e| format!("failed to serialize benchmark JSON: {e}"))?;
-    fs::write(json_out, format!("{json_text}\n"))
-        .map_err(|e| format!("failed to write {}: {e}", json_out.display()))?;
-
-    if let Some(parent) = md_out.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
-    }
-    let md_text = format_markdown(report);
-    fs::write(md_out, md_text)
-        .map_err(|e| format!("failed to write {}: {e}", md_out.display()))?;
     Ok(())
+}
+
+fn write_selected_outputs(
+    report: &BenchReport,
+    out_formats: &[OutputFormat],
+    out_dir: &Path,
+    json_out: Option<&Path>,
+    md_out: Option<&Path>,
+    html_out: Option<&Path>,
+) -> Result<Vec<PathBuf>, String> {
+    let selected: BTreeSet<OutputFormat> = if out_formats.is_empty() {
+        OutputFormat::ALL.into_iter().collect()
+    } else {
+        out_formats.iter().copied().collect()
+    };
+
+    let mut written = Vec::new();
+
+    if selected.contains(&OutputFormat::Json) {
+        let path = json_out
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| out_dir.join("results.json"));
+        ensure_parent_dir(&path)?;
+        let json_text = serde_json::to_string_pretty(report)
+            .map_err(|e| format!("failed to serialize benchmark JSON: {e}"))?;
+        fs::write(&path, format!("{json_text}\n"))
+            .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+        written.push(path);
+    }
+
+    if selected.contains(&OutputFormat::Csv) {
+        fs::create_dir_all(out_dir)
+            .map_err(|e| format!("failed to create {}: {e}", out_dir.display()))?;
+        let lifecycle_path = out_dir.join("lifecycle.csv");
+        fs::write(&lifecycle_path, format_lifecycle_csv(report))
+            .map_err(|e| format!("failed to write {}: {e}", lifecycle_path.display()))?;
+        written.push(lifecycle_path);
+
+        let ops_path = out_dir.join("ops.csv");
+        fs::write(&ops_path, format_ops_csv(report))
+            .map_err(|e| format!("failed to write {}: {e}", ops_path.display()))?;
+        written.push(ops_path);
+    }
+
+    if selected.contains(&OutputFormat::Md) {
+        let md_path = md_out
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| out_dir.join("BENCHMARKS.md"));
+        ensure_parent_dir(&md_path)?;
+        let md_dir = md_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let charts_dir = md_dir.join("charts");
+        fs::create_dir_all(&charts_dir)
+            .map_err(|e| format!("failed to create {}: {e}", charts_dir.display()))?;
+        for (filename, svg) in charts::render_all_svg_charts(report) {
+            let svg_path = charts_dir.join(filename);
+            fs::write(&svg_path, svg)
+                .map_err(|e| format!("failed to write {}: {e}", svg_path.display()))?;
+            written.push(svg_path);
+        }
+        let md_text = format_markdown_with_charts(report, Some("charts"));
+        fs::write(&md_path, md_text)
+            .map_err(|e| format!("failed to write {}: {e}", md_path.display()))?;
+        written.push(md_path);
+    }
+
+    if selected.contains(&OutputFormat::Html) {
+        let path = html_out
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| out_dir.join("report.html"));
+        ensure_parent_dir(&path)?;
+        let html_text = html::format_html_report(report);
+        fs::write(&path, html_text)
+            .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+        written.push(path);
+    }
+
+    Ok(written)
 }
 
 fn collect_environment(

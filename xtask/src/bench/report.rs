@@ -1,4 +1,4 @@
-//! Benchmark statistics, JSON schema v1, aligned stdout tables, and `BENCHMARKS.md` formatter.
+//! Benchmark statistics, JSON schema v1, CSV, aligned stdout tables, and `BENCHMARKS.md` formatter.
 
 use std::{collections::BTreeMap, fmt::Write as _};
 
@@ -174,7 +174,7 @@ pub fn percentile_ms(samples: &[f64], p: f64) -> f64 {
 }
 
 /// Operation category display groups for Matrix 2.
-const MATRIX2_GROUPS: [(&str, &[&str]); 6] = [
+pub(crate) const MATRIX2_GROUPS: [(&str, &[&str]); 6] = [
     (
         "Navigation & Resolution",
         &[
@@ -233,7 +233,7 @@ const MATRIX2_GROUPS: [(&str, &[&str]); 6] = [
 ];
 
 /// Capability coverage columns in deterministic order.
-const CAPABILITY_COLUMNS: [&str; 16] = [
+pub(crate) const CAPABILITY_COLUMNS: [&str; 16] = [
     "hover",
     "definition",
     "typeDefinition",
@@ -370,6 +370,14 @@ pub fn format_stdout_tables(report: &BenchReport) -> String {
 
 /// Formats `BENCHMARKS.md` with Environment header, Matrix 1, Matrix 2, and Capability Coverage Matrix.
 pub fn format_markdown(report: &BenchReport) -> String {
+    format_markdown_with_charts(report, None)
+}
+
+/// Formats `BENCHMARKS.md` with optional relative chart links under `chart_rel_prefix`.
+pub fn format_markdown_with_charts(
+    report: &BenchReport,
+    chart_rel_prefix: Option<&str>,
+) -> String {
     let mut out = String::new();
     out.push_str("# Java LSP Benchmarks\n\n");
 
@@ -395,6 +403,38 @@ pub fn format_markdown(report: &BenchReport) -> String {
         }
     }
     out.push('\n');
+
+    if let Some(raw_prefix) = chart_rel_prefix {
+        let prefix = raw_prefix.trim_end_matches('/');
+        let chart_path = |file: &str| {
+            if prefix.is_empty() {
+                file.to_string()
+            } else {
+                format!("{prefix}/{file}")
+            }
+        };
+        out.push_str("## Charts\n\n");
+        let _ = writeln!(
+            out,
+            "![Cold Time-to-First-Response]({})\n",
+            chart_path("cold-first-response.svg")
+        );
+        let _ = writeln!(
+            out,
+            "![Cold Ready and Warm Ready]({})\n",
+            chart_path("ready-time.svg")
+        );
+        let _ = writeln!(
+            out,
+            "![Steady-State and Peak Memory RSS]({})\n",
+            chart_path("memory-rss.svg")
+        );
+        let _ = writeln!(
+            out,
+            "![Interactive Latency p50]({})\n",
+            chart_path("interactive-p50.svg")
+        );
+    }
 
     out.push_str("## Matrix 1 — Lifecycle, First Response, Memory & Reliability\n\n");
     out.push_str("| Repo | Tier | Shape | Files | Server | Cold Init | Cold 1st Resp | Cold Ready | Warm Init | Warm 1st Resp | Warm Ready | Peak RSS | Steady RSS | Error Rate | Clean-File Errors |\n");
@@ -522,12 +562,100 @@ fn fmt_ms_val(val: Option<f64>) -> String {
     }
 }
 
-fn join_shapes(shapes: &[Shape]) -> String {
+pub(crate) fn join_shapes(shapes: &[Shape]) -> String {
     shapes
         .iter()
         .map(|s| s.as_str())
         .collect::<Vec<_>>()
         .join("+")
+}
+
+/// Formats lifecycle, first-response, memory, and reliability metrics as RFC 4180 CSV.
+pub fn format_lifecycle_csv(report: &BenchReport) -> String {
+    let mut out = String::from(
+        "repo,tier,shapes,files,server,cold_init_ms,cold_first_response_ms,cold_ready_ms,warm_init_ms,warm_first_response_ms,warm_ready_ms,peak_rss_mb,steady_rss_mb,error_rate_pct,clean_file_errors\n",
+    );
+    for res in &report.results {
+        let shapes = join_shapes(&res.shapes);
+        let row = [
+            csv_escape(&res.repo),
+            csv_escape(res.tier.as_str()),
+            csv_escape(&shapes),
+            res.files.to_string(),
+            csv_escape(&res.server),
+            format!("{:.3}", res.lifecycle.cold_init_ms),
+            fmt_csv_opt_f64(res.lifecycle.cold_first_response_ms),
+            fmt_csv_opt_f64(res.lifecycle.cold_ready_ms),
+            fmt_csv_opt_f64(res.lifecycle.warm_init_ms),
+            fmt_csv_opt_f64(res.lifecycle.warm_first_response_ms),
+            fmt_csv_opt_f64(res.lifecycle.warm_ready_ms),
+            format!("{:.3}", res.lifecycle.peak_rss_mb),
+            format!("{:.3}", res.lifecycle.steady_rss_mb),
+            format!("{:.3}", res.overall_error_rate_pct()),
+            res.lifecycle.clean_file_errors.to_string(),
+        ];
+        out.push_str(&row.join(","));
+        out.push('\n');
+    }
+    out
+}
+
+/// Formats per-operation latency, error-rate, and hit-rate metrics as RFC 4180 CSV.
+pub fn format_ops_csv(report: &BenchReport) -> String {
+    let mut out = String::from(
+        "repo,server,op,status,first_ms,p50_ms,p95_ms,max_ms,error_rate_pct,hit_rate_pct,total_requests,errors,hits\n",
+    );
+    for res in &report.results {
+        for (op_id, stats) in &res.ops {
+            let status = match stats.status {
+                OpStatus::Supported => "supported",
+                OpStatus::Unsupported => "unsupported",
+            };
+            let row = [
+                csv_escape(&res.repo),
+                csv_escape(&res.server),
+                csv_escape(op_id),
+                status.to_string(),
+                fmt_csv_opt_f64(stats.first_ms),
+                fmt_csv_opt_f64(stats.p50_ms),
+                fmt_csv_opt_f64(stats.p95_ms),
+                fmt_csv_opt_f64(stats.max_ms),
+                format!("{:.3}", stats.error_rate_pct),
+                format!("{:.3}", stats.hit_rate_pct),
+                stats.total_requests.to_string(),
+                stats.errors.to_string(),
+                stats.hits.to_string(),
+            ];
+            out.push_str(&row.join(","));
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn fmt_csv_opt_f64(val: Option<f64>) -> String {
+    match val {
+        Some(v) => format!("{v:.3}"),
+        None => String::new(),
+    }
+}
+
+/// Escapes a CSV field according to RFC 4180.
+pub fn csv_escape(field: &str) -> String {
+    if field.contains([',', '"', '\n', '\r']) {
+        let mut out = String::with_capacity(field.len() + 2);
+        out.push('"');
+        for ch in field.chars() {
+            if ch == '"' {
+                out.push('"');
+            }
+            out.push(ch);
+        }
+        out.push('"');
+        out
+    } else {
+        field.to_string()
+    }
 }
 
 fn write_aligned_table(out: &mut String, headers: &[&str], rows: &[Vec<String>], right: &[bool]) {

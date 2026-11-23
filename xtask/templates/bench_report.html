@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <script>
+    try {
+      var t = localStorage.getItem('java-bench-theme');
+      if (t === 'light' || t === 'dark') {
+        var m = document.querySelector('meta[name="color-scheme"]');
+        if (m) m.setAttribute('content', t);
+      }
+    } catch (e) {}
+  </script>
+  <title>Java LSP Benchmarks — {{ env.revision }}</title>
+  <style>
+{{ css|safe }}
+  </style>
+</head>
+<body>
+  <script id="bench-data" type="application/json">{{ safe_json|safe }}</script>
+  <header class="page-header">
+    <div class="header-top">
+      <div>
+        <h1>Java LSP Benchmarks</h1>
+        <p class="env-meta"><span><strong>OS:</strong> {{ env.os }} / {{ env.arch }}</span> · <span><strong>CPU:</strong> {{ env.cpu_model }} ({{ env.cpu_cores }} cores)</span> · <span><strong>RAM:</strong> {{ env.ram_gb }}</span> · <span><strong>Java:</strong> {{ env.java_version }}</span> · <span><strong>Revision:</strong> <code>{{ env.revision }}</code></span> · <span><strong>Date:</strong> {{ env.date }}</span></p>
+      </div>
+      <div class="header-actions">
+        <div class="segmented" role="group" aria-label="Color theme">
+          <button type="button" class="theme-btn" data-theme-choice="system">System</button>
+          <button type="button" class="theme-btn" data-theme-choice="light">Light</button>
+          <button type="button" class="theme-btn" data-theme-choice="dark">Dark</button>
+        </div>
+        <label class="file-upload">
+          <span>Compare Baseline JSON</span>
+          <input id="baseline-input" type="file" accept=".json,application/json">
+        </label>
+        <button type="button" id="clear-baseline" class="btn-secondary" hidden>Clear Baseline</button>
+      </div>
+    </div>
+    <div id="baseline-banner" class="baseline-banner" hidden></div>
+  </header>
+  <main>
+    <section class="controls-panel" aria-label="Benchmark filters and chart options">
+      <div class="control-group">
+        <span class="control-label">Scale</span>
+        <div class="segmented" role="group" aria-label="Latency scale">
+          <button type="button" class="scale-btn" data-scale="log" aria-pressed="true">Log10</button>
+          <button type="button" class="scale-btn" data-scale="linear" aria-pressed="false">Linear</button>
+        </div>
+      </div>
+      {% if has_warm_data %}
+      <div class="control-group" id="control-phase">
+        <span class="control-label">Lifecycle Phase</span>
+        <div class="segmented" role="group" aria-label="Lifecycle phase">
+          <button type="button" class="phase-btn" data-phase="both" aria-pressed="true">Both</button>
+          <button type="button" class="phase-btn" data-phase="cold" aria-pressed="false">Cold</button>
+          <button type="button" class="phase-btn" data-phase="warm" aria-pressed="false">Warm</button>
+        </div>
+      </div>
+      {% endif %}
+      <div class="control-group" id="control-tier"{% if present_tiers.len() <= 1 %} hidden{% endif %}>
+        <label class="control-label" for="filter-tier">Tier</label>
+        <select id="filter-tier">
+          <option value="all">All executed tiers</option>
+          {% for tier in present_tiers %}
+          <option value="{{ tier }}">{{ tier }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="control-group" id="control-shape"{% if present_shapes.len() <= 1 %} hidden{% endif %}>
+        <label class="control-label" for="filter-shape">Build Shape</label>
+        <select id="filter-shape">
+          <option value="all">All executed shapes</option>
+          {% for shape in present_shapes %}
+          <option value="{{ shape }}">{{ shape }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="control-group" id="control-op-cat"{% if present_op_cats.len() <= 1 %} hidden{% endif %}>
+        <label class="control-label" for="filter-op-cat">Op Category</label>
+        <select id="filter-op-cat">
+          <option value="all">All executed categories</option>
+          {% for cat_name in present_op_cats %}
+          <option value="{{ cat_name }}">{{ cat_name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="control-group control-servers">
+        <span class="control-label">Servers</span>
+        <div id="server-filters" class="chip-group"></div>
+      </div>
+    </section>
+    <section aria-labelledby="charts-heading">
+      <h2 id="charts-heading">Interactive Vega-Lite Charts</h2>
+      <p id="vega-offline-note" class="offline-note" hidden>Vega-Lite CDN scripts could not be loaded offline. All filterable, sortable benchmark tables below remain 100% functional.</p>
+      <div class="charts-grid">
+        <article class="chart-card"><h3>Time to First Response (ms)</h3><div id="vl-first-response" class="vl-host"></div></article>
+        <article class="chart-card"><h3>Workspace Ready Time (ms)</h3><div id="vl-ready-time" class="vl-host"></div></article>
+        <article class="chart-card"><h3>Memory Footprint — Steady &amp; Peak RSS (MB)</h3><div id="vl-memory" class="vl-host"></div></article>
+        <article class="chart-card chart-wide"><h3>Interactive Operations Latency (p50 ms)</h3><div id="vl-ops" class="vl-host"></div></article>
+      </div>
+    </section>
+    <section aria-labelledby="m1-heading">
+      <h2 id="m1-heading">Matrix 1 — Lifecycle, First Response, Memory &amp; Reliability</h2>
+      <div tabindex="0" role="region" aria-labelledby="m1-heading" class="table-wrapper">
+        <table id="lifecycle-table">
+          <thead>
+            <tr>
+              {% for col in m1_cols %}
+              <th scope="col" data-type="{{ col.col_type }}"><button type="button" commandfor="lifecycle-table" command="--sort">{{ col.label }}<span class="sort-ind" aria-hidden="true"></span></button></th>
+              {% endfor %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in lifecycle_rows %}
+            <tr data-repo="{{ row.repo }}" data-tier="{{ row.tier }}" data-shapes="{{ row.shapes }}" data-server="{{ row.server }}">
+              <td><code>{{ row.repo }}</code></td>
+              <td>{{ row.tier }}</td>
+              <td>{{ row.shapes }}</td>
+              <td class="num" data-value="{{ row.files }}">{{ row.files }}</td>
+              <td><code>{{ row.server }}</code></td>
+              {% for cell in row.ms_cells %}
+              <td class="num" data-metric="{{ cell.metric }}" data-value="{{ cell.data_value }}">{{ cell.display }}<span class="delta-slot"></span></td>
+              {% endfor %}
+              <td class="num" data-metric="peak_rss_mb" data-value="{{ row.peak_rss_data_value }}">{{ row.peak_rss_display }}<span class="delta-slot"></span></td>
+              <td class="num" data-metric="steady_rss_mb" data-value="{{ row.steady_rss_data_value }}">{{ row.steady_rss_display }}<span class="delta-slot"></span></td>
+              <td class="num" data-value="{{ row.err_pct_data_value }}">{{ row.err_pct_display }}</td>
+              <td class="num" data-value="{{ row.clean_file_errors }}">{{ row.clean_file_errors }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    <section aria-labelledby="m2-heading">
+      <h2 id="m2-heading">Matrix 2 — Interactive Latency, Error Rate &amp; Hit Rate</h2>
+      <div tabindex="0" role="region" aria-labelledby="m2-heading" class="table-wrapper">
+        <table id="ops-table">
+          <thead>
+            <tr>
+              {% for col in m2_cols %}
+              <th scope="col" data-type="{{ col.col_type }}"><button type="button" commandfor="ops-table" command="--sort">{{ col.label }}<span class="sort-ind" aria-hidden="true"></span></button></th>
+              {% endfor %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in op_rows %}
+            <tr data-category="{{ row.category }}" data-repo="{{ row.repo }}" data-tier="{{ row.tier }}" data-shapes="{{ row.shapes }}" data-server="{{ row.server }}" data-op="{{ row.op_id }}">
+              <td>{{ row.category }}</td>
+              <td><code>{{ row.repo }}</code></td>
+              <td><code>{{ row.server }}</code></td>
+              <td><code>{{ row.op_id }}</code></td>
+              <td>{{ row.status }}</td>
+              {% if row.supported %}
+              {% for cell in row.ms_cells %}
+              <td class="num" data-metric="{{ cell.metric }}" data-value="{{ cell.data_value }}">{{ cell.display }}<span class="delta-slot"></span></td>
+              {% endfor %}
+              <td class="num" data-value="{{ row.err_pct_data_value }}">{{ row.err_pct_display }}</td>
+              <td class="num" data-value="{{ row.hit_pct_data_value }}">{{ row.hit_pct_display }}</td>
+              {% else %}
+              {% for _i in 0..6 %}
+              <td class="num" data-value="">N/A</td>
+              {% endfor %}
+              {% endif %}
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    <section aria-labelledby="caps-heading">
+      <h2 id="caps-heading">Capability Coverage Matrix</h2>
+      <div tabindex="0" role="region" aria-labelledby="caps-heading" class="table-wrapper">
+        <table id="caps-table">
+          <thead>
+            <tr>
+              <th scope="col" data-type="text"><button type="button" commandfor="caps-table" command="--sort">Server<span class="sort-ind" aria-hidden="true"></span></button></th>
+              {% for cap in cap_cols %}
+              <th scope="col" data-type="text"><button type="button" commandfor="caps-table" command="--sort"><code>{{ cap }}</code><span class="sort-ind" aria-hidden="true"></span></button></th>
+              {% endfor %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in cap_rows %}
+            <tr data-server="{{ row.server }}">
+              <td><code>{{ row.server }}</code></td>
+              {% for label in row.values %}
+              <td>{{ label }}</td>
+              {% endfor %}
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+  <div id="sort-status" class="sr-only" role="status" aria-live="polite"></div>
+  <script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
+  <script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
+  <script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
+  <script>
+{{ js|safe }}
+  </script>
+</body>
+</html>

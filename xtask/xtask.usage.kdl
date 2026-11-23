@@ -120,10 +120,58 @@ cmd bench help="Run the reproducible Java LSP benchmark suite" {
     flag --revision help="Revision string for the report header [auto-detected]" {
         arg <TEXT>
     }
-    flag --json-out help="Output JSON path" default="target/bench/results.json" {
+    flag --out help="Output formats to generate (repeatable or comma-separated; emits all if omitted)" var=#true delimiter=, {
+        arg <FORMAT> {
+            choices ignore_case=#true {
+                choice json
+                choice csv
+                choice md {
+                    alias markdown
+                }
+                choice html
+            }
+        }
+    }
+    flag --out-dir help="Output directory for generated artifacts" default="target/bench" {
+        arg <DIR>
+    }
+    flag --json-out help="Override output JSON path" {
         arg <PATH>
     }
-    flag --md-out help="Output Markdown path" default="target/bench/BENCHMARKS.md" {
+    flag --md-out help="Override output Markdown path" {
+        arg <PATH>
+    }
+    flag --html-out help="Override output HTML path" {
+        arg <PATH>
+    }
+    flag "-h --help" help="Print help" action=help builtin=#true
+}
+cmd bench-plot help="Regenerate benchmark reports and charts from a saved results.json" {
+    flag --input help="Input schema-v1 benchmark JSON path" default="target/bench/results.json" {
+        arg <PATH>
+    }
+    flag --out help="Output formats to generate (repeatable or comma-separated; emits all if omitted)" var=#true delimiter=, {
+        arg <FORMAT> {
+            choices ignore_case=#true {
+                choice json
+                choice csv
+                choice md {
+                    alias markdown
+                }
+                choice html
+            }
+        }
+    }
+    flag --out-dir help="Output directory for generated artifacts" default="target/bench" {
+        arg <DIR>
+    }
+    flag --json-out help="Override output JSON path" {
+        arg <PATH>
+    }
+    flag --md-out help="Override output Markdown path" {
+        arg <PATH>
+    }
+    flag --html-out help="Override output HTML path" {
         arg <PATH>
     }
     flag "-h --help" help="Print help" action=help builtin=#true

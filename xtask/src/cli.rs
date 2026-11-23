@@ -9,7 +9,7 @@ use std::{
 
 use crate::{
     bench::{
-        self, BenchArgs, GenPlainArgs, ServerSpec,
+        self, BenchArgs, BenchPlotArgs, GenPlainArgs, OutputFormat, ServerSpec,
         probes::{OpCategory, Shape, Tier},
     },
     conformance::{self, Config, Kind, Source},
@@ -32,6 +32,8 @@ pub enum XtaskSubcommand {
     Report(ReportArgs),
     /// Run the reproducible Java LSP benchmark suite
     Bench(Box<BenchCliArgs>),
+    /// Regenerate benchmark reports and charts from a saved results.json
+    BenchPlot(BenchPlotArgs),
     /// Generate the synthetic plain-small Java corpus
     BenchGenPlain(GenPlainArgs),
     /// Print the canonical KDL usage spec for xtask to stdout
@@ -138,12 +140,21 @@ pub struct BenchCliArgs {
     /// Revision string for the report header [auto-detected]
     #[usage(long, value_name = "TEXT")]
     pub revision: Option<String>,
-    /// Output JSON path
-    #[usage(long, value_name = "PATH", default = "target/bench/results.json")]
-    pub json_out: PathBuf,
-    /// Output Markdown path
-    #[usage(long, value_name = "PATH", default = "target/bench/BENCHMARKS.md")]
-    pub md_out: PathBuf,
+    /// Output formats to generate (repeatable or comma-separated; emits all if omitted)
+    #[usage(long = "out", var, delimiter = ',', value_enum, value_name = "FORMAT")]
+    pub out: Vec<OutputFormat>,
+    /// Output directory for generated artifacts
+    #[usage(long = "out-dir", value_name = "DIR", default = "target/bench")]
+    pub out_dir: PathBuf,
+    /// Override output JSON path
+    #[usage(long = "json-out", value_name = "PATH")]
+    pub json_out: Option<PathBuf>,
+    /// Override output Markdown path
+    #[usage(long = "md-out", value_name = "PATH")]
+    pub md_out: Option<PathBuf>,
+    /// Override output HTML path
+    #[usage(long = "html-out", value_name = "PATH")]
+    pub html_out: Option<PathBuf>,
 }
 
 impl From<BenchCliArgs> for BenchArgs {
@@ -165,8 +176,11 @@ impl From<BenchCliArgs> for BenchArgs {
             request_timeout_secs: cli.request_timeout_secs.get(),
             skip_warm_restart: cli.skip_warm_restart,
             revision: cli.revision,
+            out: cli.out,
+            out_dir: cli.out_dir,
             json_out: cli.json_out,
             md_out: cli.md_out,
+            html_out: cli.html_out,
         }
     }
 }
@@ -190,11 +204,13 @@ pub enum Command {
     Conformance(Args),
     Report(ReportArgs),
     Bench(Box<BenchArgs>),
+    BenchPlot(BenchPlotArgs),
     BenchGenPlain(GenPlainArgs),
     UsageSpec,
     Help,
     ReportHelp,
     BenchHelp,
+    BenchPlotHelp,
     BenchGenPlainHelp,
 }
 
@@ -206,6 +222,7 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, Str
             Some(XtaskSubcommand::Conformance(c)) => Command::Conformance(c.into()),
             Some(XtaskSubcommand::Report(r)) => Command::Report(r),
             Some(XtaskSubcommand::Bench(b)) => Command::Bench(Box::new((*b).into())),
+            Some(XtaskSubcommand::BenchPlot(p)) => Command::BenchPlot(p),
             Some(XtaskSubcommand::BenchGenPlain(g)) => Command::BenchGenPlain(g),
             Some(XtaskSubcommand::UsageSpec) => Command::UsageSpec,
             None => Command::Help,
@@ -213,6 +230,7 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, Str
         Err(usage::Error::Help { cmd, .. }) => Ok(match cmd.name {
             "report" => Command::ReportHelp,
             "bench" => Command::BenchHelp,
+            "bench-plot" => Command::BenchPlotHelp,
             "bench-gen-plain" => Command::BenchGenPlainHelp,
             _ => Command::Help,
         }),
@@ -290,6 +308,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> i32 {
     match subcmd {
         XtaskSubcommand::Report(report_args) => report::run(&report_args),
         XtaskSubcommand::Bench(bench_args) => bench::run(&(*bench_args).into()),
+        XtaskSubcommand::BenchPlot(plot_args) => bench::run_bench_plot(&plot_args),
         XtaskSubcommand::BenchGenPlain(gen_args) => bench::run_gen_plain(&gen_args),
         XtaskSubcommand::UsageSpec => {
             print!("{}", XtaskCli::to_kdl());

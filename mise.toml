@@ -754,8 +754,13 @@ flag "--ready-timeout <secs>" help="Max seconds to wait for server readiness"
 flag "--request-timeout <secs>" help="Max seconds per individual LSP request"
 flag "--skip-warm-restart" help="Skip Phase 4 warm-restart measurement"
 flag "--revision <text>" help="Revision string for the report header"
+flag "--out <format>" var=#true help="Output formats (json, csv, md, markdown, html; emits all if omitted)" {
+  choices "json" "csv" "md" "markdown" "html"
+}
+flag "--out-dir <dir>" help="Output directory for generated artifacts"
 flag "--json-out <path>" help="Output JSON path"
 flag "--md-out <path>" help="Output Markdown path"
+flag "--html-out <path>" help="Output HTML path"
 '''
 run = '''
 #!/usr/bin/env bash
@@ -849,11 +854,23 @@ fi
 if [ "${usage_skip_warm_restart:-false}" = "true" ]; then
   args+=(--skip-warm-restart)
 fi
+if [ -n "${usage_out:-}" ]; then
+  eval "out_formats=($usage_out)"
+  for fmt in "${out_formats[@]}"; do
+    args+=(--out "$fmt")
+  done
+fi
+if [ -n "${usage_out_dir:-}" ]; then
+  args+=(--out-dir "$usage_out_dir")
+fi
 if [ -n "${usage_json_out:-}" ]; then
   args+=(--json-out "$usage_json_out")
 fi
 if [ -n "${usage_md_out:-}" ]; then
   args+=(--md-out "$usage_md_out")
+fi
+if [ -n "${usage_html_out:-}" ]; then
+  args+=(--html-out "$usage_html_out")
 fi
 
 if [ -n "${usage_revision:-}" ]; then
@@ -868,4 +885,48 @@ fi
 target/release/xtask bench \
   "${args[@]}" \
   --revision "$rev"
+'''
+
+[tasks.bench-plot]
+description = "Regenerate benchmark reports and charts offline from a saved results.json"
+usage = '''
+flag "--input <path>" help="Input schema-v1 benchmark JSON path" default="target/bench/results.json"
+flag "--out <format>" var=#true help="Output formats (json, csv, md, markdown, html; emits all if omitted)" {
+  choices "json" "csv" "md" "markdown" "html"
+}
+flag "--out-dir <dir>" help="Output directory for generated artifacts" default="target/bench"
+flag "--json-out <path>" help="Override output JSON path"
+flag "--md-out <path>" help="Override output Markdown path"
+flag "--html-out <path>" help="Override output HTML path"
+'''
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+cargo build --release -p xtask
+
+args=()
+if [ -n "${usage_input:-}" ]; then
+  args+=(--input "$usage_input")
+fi
+if [ -n "${usage_out:-}" ]; then
+  eval "out_formats=($usage_out)"
+  for fmt in "${out_formats[@]}"; do
+    args+=(--out "$fmt")
+  done
+fi
+if [ -n "${usage_out_dir:-}" ]; then
+  args+=(--out-dir "$usage_out_dir")
+fi
+if [ -n "${usage_json_out:-}" ]; then
+  args+=(--json-out "$usage_json_out")
+fi
+if [ -n "${usage_md_out:-}" ]; then
+  args+=(--md-out "$usage_md_out")
+fi
+if [ -n "${usage_html_out:-}" ]; then
+  args+=(--html-out "$usage_html_out")
+fi
+
+target/release/xtask bench-plot "${args[@]}"
 '''

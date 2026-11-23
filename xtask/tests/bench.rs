@@ -7,15 +7,17 @@ use std::{
 
 use xtask::{
     bench::{
-        self, BenchArgs, GenPlainArgs, ServerSpec,
+        self, BenchArgs, BenchPlotArgs, GenPlainArgs, OutputFormat, ServerSpec,
+        charts::render_all_svg_charts,
+        html::format_html_report,
         probes::{
             BenchManifest, OpCategory, Shape, Tier, resolve_anchor_utf16,
             resolve_cursor_after_utf16,
         },
         report::{
             BenchReport, EnvironmentInfo, LifecycleStats, OpStats, OpStatus,
-            REPORT_SCHEMA_VERSION, RepoServerResult, format_markdown, format_stdout_tables,
-            percentile_ms,
+            REPORT_SCHEMA_VERSION, RepoServerResult, format_lifecycle_csv, format_markdown,
+            format_markdown_with_charts, format_ops_csv, format_stdout_tables, percentile_ms,
         },
         rss::parse_ps_tree_rss_kb,
         synth::generate_plain_small,
@@ -425,11 +427,80 @@ fn cli_parses_bench_and_bench_gen_plain_args() {
             assert_eq!(parsed.request_timeout_secs, 10);
             assert!(parsed.skip_warm_restart);
             assert_eq!(parsed.revision.as_deref(), Some("abcd1234"));
-            assert_eq!(parsed.json_out, PathBuf::from("out/r.json"));
-            assert_eq!(parsed.md_out, PathBuf::from("out/B.md"));
+            assert_eq!(parsed.json_out, Some(PathBuf::from("out/r.json")));
+            assert_eq!(parsed.md_out, Some(PathBuf::from("out/B.md")));
+            assert!(parsed.out.is_empty());
+            assert_eq!(parsed.out_dir, PathBuf::from("target/bench"));
+            assert_eq!(parsed.html_out, None);
         }
         other => panic!("expected Bench, got {other:?}"),
     }
+
+    match cli::parse_args(args(&[
+        "bench",
+        "--out",
+        "json",
+        "--out",
+        "markdown,csv",
+        "--out-dir",
+        "custom/out",
+        "--html-out",
+        "custom/h.html",
+    ]))
+    .unwrap()
+    {
+        CliCommand::Bench(parsed) => {
+            assert_eq!(
+                parsed.out,
+                vec![OutputFormat::Json, OutputFormat::Md, OutputFormat::Csv]
+            );
+            assert_eq!(parsed.out_dir, PathBuf::from("custom/out"));
+            assert_eq!(parsed.html_out, Some(PathBuf::from("custom/h.html")));
+        }
+        other => panic!("expected Bench, got {other:?}"),
+    }
+
+    match cli::parse_args(args(&["bench-plot"])).unwrap() {
+        CliCommand::BenchPlot(parsed) => {
+            assert_eq!(parsed, BenchPlotArgs::default());
+        }
+        other => panic!("expected BenchPlot, got {other:?}"),
+    }
+
+    match cli::parse_args(args(&[
+        "bench-plot",
+        "--input",
+        "custom/in.json",
+        "--out",
+        "html,md",
+        "--out-dir",
+        "custom/plot",
+        "--json-out",
+        "custom/j.json",
+        "--md-out",
+        "custom/M.md",
+        "--html-out",
+        "custom/R.html",
+    ]))
+    .unwrap()
+    {
+        CliCommand::BenchPlot(parsed) => {
+            assert_eq!(parsed.input, PathBuf::from("custom/in.json"));
+            assert_eq!(parsed.out, vec![OutputFormat::Html, OutputFormat::Md]);
+            assert_eq!(parsed.out_dir, PathBuf::from("custom/plot"));
+            assert_eq!(parsed.json_out, Some(PathBuf::from("custom/j.json")));
+            assert_eq!(parsed.md_out, Some(PathBuf::from("custom/M.md")));
+            assert_eq!(parsed.html_out, Some(PathBuf::from("custom/R.html")));
+        }
+        other => panic!("expected BenchPlot, got {other:?}"),
+    }
+
+    assert_eq!(
+        "markdown".parse::<OutputFormat>().unwrap(),
+        OutputFormat::Md
+    );
+    assert_eq!("HTML".parse::<OutputFormat>().unwrap(), OutputFormat::Html);
+    assert!("pdf".parse::<OutputFormat>().is_err());
 
     match cli::parse_args(args(&["bench-gen-plain", "--out", "/tmp/corpus"])).unwrap() {
         CliCommand::BenchGenPlain(parsed) => {
@@ -448,11 +519,17 @@ fn cli_parses_bench_and_bench_gen_plain_args() {
         CliCommand::BenchHelp
     );
     assert_eq!(
+        cli::parse_args(args(&["bench-plot", "--help"])).unwrap(),
+        CliCommand::BenchPlotHelp
+    );
+    assert_eq!(
         cli::parse_args(args(&["bench-gen-plain", "-h"])).unwrap(),
         CliCommand::BenchGenPlainHelp
     );
     assert!(cli::parse_args(args(&["bench", "--iterations", "0"])).is_err());
     assert!(cli::parse_args(args(&["bench", "--tier", "huge"])).is_err());
+    assert!(cli::parse_args(args(&["bench", "--out", "bogus"])).is_err());
+    assert!(cli::parse_args(args(&["bench-plot", "--out", "bogus"])).is_err());
 }
 
 // ---- 7. End-to-end 4-phase harness test against real `java-analyzer lsp` ----
@@ -500,14 +577,31 @@ fn end_to_end_four_phase_benchmark_against_java_analyzer_lsp() {
         request_timeout_secs: 15,
         skip_warm_restart: false,
         revision: None,
-        json_out: json_out.clone(),
-        md_out: md_out.clone(),
+        out: Vec::new(),
+        out_dir: dir.clone(),
+        json_out: Some(json_out.clone()),
+        md_out: Some(md_out.clone()),
+        html_out: None,
     };
 
     let code = bench::run(&bench_args);
     assert_eq!(code, 0, "bench::run failed");
     assert!(json_out.is_file());
     assert!(md_out.is_file());
+    assert!(dir.join("lifecycle.csv").is_file());
+    assert!(dir.join("ops.csv").is_file());
+    assert!(dir.join("report.html").is_file());
+    for svg_name in [
+        "cold-first-response.svg",
+        "ready-time.svg",
+        "memory-rss.svg",
+        "interactive-p50.svg",
+    ] {
+        assert!(
+            dir.join("charts").join(svg_name).is_file(),
+            "missing SVG chart {svg_name}"
+        );
+    }
 
     let parsed: BenchReport =
         serde_json::from_str(&fs::read_to_string(&json_out).unwrap()).unwrap();
@@ -562,4 +656,284 @@ fn end_to_end_four_phase_benchmark_against_java_analyzer_lsp() {
     let md = fs::read_to_string(&md_out).unwrap();
     assert!(md.contains("plain-small"));
     assert!(md.contains("N/A"));
+    assert!(md.contains("![Cold Time-to-First-Response](charts/cold-first-response.svg)"));
+}
+
+fn sample_multi_server_report() -> BenchReport {
+    let mut caps_ja = BTreeMap::new();
+    caps_ja.insert("hover".to_string(), true);
+    caps_ja.insert("definition".to_string(), true);
+    caps_ja.insert("implementation".to_string(), true);
+    caps_ja.insert("documentSymbol".to_string(), true);
+    caps_ja.insert("completion".to_string(), false);
+
+    let mut ops_ja = BTreeMap::new();
+    ops_ja.insert(
+        "hover_workspace".to_string(),
+        OpStats::from_samples(Some(4.2), &[0.25, 0.30, 0.35], 3, 0, 3),
+    );
+    ops_ja.insert(
+        "def_workspace".to_string(),
+        OpStats::from_samples(Some(0.3), &[0.05, 0.08, 0.12], 3, 0, 3),
+    );
+    ops_ja.insert(
+        "impl_wide".to_string(),
+        OpStats::from_samples(Some(0.6), &[0.15, 0.18, 0.22], 3, 0, 3),
+    );
+    ops_ja.insert(
+        "doc_symbol_large".to_string(),
+        OpStats::from_samples(Some(2.1), &[1.0, 1.2, 1.4], 3, 0, 3),
+    );
+    ops_ja.insert(
+        "edit_body".to_string(),
+        OpStats::from_samples(Some(0.5), &[0.3, 0.32, 0.4], 3, 0, 3),
+    );
+    ops_ja.insert("completion_dot_workspace".to_string(), OpStats::unsupported());
+
+    let mut caps_jdt = caps_ja.clone();
+    caps_jdt.insert("completion".to_string(), true);
+
+    let mut ops_jdt = BTreeMap::new();
+    ops_jdt.insert(
+        "hover_workspace".to_string(),
+        OpStats::from_samples(Some(120.0), &[15.0, 22.0, 35.0], 3, 0, 3),
+    );
+    ops_jdt.insert(
+        "def_workspace".to_string(),
+        OpStats::from_samples(Some(95.0), &[12.0, 18.0, 25.0], 3, 0, 3),
+    );
+    ops_jdt.insert("impl_wide".to_string(), OpStats::unsupported());
+
+    let mut server_versions = BTreeMap::new();
+    server_versions.insert("java-analyzer".to_string(), "0.1.0".to_string());
+    server_versions.insert("jdtls".to_string(), "1.40".to_string());
+
+    BenchReport {
+        schema_version: REPORT_SCHEMA_VERSION,
+        environment: EnvironmentInfo {
+            os: "macos".to_string(),
+            arch: "aarch64".to_string(),
+            cpu_model: "Apple M4 Pro".to_string(),
+            cpu_cores: 12,
+            ram_gb: "24 GB".to_string(),
+            java_version: "21.0.5".to_string(),
+            revision: "rev </script> & <tag>".to_string(),
+            date: "2026-11-23".to_string(),
+            server_versions,
+        },
+        servers: vec!["java-analyzer".to_string(), "jdtls".to_string()],
+        results: vec![
+            RepoServerResult {
+                repo: "plain, \"quoted\"".to_string(),
+                tier: Tier::Small,
+                shapes: vec![Shape::Plain, Shape::SingleModule],
+                files: 150,
+                server: "java-analyzer".to_string(),
+                capabilities: caps_ja,
+                lifecycle: LifecycleStats {
+                    cold_init_ms: 17.5,
+                    cold_first_response_ms: Some(245.4),
+                    cold_ready_ms: Some(566.3),
+                    warm_init_ms: Some(12.1),
+                    warm_first_response_ms: Some(95.0),
+                    warm_ready_ms: Some(140.0),
+                    peak_rss_mb: 219.7,
+                    steady_rss_mb: 160.7,
+                    clean_file_errors: 0,
+                },
+                total_requests: 15,
+                total_errors: 0,
+                ops: ops_ja,
+            },
+            RepoServerResult {
+                repo: "plain, \"quoted\"".to_string(),
+                tier: Tier::Small,
+                shapes: vec![Shape::Plain, Shape::SingleModule],
+                files: 150,
+                server: "jdtls".to_string(),
+                capabilities: caps_jdt,
+                lifecycle: LifecycleStats {
+                    cold_init_ms: 420.0,
+                    cold_first_response_ms: None,
+                    cold_ready_ms: Some(4200.0),
+                    warm_init_ms: None,
+                    warm_first_response_ms: None,
+                    warm_ready_ms: None,
+                    peak_rss_mb: 850.2,
+                    steady_rss_mb: 640.5,
+                    clean_file_errors: 1,
+                },
+                total_requests: 6,
+                total_errors: 0,
+                ops: ops_jdt,
+            },
+        ],
+    }
+}
+
+// ---- 8. CSV export, SVG charts, HTML report, and bench-plot offline regeneration ----
+
+#[test]
+fn csv_export_formats_headers_escaping_and_deterministic_order() {
+    let report = sample_multi_server_report();
+    let lifecycle_csv = format_lifecycle_csv(&report);
+    let mut lines = lifecycle_csv.lines();
+    assert_eq!(
+        lines.next().unwrap(),
+        "repo,tier,shapes,files,server,cold_init_ms,cold_first_response_ms,cold_ready_ms,warm_init_ms,warm_first_response_ms,warm_ready_ms,peak_rss_mb,steady_rss_mb,error_rate_pct,clean_file_errors"
+    );
+    let row1 = lines.next().unwrap();
+    assert!(row1.starts_with("\"plain, \"\"quoted\"\"\",small,plain+single-module,150,java-analyzer,"));
+    let row2 = lines.next().unwrap();
+    assert!(row2.starts_with("\"plain, \"\"quoted\"\"\",small,plain+single-module,150,jdtls,"));
+    assert!(lines.next().is_none());
+
+    let ops_csv = format_ops_csv(&report);
+    let mut op_lines = ops_csv.lines();
+    assert_eq!(
+        op_lines.next().unwrap(),
+        "repo,server,op,status,first_ms,p50_ms,p95_ms,max_ms,error_rate_pct,hit_rate_pct,total_requests,errors,hits"
+    );
+    let ops_rows: Vec<&str> = op_lines.collect();
+    assert_eq!(ops_rows.len(), 9);
+    assert!(ops_rows.iter().any(|r| r.contains(",completion_dot_workspace,unsupported,,,,,")));
+    assert_eq!(ops_csv, format_ops_csv(&report));
+}
+
+#[test]
+fn static_svg_charts_render_all_four_valid_svgs() {
+    let report = sample_multi_server_report();
+    let charts = render_all_svg_charts(&report);
+    assert_eq!(charts.len(), 4);
+
+    for name in [
+        "cold-first-response.svg",
+        "ready-time.svg",
+        "memory-rss.svg",
+        "interactive-p50.svg",
+    ] {
+        let svg = charts.get(name).unwrap_or_else(|| panic!("missing {name}"));
+        assert!(svg.starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\""), "{name}");
+        assert!(svg.trim_end().ends_with("</svg>"), "{name}");
+        assert!(svg.contains("@media (prefers-color-scheme: dark)"), "{name}");
+        assert!(svg.contains("java-analyzer"), "{name}");
+        assert!(svg.contains("jdtls"), "{name}");
+        assert!(svg.contains("plain, &quot;quoted&quot;"), "{name} should XML-escape repo");
+        assert!(!svg.contains("NaN"), "{name} must not contain NaN");
+        assert!(!svg.contains("inf"), "{name} must not contain inf");
+    }
+
+    assert!(charts["cold-first-response.svg"].contains("N/A"));
+    assert!(charts["ready-time.svg"].contains("N/A"));
+    assert!(charts["interactive-p50.svg"].contains("0.08ms"));
+
+    let md_with = format_markdown_with_charts(&report, Some("charts"));
+    assert!(md_with.contains("## Charts"));
+    assert!(md_with.contains("![Cold Time-to-First-Response](charts/cold-first-response.svg)"));
+    assert!(md_with.contains("![Interactive Latency p50](charts/interactive-p50.svg)"));
+    assert!(!format_markdown(&report).contains("charts/"));
+}
+
+#[test]
+fn html_report_embeds_escaped_json_vega_lite_v5_and_accessible_tables() {
+    let report = sample_multi_server_report();
+    let html = format_html_report(&report);
+
+    assert!(html.starts_with("<!DOCTYPE html>"));
+    assert!(html.contains("<meta name=\"color-scheme\" content=\"light dark\">"));
+    assert!(html.contains("light-dark("));
+    assert!(html.contains(":root:has(> head > meta[name=\"color-scheme\"][content=\"dark\"])"));
+    assert!(html.contains("https://cdn.jsdelivr.net/npm/vega@5"));
+    assert!(html.contains("https://cdn.jsdelivr.net/npm/vega-lite@5"));
+    assert!(html.contains("https://cdn.jsdelivr.net/npm/vega-embed@6"));
+    assert!(html.contains("https://vega.github.io/schema/vega-lite/v5.json"));
+    assert!(html.contains("role=\"region\""));
+    assert!(html.contains("command=\"--sort\""));
+    assert!(html.contains("aria-sort"));
+    assert!(html.contains("role=\"status\""));
+    assert!(html.contains("id=\"baseline-input\""));
+    // Only executed tiers and shapes appear in filter dropdowns (unexecuted ones are omitted).
+    assert!(html.contains("<option value=\"small\">small</option>"));
+    assert!(!html.contains("<option value=\"medium\">medium</option>"));
+    assert!(!html.contains("<option value=\"large\">large</option>"));
+    assert!(html.contains("<option value=\"plain\">plain</option>"));
+    assert!(html.contains("<option value=\"single-module\">single-module</option>"));
+    assert!(!html.contains("<option value=\"maven\">maven</option>"));
+    assert!(!html.contains("<option value=\"gradle\">gradle</option>"));
+    assert!(!html.contains("<option value=\"ant\">ant</option>"));
+    assert!(html.contains("activeScopeResults()"));
+    assert!(html.contains("syncFilterOptionsToScope()"));
+
+    let marker = "<script id=\"bench-data\" type=\"application/json\">";
+    let start = html.find(marker).expect("missing bench-data script") + marker.len();
+    let end = html[start..].find("</script>").expect("missing closing script");
+    let embedded = &html[start..start + end];
+    assert!(embedded.contains("\\u003c/script>"));
+    let parsed: BenchReport = serde_json::from_str(embedded).expect("valid embedded JSON");
+    assert_eq!(parsed.schema_version, report.schema_version);
+    assert_eq!(parsed.environment, report.environment);
+    assert_eq!(parsed.servers, report.servers);
+    assert_eq!(parsed.results.len(), report.results.len());
+    assert_eq!(parsed.results[0].repo, report.results[0].repo);
+    assert!((parsed.results[0].ops["def_workspace"].p95_ms.unwrap() - 0.116).abs() < 1e-12);
+}
+
+#[test]
+fn bench_plot_regenerates_only_selected_or_all_formats_offline() {
+    let dir = scratch("bench-plot-offline");
+    let input_path = dir.join("saved-results.json");
+    let report = sample_multi_server_report();
+    fs::write(&input_path, serde_json::to_string_pretty(&report).unwrap()).unwrap();
+
+    // 1. Only HTML selected
+    let html_only_dir = dir.join("html-only");
+    let code = bench::run_bench_plot(&BenchPlotArgs {
+        input: input_path.clone(),
+        out: vec![OutputFormat::Html],
+        out_dir: html_only_dir.clone(),
+        json_out: None,
+        md_out: None,
+        html_out: None,
+    });
+    assert_eq!(code, 0);
+    assert!(html_only_dir.join("report.html").is_file());
+    assert!(!html_only_dir.join("results.json").exists());
+    assert!(!html_only_dir.join("lifecycle.csv").exists());
+    assert!(!html_only_dir.join("BENCHMARKS.md").exists());
+
+    // 2. Only MD + CSV selected
+    let md_csv_dir = dir.join("md-csv");
+    let code = bench::run_bench_plot(&BenchPlotArgs {
+        input: input_path.clone(),
+        out: vec![OutputFormat::Md, OutputFormat::Csv],
+        out_dir: md_csv_dir.clone(),
+        json_out: None,
+        md_out: None,
+        html_out: None,
+    });
+    assert_eq!(code, 0);
+    assert!(md_csv_dir.join("lifecycle.csv").is_file());
+    assert!(md_csv_dir.join("ops.csv").is_file());
+    assert!(md_csv_dir.join("BENCHMARKS.md").is_file());
+    assert!(md_csv_dir.join("charts/cold-first-response.svg").is_file());
+    assert!(!md_csv_dir.join("results.json").exists());
+    assert!(!md_csv_dir.join("report.html").exists());
+
+    // 3. Omitted --out emits all 4 formats
+    let all_dir = dir.join("all");
+    let code = bench::run_bench_plot(&BenchPlotArgs {
+        input: input_path,
+        out: Vec::new(),
+        out_dir: all_dir.clone(),
+        json_out: None,
+        md_out: None,
+        html_out: None,
+    });
+    assert_eq!(code, 0);
+    assert!(all_dir.join("results.json").is_file());
+    assert!(all_dir.join("lifecycle.csv").is_file());
+    assert!(all_dir.join("ops.csv").is_file());
+    assert!(all_dir.join("BENCHMARKS.md").is_file());
+    assert!(all_dir.join("charts/interactive-p50.svg").is_file());
+    assert!(all_dir.join("report.html").is_file());
 }

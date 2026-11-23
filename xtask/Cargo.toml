@@ -8,6 +8,7 @@ description = "Development tooling for java-analyzer (conformance reports)"
 publish = false
 
 [dependencies]
+askama.workspace = true
 syntax.workspace = true
 serde.workspace = true
 serde_json.workspace = true

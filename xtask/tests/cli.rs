@@ -24,6 +24,7 @@ fn unknown_flags_return_exit_code_two() {
     for argv in [
         vec!["--bogus".to_string()],
         vec!["bench".to_string(), "--bogus".to_string()],
+        vec!["bench-plot".to_string(), "--bogus".to_string()],
         vec!["bench-gen-plain".to_string(), "--bogus".to_string()],
         vec!["usage-spec".to_string(), "--bogus".to_string()],
     ] {

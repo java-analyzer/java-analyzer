@@ -17,6 +17,7 @@ description = "A Java Language Server Protocol implementation in Rust"
 [workspace.dependencies]
 # External crates
 anyhow = "1"
+askama = "0.16"
 clap = { version = "4", features = ["derive"] }
 ignore = "0.4"
 la-arena = "0.3"
