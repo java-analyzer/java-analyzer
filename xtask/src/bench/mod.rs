@@ -49,6 +49,7 @@ Options:
   --ready-timeout <SECS>      Max seconds to wait for server readiness [180]
   --request-timeout <SECS>    Max seconds per individual LSP request [30]
   --skip-warm-restart         Skip Phase 4 warm-restart measurement
+  --revision <TEXT>           Revision string for the report header [auto-detected]
   --json-out <PATH>           Output JSON path [target/bench/results.json]
   --md-out <PATH>             Output Markdown path [target/bench/BENCHMARKS.md]
   -h, --help                  Show this help
@@ -106,6 +107,7 @@ pub struct BenchArgs {
     pub ready_timeout_secs: u64,
     pub request_timeout_secs: u64,
     pub skip_warm_restart: bool,
+    pub revision: Option<String>,
     pub json_out: PathBuf,
     pub md_out: PathBuf,
 }
@@ -124,6 +126,7 @@ impl Default for BenchArgs {
             ready_timeout_secs: 180,
             request_timeout_secs: 30,
             skip_warm_restart: false,
+            revision: None,
             json_out: PathBuf::from("target/bench/results.json"),
             md_out: PathBuf::from("target/bench/BENCHMARKS.md"),
         }
@@ -242,7 +245,7 @@ fn run_inner(args: &BenchArgs) -> Result<BenchReport, String> {
 
     let report = BenchReport {
         schema_version: REPORT_SCHEMA_VERSION,
-        environment: collect_environment(&servers),
+        environment: collect_environment(&servers, args.revision.as_deref()),
         servers: servers.iter().map(|s| s.name.clone()).collect(),
         results,
     };
@@ -1432,14 +1435,21 @@ fn write_report_files(
     Ok(())
 }
 
-fn collect_environment(servers: &[ServerSpec]) -> EnvironmentInfo {
+fn collect_environment(
+    servers: &[ServerSpec],
+    revision_override: Option<&str>,
+) -> EnvironmentInfo {
     let os = std::env::consts::OS.to_string();
     let arch = std::env::consts::ARCH.to_string();
     let cpu_cores = std::thread::available_parallelism().map_or(1, |n| n.get());
     let cpu_model = detect_cpu_model();
     let ram_gb = detect_ram_gb();
     let java_version = detect_java_version();
-    let revision = detect_revision();
+    let revision = revision_override
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(detect_revision);
     let date = current_utc_date();
 
     let mut server_versions = BTreeMap::new();

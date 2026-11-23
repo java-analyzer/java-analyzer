@@ -160,7 +160,18 @@ impl LspClient {
             .split_first()
             .ok_or_else(|| "server command must not be empty".to_string())?;
 
-        let mut cmd = Command::new(program);
+        let resolved_program: PathBuf = {
+            let p = Path::new(program);
+            if (program.contains('/') || program.contains('\\')) && p.is_relative() {
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(p))
+                    .unwrap_or_else(|_| p.to_path_buf())
+            } else {
+                p.to_path_buf()
+            }
+        };
+
+        let mut cmd = Command::new(&resolved_program);
         cmd.args(args)
             .current_dir(work_dir)
             .env("XDG_CACHE_HOME", cache_dir)

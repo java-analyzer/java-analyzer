@@ -388,6 +388,8 @@ fn cli_parses_bench_and_bench_gen_plain_args() {
         "--request-timeout",
         "10",
         "--skip-warm-restart",
+        "--revision",
+        "abcd1234",
         "--json-out",
         "out/r.json",
         "--md-out",
@@ -422,6 +424,7 @@ fn cli_parses_bench_and_bench_gen_plain_args() {
             assert_eq!(parsed.ready_timeout_secs, 60);
             assert_eq!(parsed.request_timeout_secs, 10);
             assert!(parsed.skip_warm_restart);
+            assert_eq!(parsed.revision.as_deref(), Some("abcd1234"));
             assert_eq!(parsed.json_out, PathBuf::from("out/r.json"));
             assert_eq!(parsed.md_out, PathBuf::from("out/B.md"));
         }
@@ -496,6 +499,7 @@ fn end_to_end_four_phase_benchmark_against_java_analyzer_lsp() {
         ready_timeout_secs: 60,
         request_timeout_secs: 15,
         skip_warm_restart: false,
+        revision: None,
         json_out: json_out.clone(),
         md_out: md_out.clone(),
     };

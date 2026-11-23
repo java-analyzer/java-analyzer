@@ -193,6 +193,7 @@ fn parse_bench_args(mut args: impl Iterator<Item = String>) -> Result<Command, S
                     })?;
             }
             "--skip-warm-restart" => parsed.skip_warm_restart = true,
+            "--revision" => parsed.revision = Some(value("--revision")?),
             "--json-out" => parsed.json_out = PathBuf::from(value("--json-out")?),
             "--md-out" => parsed.md_out = PathBuf::from(value("--md-out")?),
             "-h" | "--help" => return Ok(Command::BenchHelp),

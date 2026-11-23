@@ -487,7 +487,11 @@ gen_plain_small() {
 
   echo "[bench-fetch] generating plain-small..." >&2
   rm -rf "$dest"
-  cargo run --release -p xtask -- bench-gen-plain "$dest"
+  if [ -x "target/release/xtask" ]; then
+    target/release/xtask bench-gen-plain --out "$dest"
+  else
+    cargo run --release -p xtask -- bench-gen-plain --out "$dest"
+  fi
   echo "[bench-fetch] ready: plain-small ($dest)" >&2
 }
 
@@ -593,12 +597,17 @@ fetch_nbls() {
   xh --quiet --ignore-stdin --download --follow --check-status --output "$archive" GET "$download_url"
   unpack_vsix "$archive" "$stage"
 
-  if [ ! -f "$stage/extension/nbcode/bin/nbcode" ]; then
+  local nbcode_bin=""
+  if [ -f "$stage/extension/nbcode/bin/nbcode.sh" ]; then
+    nbcode_bin="$stage/extension/nbcode/bin/nbcode.sh"
+  elif [ -f "$stage/extension/nbcode/bin/nbcode" ]; then
+    nbcode_bin="$stage/extension/nbcode/bin/nbcode"
+  else
     echo "[bench-fetch] warning: nbls nbcode binary not found in archive" >&2
     return 1
   fi
 
-  chmod +x "$stage/extension/nbcode/bin/nbcode" 2>/dev/null || true
+  chmod +x "$nbcode_bin" 2>/dev/null || true
   chmod +x "$stage"/extension/nbcode/platform*/lib/nbexec 2>/dev/null || true
   rm -rf "$dest"
   mv "$stage" "$dest"
@@ -702,7 +711,9 @@ elif [ -x "target/bench/servers/jls/extension/dist/lang_server_linux.sh" ]; then
   args+=(--server "jls=target/bench/servers/jls/extension/dist/lang_server_linux.sh")
 fi
 
-if [ -x "target/bench/servers/nbls/extension/nbcode/bin/nbcode" ]; then
+if [ -x "target/bench/servers/nbls/extension/nbcode/bin/nbcode.sh" ]; then
+  args+=(--server "nbls=target/bench/servers/nbls/extension/nbcode/bin/nbcode.sh --userdir {cache_dir} --start-java-language-server")
+elif [ -x "target/bench/servers/nbls/extension/nbcode/bin/nbcode" ]; then
   args+=(--server "nbls=target/bench/servers/nbls/extension/nbcode/bin/nbcode --userdir {cache_dir} --start-java-language-server")
 fi
 

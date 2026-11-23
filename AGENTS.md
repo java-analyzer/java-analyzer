@@ -6,7 +6,7 @@ Java LSP in Rust, modeled after `rust-analyzer` using `rowan` (lossless CST) and
 1. **Architecture**: `syntax` (parser/CST), `hir` (semantics), `ide` (editor features), `java-analyzer` (LSP server). IO belongs only in the LSP crate.
 2. **TDD**: Write failing tests first. Implement the minimum to pass.
 3. **Specs First & Two-Stage Approval Gate**: All new feature development MUST be based on an agreed specification in `docs/specs/`. While crafting or updating a spec, enter planning mode, draft it with `Status: Proposed`, present key design decisions and open questions, and stop for user sign-off before marking it `Status: Accepted`. **Treat spec approval and implementation go-ahead as separate gates**: when the user asks only to draft, refine, or approve a spec/plan, do NOT start writing implementation code (or treat a spec/plan approval click as an instruction to implement) unless the user explicitly asks to proceed with implementation.
-4. **Subagent Delegation**: Keep orchestration, spec alignment, and final verification in the main agent; delegate concrete, well-scoped implementation, bug-fix, and code-review tasks to subagents running on `flash` (`Model: "flash"`).
+4. **Subagent Delegation**: Keep orchestration, spec alignment, and final verification in the main agent; delegate concrete, well-scoped implementation, bug-fix, and code-review tasks to subagents running on `flash` (`Model: "flash"`). When dispatching parallel subagents that share a CLI, schema, or script interface, specify the exact contract (flags, paths, JSON fields) in every brief and verify both sides match after completion.
 5. **Deferred Work**: Record agreed follow-ups and deferred scope in `docs/plans/` rather than leaving them only in chat.
 6. **Rust, Salsa & LSP Discipline**:
    - Enforce strict layering: `java-analyzer` depends only on `ide` (`AnalysisHost`/`Analysis`), never directly on `hir` or `syntax`; `syntax` stays pure and Salsa-free.
@@ -15,7 +15,7 @@ Java LSP in Rust, modeled after `rust-analyzer` using `rowan` (lossless CST) and
    - Preserve Salsa early-cutoff and determinism: never store `TextRange`s in `FileItemTree`/`ModuleIndex`/`WorkspaceIndex` (resolve ranges lazily via `AstIdMap`), return `Arc<T>` directly from `#[salsa::tracked]` queries (no `_data` + `Arc` wrapper pairs), and use deterministic maps (`BTreeMap`, `FxHashMap`, `IndexMap`). Always drop any `Analysis` snapshot before mutating `AnalysisHost`/`RootDatabase` on the same thread (holding a snapshot on the mutating thread deadlocks Salsa).
    - Keep `GlobalState::snapshot()` O(1) (use `Arc` + `Arc::make_mut` on mutating paths). Prefer borrowing, `SmolStr`, and `la-arena` over `.clone()` and `String`/`Vec` allocations; keep visibility as tight as possible (`pub(crate)` or private over `pub`).
    - **Diagnostics UX**: Syntax and typechecker errors must use familiar `javac`-like primary messages enriched with `rustc`/`rust-analyzer`-grade usability (precise spans, secondary `DiagnosticRelatedInformation` locations, and actionable `help:`/`note:` hints). Extra IDE inspections (nullability, unused symbols, custom lints) may use custom wording with the same rich UX.
-7. **Verification Gate**: Run `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` before committing.
+7. **Verification Gate**: Run `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` before committing. Whenever adding or modifying CLI subcommands, `mise.toml` tasks, or external download/archive unpackers, also run a real smoke test of the affected command/task (verifying exact CLI flags and real unpacked paths) rather than relying on syntax checks alone.
 8. **Project-Local Skills**: Consult the curated Rust skills in `.agents/skills/` (`rust-best-practices`, `ms-rust-guidelines`, `rust-2024-idioms`) when writing, reviewing, or refactoring Rust code, loading only the specific chapter/rule files relevant to the task. Rule 6 takes precedence on any conflict.
 
 ## Tooling
@@ -25,9 +25,9 @@ Java LSP in Rust, modeled after `rust-analyzer` using `rowan` (lossless CST) and
    - For multi-step refactorings, start from a clean `jj status` and commit each step as a separate local change (do not push unless asked).
    - For non-trivial commits, follow the one-line subject with up to three short narrative paragraphs (1–2 sentences each): (1) the problem and why it mattered, (2) the approach introduced, and (3) optional reviewer notes or recommended top-down review order.
 2. **Prefer single-quoted (`'...'`) strings in shell commands**: Single quotes prevent variable/command interpolation and allow multiline strings while keeping commands prefix-matchable for tool permission rules.
-3. **Prefer sharp focused CLI tools to ad-hoc scripts**:
+3. **Prefer sharp focused CLI tools to ad-hoc scripts (never use ad-hoc `python3 -c` / `node -e` / `perl -e` one-liners when a dedicated CLI tool exists)**:
    - `ast-grep` (`sg`) when searching/replacing over structured AST (e.g., `ast-grep run -p '...'`)
    - `fd` when searching for files (e.g., `fd '...'`)
    - `jq` when parsing JSON (e.g., `jq '...'`)
    - `rg` (ripgrep) when searching for text (e.g., `rg '...'`)
-   - `yq` when parsing YAML (e.g., `yq '...'`)
+   - `yq` when parsing or validating YAML, TOML, or XML (e.g., `yq '...'`, `yq -p toml '.' mise.toml > /dev/null`)
