@@ -828,13 +828,21 @@ mod tests {
             package: pkg,
             enclosing_type: None,
             kind,
+            identity: if matches!(kind, TypeKind::Interface | TypeKind::Annotation) {
+                crate::TypeIdentity::Unspecified
+            } else {
+                crate::TypeIdentity::Identity
+            },
             is_public: true,
             is_static: false,
             is_final: false,
             is_abstract: matches!(kind, TypeKind::Interface | TypeKind::Annotation),
             type_params: Vec::new(),
+            type_param_bounds: BTreeMap::new(),
             super_class: super_class.map(str::to_string),
+            super_class_generic: None,
             interfaces: interfaces.iter().map(|s| (*s).to_string()).collect(),
+            interfaces_generic: Vec::new(),
             permitted_subclasses: Vec::new(),
             members,
             nested_types: Vec::new(),
@@ -887,6 +895,9 @@ public non-sealed class Rect implements Shape {}
                 kind: MemberKind::Method,
                 is_public: true,
                 is_static: false,
+                is_abstract: false,
+                type_params: Vec::new(),
+                type_param_bounds: BTreeMap::new(),
                 type_ref: Some("java.lang.String".to_string()),
                 params: vec![],
                 is_varargs: false,

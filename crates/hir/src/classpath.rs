@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use smol_str::SmolStr;
 use syntax::Release;
 
-use crate::symbols::{MemberKind, ParamSummary, TypeKind};
+use crate::symbols::{MemberKind, ParamSummary, TypeIdentity, TypeKind};
 
 /// Where a binary type originated (used for hover display and on-demand source/stub lookup).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -47,16 +47,25 @@ pub struct BinaryTypeSymbol {
     /// Enclosing type's canonical FQN if nested (e.g. `Some("java.util.Map")`).
     pub enclosing_type: Option<String>,
     pub kind: TypeKind,
+    pub identity: TypeIdentity,
     pub is_public: bool,
     pub is_static: bool,
     pub is_final: bool,
     pub is_abstract: bool,
     /// Type parameters from generic `Signature` attribute (e.g. `["E"]`, `["K", "V"]`).
     pub type_params: Vec<SmolStr>,
+    /// Explicit `extends` bounds per type parameter from generic `Signature` (omits implicit `java.lang.Object`).
+    pub type_param_bounds: BTreeMap<SmolStr, Vec<String>>,
     /// Superclass canonical FQN (e.g. `Some("java.lang.Object")`; `None` for `java.lang.Object`).
     pub super_class: Option<String>,
+    /// Generic superclass reference from `Signature` attribute (e.g. `Some("java.util.AbstractList<E>")`),
+    /// or `None` when no generic `Signature` attribute is present.
+    pub super_class_generic: Option<String>,
     /// Directly implemented/extended interface FQNs.
     pub interfaces: Vec<String>,
+    /// Generic superinterface references from `Signature` attribute (e.g. `["java.util.List<E>"]`),
+    /// or empty when no generic `Signature` attribute is present.
+    pub interfaces_generic: Vec<String>,
     /// Sealed `permits` FQNs from `PermittedSubclasses` attribute (Java 17+).
     pub permitted_subclasses: Vec<String>,
     /// Public/protected fields, methods, constructors, enum constants, and record components.
@@ -87,6 +96,11 @@ pub struct BinaryMemberSymbol {
     pub kind: MemberKind,
     pub is_public: bool,
     pub is_static: bool,
+    pub is_abstract: bool,
+    /// Method/constructor type parameters from generic `Signature` attribute (e.g. `["T", "U"]`).
+    pub type_params: Vec<SmolStr>,
+    /// Explicit `extends` bounds per method/constructor type parameter (omits implicit `java.lang.Object`).
+    pub type_param_bounds: BTreeMap<SmolStr, Vec<String>>,
     /// Human-readable return or field type (decoded from generic `Signature` if present, else JVM descriptor).
     pub type_ref: Option<String>,
     /// Method/constructor parameters (using `MethodParameters` names when present, else `arg0`, `arg1`, ...).
@@ -356,13 +370,17 @@ mod tests {
             package: pkg.to_string(),
             enclosing_type: enclosing.map(str::to_string),
             kind: TypeKind::Class,
+            identity: TypeIdentity::Identity,
             is_public: true,
             is_static: false,
             is_final: false,
             is_abstract: false,
             type_params: Vec::new(),
+            type_param_bounds: BTreeMap::new(),
             super_class: Some("java.lang.Object".to_string()),
+            super_class_generic: None,
             interfaces: Vec::new(),
+            interfaces_generic: Vec::new(),
             permitted_subclasses: Vec::new(),
             members: Vec::new(),
             nested_types: Vec::new(),

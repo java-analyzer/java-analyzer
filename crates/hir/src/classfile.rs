@@ -6,14 +6,14 @@
 use std::{borrow::Cow, collections::BTreeMap, error::Error, fmt};
 
 use ristretto_classfile::{
-    ClassAccessFlags, ClassFile, ConstantPool, FieldAccessFlags, MethodAccessFlags,
+    ClassAccessFlags, ClassFile, ConstantPool, FieldAccessFlags, MethodAccessFlags, Version,
     attributes::{Attribute, NestedClassAccessFlags, RequiresFlags},
 };
 use smol_str::{SmolStr, format_smolstr};
 
 use crate::{
     classpath::{BinaryMemberSymbol, BinaryModuleInfo, BinaryOrigin, BinaryTypeSymbol},
-    symbols::{MemberKind, ParamSummary, TypeKind},
+    symbols::{MemberKind, ParamSummary, TypeIdentity, TypeKind},
 };
 
 /// Result of parsing a single `.class` file.
@@ -50,6 +50,7 @@ impl fmt::Display for ClassfileError {
 impl Error for ClassfileError {}
 
 type InnerClassMap = BTreeMap<String, (String, SmolStr)>;
+type TypeParamsWithBounds = (Vec<SmolStr>, BTreeMap<SmolStr, Vec<String>>);
 
 const MAX_SIGNATURE_DEPTH: usize = 64;
 
@@ -163,6 +164,7 @@ pub fn parse_class_bytes(
 
     let record_attr = find_record_attribute(&class_file.attributes);
     let kind = determine_type_kind(class_file.access_flags, record_attr.is_some());
+    let identity = determine_type_identity(class_file.version, class_file.access_flags, kind);
     let is_static = is_static
         || (enclosing_type.is_some()
             && matches!(
@@ -170,9 +172,17 @@ pub fn parse_class_bytes(
                 TypeKind::Interface | TypeKind::Enum | TypeKind::Record | TypeKind::Annotation
             ));
 
-    let type_params = find_signature(&class_file.attributes, cp)
-        .and_then(|sig| parse_class_type_params(&sig))
-        .unwrap_or_default();
+    let class_sig =
+        find_signature(&class_file.attributes, cp).and_then(|sig| decode_class_signature(&sig, &inner_map));
+    let (type_params, type_param_bounds, super_class_generic, interfaces_generic) = match class_sig {
+        Some(decoded) => (
+            decoded.type_params,
+            decoded.type_param_bounds,
+            decoded.super_class_generic,
+            decoded.interfaces_generic,
+        ),
+        None => (Vec::new(), BTreeMap::new(), None, Vec::new()),
+    };
 
     let super_class = if class_file.super_class == 0 {
         None
@@ -215,6 +225,9 @@ pub fn parse_class_bytes(
                 kind: MemberKind::RecordComponent,
                 is_public: true,
                 is_static: false,
+                is_abstract: false,
+                type_params: Vec::new(),
+                type_param_bounds: BTreeMap::new(),
                 type_ref,
                 params: Vec::new(),
                 is_varargs: false,
@@ -248,6 +261,9 @@ pub fn parse_class_bytes(
                 kind: MemberKind::EnumConstant,
                 is_public: true,
                 is_static: true,
+                is_abstract: false,
+                type_params: Vec::new(),
+                type_param_bounds: BTreeMap::new(),
                 type_ref: None,
                 params: Vec::new(),
                 is_varargs: false,
@@ -269,6 +285,9 @@ pub fn parse_class_bytes(
             kind: MemberKind::Field,
             is_public: is_field_public,
             is_static: field.access_flags.contains(FieldAccessFlags::STATIC),
+            is_abstract: false,
+            type_params: Vec::new(),
+            type_param_bounds: BTreeMap::new(),
             type_ref,
             params: Vec::new(),
             is_varargs: false,
@@ -312,10 +331,21 @@ pub fn parse_class_bytes(
             .try_get_utf8(method.descriptor_index)
             .map_err(ClassfileError::from_ristretto)?
             .to_rust_string();
-        let (param_types, return_type) = find_signature(&method.attributes, cp)
-            .and_then(|sig| decode_method_signature(&sig, &inner_map))
-            .or_else(|| decode_method_descriptor(&desc, &inner_map))
-            .unwrap_or_else(|| (Vec::new(), None));
+        let (method_type_params, method_type_param_bounds, param_types, return_type) =
+            if let Some(decoded) = find_signature(&method.attributes, cp)
+                .and_then(|sig| decode_method_signature(&sig, &inner_map))
+            {
+                (
+                    decoded.type_params,
+                    decoded.type_param_bounds,
+                    decoded.params,
+                    decoded.return_type,
+                )
+            } else {
+                let (params, ret) =
+                    decode_method_descriptor(&desc, &inner_map).unwrap_or_else(|| (Vec::new(), None));
+                (Vec::new(), BTreeMap::new(), params, ret)
+            };
 
         let is_varargs = method.access_flags.contains(MethodAccessFlags::VARARGS)
             && param_types.last().is_some_and(|t| t.ends_with("[]"));
@@ -348,6 +378,9 @@ pub fn parse_class_bytes(
             kind: member_kind,
             is_public: is_method_public,
             is_static: !is_ctor && method.access_flags.contains(MethodAccessFlags::STATIC),
+            is_abstract: !is_ctor && method.access_flags.contains(MethodAccessFlags::ABSTRACT),
+            type_params: method_type_params,
+            type_param_bounds: method_type_param_bounds,
             type_ref: if is_ctor { None } else { return_type },
             params,
             is_varargs,
@@ -361,13 +394,17 @@ pub fn parse_class_bytes(
         package,
         enclosing_type,
         kind,
+        identity,
         is_public,
         is_static,
         is_final,
         is_abstract,
         type_params,
+        type_param_bounds,
         super_class,
+        super_class_generic,
         interfaces,
+        interfaces_generic,
         permitted_subclasses,
         members,
         nested_types: direct_nested,
@@ -523,6 +560,25 @@ fn determine_type_kind(flags: ClassAccessFlags, has_record_attr: bool) -> TypeKi
         TypeKind::Record
     } else {
         TypeKind::Class
+    }
+}
+
+/// Determines the JEP 401 object-identity semantics of a compiled `.class` file.
+///
+/// Hook for future Java 28+ Valhalla preview classfiles: once preview classfile support
+/// (major version >= 69 with preview minor `65535`) is enabled, concrete non-abstract classes
+/// lacking `ACC_IDENTITY` (`0x0020`, formerly `ACC_SUPER`) will map to [`TypeIdentity::Value`].
+fn determine_type_identity(
+    _version: Version,
+    access_flags: ClassAccessFlags,
+    kind: TypeKind,
+) -> TypeIdentity {
+    if matches!(kind, TypeKind::Interface | TypeKind::Annotation)
+        || access_flags.contains(ClassAccessFlags::ABSTRACT)
+    {
+        TypeIdentity::Unspecified
+    } else {
+        TypeIdentity::Identity
     }
 }
 
@@ -788,20 +844,45 @@ impl<'a> DescriptorParser<'a> {
 
 // ---- JVM Generic Signature Decoding (JVMS §4.7.9.1) ----
 
-fn parse_class_type_params(sig: &str) -> Option<Vec<SmolStr>> {
-    let empty = InnerClassMap::new();
-    let mut parser = SignatureParser::new(sig, &empty);
-    if parser.peek_byte() != Some(b'<') {
-        return Some(Vec::new());
+struct DecodedClassSignature {
+    type_params: Vec<SmolStr>,
+    type_param_bounds: BTreeMap<SmolStr, Vec<String>>,
+    super_class_generic: Option<String>,
+    interfaces_generic: Vec<String>,
+}
+
+struct DecodedMethodSignature {
+    type_params: Vec<SmolStr>,
+    type_param_bounds: BTreeMap<SmolStr, Vec<String>>,
+    params: Vec<String>,
+    return_type: Option<String>,
+}
+
+fn decode_class_signature(
+    sig: &str,
+    inner_map: &InnerClassMap,
+) -> Option<DecodedClassSignature> {
+    let mut parser = SignatureParser::new(sig, inner_map, false);
+    let (type_params, type_param_bounds) = if parser.peek_byte() == Some(b'<') {
+        parser.parse_type_parameters(0)?
+    } else {
+        (Vec::new(), BTreeMap::new())
+    };
+    let super_class_generic = Some(parser.parse_class_type_sig(0)?);
+    let mut interfaces_generic = Vec::new();
+    while !parser.is_eof() {
+        interfaces_generic.push(parser.parse_class_type_sig(0)?);
     }
-    let params = parser.parse_type_parameters(0)?;
-    // Validate that at least one superclass signature follows `<...>`.
-    let _super_sig = parser.parse_class_type_sig(0)?;
-    Some(params)
+    parser.is_eof().then_some(DecodedClassSignature {
+        type_params,
+        type_param_bounds,
+        super_class_generic,
+        interfaces_generic,
+    })
 }
 
 fn decode_field_signature(sig: &str, inner_map: &InnerClassMap) -> Option<String> {
-    let mut parser = SignatureParser::new(sig, inner_map);
+    let mut parser = SignatureParser::new(sig, inner_map, true);
     let ty = parser.parse_ref_type_sig(0)?;
     parser.is_eof().then_some(ty)
 }
@@ -809,18 +890,21 @@ fn decode_field_signature(sig: &str, inner_map: &InnerClassMap) -> Option<String
 fn decode_method_signature(
     sig: &str,
     inner_map: &InnerClassMap,
-) -> Option<(Vec<String>, Option<String>)> {
-    let mut parser = SignatureParser::new(sig, inner_map);
-    if parser.peek_byte() == Some(b'<') {
-        let _ = parser.parse_type_parameters(0)?;
-    }
+) -> Option<DecodedMethodSignature> {
+    let mut parser = SignatureParser::new(sig, inner_map, false);
+    let (type_params, type_param_bounds) = if parser.peek_byte() == Some(b'<') {
+        parser.parse_type_parameters(0)?
+    } else {
+        (Vec::new(), BTreeMap::new())
+    };
+    parser.shorten_java_lang = true;
     parser.expect_byte(b'(')?;
     let mut params = Vec::new();
     while parser.peek_byte() != Some(b')') {
         params.push(parser.parse_java_type_sig(0)?);
     }
     parser.expect_byte(b')')?;
-    let ret = if parser.peek_byte() == Some(b'V') {
+    let return_type = if parser.peek_byte() == Some(b'V') {
         parser.advance(1);
         Some("void".to_string())
     } else {
@@ -839,7 +923,12 @@ fn decode_method_signature(
             _ => return None,
         }
     }
-    parser.is_eof().then_some((params, ret))
+    parser.is_eof().then_some(DecodedMethodSignature {
+        type_params,
+        type_param_bounds,
+        params,
+        return_type,
+    })
 }
 
 struct SignatureParser<'a> {
@@ -847,15 +936,25 @@ struct SignatureParser<'a> {
     bytes: &'a [u8],
     pos: usize,
     inner_map: &'a InnerClassMap,
+    shorten_java_lang: bool,
 }
 
 impl<'a> SignatureParser<'a> {
-    fn new(src: &'a str, inner_map: &'a InnerClassMap) -> Self {
+    fn new(src: &'a str, inner_map: &'a InnerClassMap, shorten_java_lang: bool) -> Self {
         Self {
             src,
             bytes: src.as_bytes(),
             pos: 0,
             inner_map,
+            shorten_java_lang,
+        }
+    }
+
+    fn format_internal_name(&self, internal: &str) -> String {
+        if self.shorten_java_lang {
+            internal_to_java_type(internal, self.inner_map)
+        } else {
+            internal_to_fqn(internal, self.inner_map)
         }
     }
 
@@ -894,28 +993,35 @@ impl<'a> SignatureParser<'a> {
         self.src.get(start..self.pos)
     }
 
-    fn parse_type_parameters(&mut self, depth: usize) -> Option<Vec<SmolStr>> {
+    fn parse_type_parameters(&mut self, depth: usize) -> Option<TypeParamsWithBounds> {
         if depth >= MAX_SIGNATURE_DEPTH {
             return None;
         }
         self.expect_byte(b'<')?;
         let mut names = Vec::new();
+        let mut bounds_map = BTreeMap::new();
         while self.peek_byte() != Some(b'>') {
-            let name = self.read_identifier_until(b":")?;
-            names.push(SmolStr::new(name));
+            let name = SmolStr::new(self.read_identifier_until(b":")?);
             self.expect_byte(b':')?;
+            let mut param_bounds = Vec::new();
             // Optional ClassBound (may be empty if immediately followed by `:`).
             if matches!(self.peek_byte(), Some(b'L' | b'T' | b'[')) {
-                let _ = self.parse_ref_type_sig(depth + 1)?;
+                param_bounds.push(self.parse_ref_type_sig(depth + 1)?);
             }
             // Zero or more InterfaceBounds (`:ReferenceTypeSignature`).
             while self.peek_byte() == Some(b':') {
                 self.pos += 1;
-                let _ = self.parse_ref_type_sig(depth + 1)?;
+                param_bounds.push(self.parse_ref_type_sig(depth + 1)?);
             }
+            let is_implicit_object_only =
+                param_bounds.len() == 1 && param_bounds[0] == "java.lang.Object";
+            if !param_bounds.is_empty() && !is_implicit_object_only {
+                bounds_map.insert(name.clone(), param_bounds);
+            }
+            names.push(name);
         }
         self.expect_byte(b'>')?;
-        (!names.is_empty()).then_some(names)
+        (!names.is_empty()).then_some((names, bounds_map))
     }
 
     fn parse_java_type_sig(&mut self, depth: usize) -> Option<String> {
@@ -1000,22 +1106,38 @@ impl<'a> SignatureParser<'a> {
         }
         self.expect_byte(b'L')?;
         let internal_head = self.read_identifier_until(b"<.;")?;
-        let mut out = internal_to_java_type(internal_head, self.inner_map);
-        if self.peek_byte() == Some(b'<') {
-            let args = self.parse_type_args(depth + 1)?;
-            out.push_str(&args);
-        }
+        let head_name = self.format_internal_name(internal_head);
+        let head_args = if self.peek_byte() == Some(b'<') {
+            Some(self.parse_type_args(depth + 1)?)
+        } else {
+            None
+        };
+        let mut segments = vec![(head_name, head_args)];
         while self.peek_byte() == Some(b'.') {
             self.pos += 1;
             let suffix = self.read_identifier_until(b"<.;")?;
-            out.push('.');
-            out.push_str(suffix);
-            if self.peek_byte() == Some(b'<') {
-                let args = self.parse_type_args(depth + 1)?;
+            let suffix_args = if self.peek_byte() == Some(b'<') {
+                Some(self.parse_type_args(depth + 1)?)
+            } else {
+                None
+            };
+            segments.push((suffix.to_string(), suffix_args));
+        }
+        self.expect_byte(b';')?;
+
+        let last_args_idx = segments.iter().rposition(|(_, args)| args.is_some());
+        let mut out = String::new();
+        for (i, (name, args)) in segments.into_iter().enumerate() {
+            if i > 0 {
+                out.push('.');
+            }
+            out.push_str(&name);
+            if Some(i) == last_args_idx
+                && let Some(args) = args
+            {
                 out.push_str(&args);
             }
         }
-        self.expect_byte(b';')?;
         Some(out)
     }
 
@@ -1627,5 +1749,208 @@ mod tests {
     fn returns_typed_error_on_corrupt_class_bytes() {
         let err = parse_class_bytes(b"not a classfile", jdk_base_origin()).unwrap_err();
         assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn parses_class_and_method_generic_signatures_bounds_and_supertypes() {
+        let mut cp = ConstantPool::default();
+        let this_class = cp.add_class("com/example/MyList").unwrap();
+        let super_class = cp.add_class("java/util/AbstractList").unwrap();
+        let iface_list = cp.add_class("java/util/List").unwrap();
+        let iface_ra = cp.add_class("java/util/RandomAccess").unwrap();
+        let iface_comp = cp.add_class("java/util/Comparator").unwrap();
+
+        let sig_attr = cp.add_utf8("Signature").unwrap();
+        let class_sig = cp
+            .add_utf8(
+                "<T:Ljava/lang/Number;:Ljava/lang/Comparable<TT;>;U:Ljava/lang/Object;V::Ljava/io/Serializable;>\
+                Ljava/util/AbstractList<Ljava/util/Map<TK;TV;>.Entry<TK;TV;>;>;\
+                Ljava/util/List<+Ljava/lang/Number;>;\
+                Ljava/util/RandomAccess;\
+                Ljava/util/Comparator<-TT;>;",
+            )
+            .unwrap();
+
+        let ctor_name = cp.add_utf8("<init>").unwrap();
+        let ctor_desc = cp.add_utf8("(Ljava/lang/Exception;)V").unwrap();
+        let ctor_sig = cp.add_utf8("<E:Ljava/lang/Exception;>(TE;)V").unwrap();
+
+        let method_name = cp.add_utf8("max").unwrap();
+        let method_desc = cp
+            .add_utf8("(Ljava/lang/Comparable;Ljava/lang/Object;)Ljava/lang/Comparable;")
+            .unwrap();
+        let method_sig = cp
+            .add_utf8("<T:Ljava/lang/Comparable<TT;>;U:Ljava/lang/Object;>(TT;TU;)TT;")
+            .unwrap();
+
+        let plain_name = cp.add_utf8("plain").unwrap();
+        let plain_desc = cp.add_utf8("()I").unwrap();
+
+        let cf = ClassFile {
+            version: JAVA_21,
+            access_flags: ClassAccessFlags::PUBLIC | ClassAccessFlags::SUPER,
+            this_class,
+            super_class,
+            interfaces: vec![iface_list, iface_ra, iface_comp],
+            methods: vec![
+                Method {
+                    access_flags: MethodAccessFlags::PUBLIC,
+                    name_index: ctor_name,
+                    descriptor_index: ctor_desc,
+                    attributes: vec![Attribute::Signature {
+                        name_index: sig_attr,
+                        signature_index: ctor_sig,
+                    }],
+                },
+                Method {
+                    access_flags: MethodAccessFlags::PUBLIC | MethodAccessFlags::STATIC,
+                    name_index: method_name,
+                    descriptor_index: method_desc,
+                    attributes: vec![Attribute::Signature {
+                        name_index: sig_attr,
+                        signature_index: method_sig,
+                    }],
+                },
+                Method {
+                    access_flags: MethodAccessFlags::PUBLIC,
+                    name_index: plain_name,
+                    descriptor_index: plain_desc,
+                    attributes: vec![],
+                },
+            ],
+            attributes: vec![Attribute::Signature {
+                name_index: sig_attr,
+                signature_index: class_sig,
+            }],
+            constant_pool: cp,
+            ..Default::default()
+        };
+
+        let Some(ParsedClassfile::Type(ty)) =
+            parse_class_bytes(&serialize(&cf), jdk_base_origin()).unwrap()
+        else {
+            panic!("expected ParsedClassfile::Type");
+        };
+
+        assert_eq!(
+            ty.type_params,
+            vec![SmolStr::new("T"), SmolStr::new("U"), SmolStr::new("V")]
+        );
+        assert_eq!(
+            ty.type_param_bounds,
+            BTreeMap::from([
+                (
+                    SmolStr::new("T"),
+                    vec![
+                        "java.lang.Number".to_string(),
+                        "java.lang.Comparable<T>".to_string()
+                    ]
+                ),
+                (
+                    SmolStr::new("V"),
+                    vec!["java.io.Serializable".to_string()]
+                ),
+            ])
+        );
+        assert_eq!(
+            ty.super_class_generic.as_deref(),
+            Some("java.util.AbstractList<java.util.Map.Entry<K, V>>")
+        );
+        assert_eq!(
+            ty.interfaces_generic,
+            vec![
+                "java.util.List<? extends java.lang.Number>".to_string(),
+                "java.util.RandomAccess".to_string(),
+                "java.util.Comparator<? super T>".to_string(),
+            ]
+        );
+
+        let ctor = &ty.members[0];
+        assert_eq!(ctor.type_params, vec![SmolStr::new("E")]);
+        assert_eq!(
+            ctor.type_param_bounds,
+            BTreeMap::from([(SmolStr::new("E"), vec!["java.lang.Exception".to_string()])])
+        );
+        assert_eq!(ctor.type_ref, None);
+
+        let max = &ty.members[1];
+        assert_eq!(max.type_params, vec![SmolStr::new("T"), SmolStr::new("U")]);
+        assert_eq!(
+            max.type_param_bounds,
+            BTreeMap::from([(
+                SmolStr::new("T"),
+                vec!["java.lang.Comparable<T>".to_string()]
+            )])
+        );
+        assert_eq!(max.type_ref.as_deref(), Some("T"));
+        assert_eq!(max.params[0].type_ref, "T");
+        assert_eq!(max.params[1].type_ref, "U");
+
+        let plain = &ty.members[2];
+        assert!(plain.type_params.is_empty());
+        assert!(plain.type_param_bounds.is_empty());
+    }
+
+    #[test]
+    fn parses_non_generic_class_extending_generic_superclass_and_wildcard_star() {
+        let mut cp = ConstantPool::default();
+        let this_class = cp.add_class("com/example/StringList").unwrap();
+        let super_class = cp.add_class("java/util/ArrayList").unwrap();
+        let iface = cp.add_class("java/util/Collection").unwrap();
+        let sig_attr = cp.add_utf8("Signature").unwrap();
+        let class_sig = cp
+            .add_utf8("Ljava/util/ArrayList<Ljava/lang/String;>;Ljava/util/Collection<*>;")
+            .unwrap();
+
+        let cf = ClassFile {
+            version: JAVA_21,
+            access_flags: ClassAccessFlags::PUBLIC | ClassAccessFlags::SUPER,
+            this_class,
+            super_class,
+            interfaces: vec![iface],
+            attributes: vec![Attribute::Signature {
+                name_index: sig_attr,
+                signature_index: class_sig,
+            }],
+            constant_pool: cp,
+            ..Default::default()
+        };
+
+        let Some(ParsedClassfile::Type(ty)) =
+            parse_class_bytes(&serialize(&cf), jdk_base_origin()).unwrap()
+        else {
+            panic!("expected ParsedClassfile::Type");
+        };
+
+        assert!(ty.type_params.is_empty());
+        assert!(ty.type_param_bounds.is_empty());
+        assert_eq!(
+            ty.super_class_generic.as_deref(),
+            Some("java.util.ArrayList<java.lang.String>")
+        );
+        assert_eq!(
+            ty.interfaces_generic,
+            vec!["java.util.Collection<?>".to_string()]
+        );
+
+        // Class without Signature attribute leaves generic fields empty/None.
+        let mut cp2 = ConstantPool::default();
+        let plain_cls = cp2.add_class("com/example/Plain").unwrap();
+        let obj_cls = cp2.add_class("java/lang/Object").unwrap();
+        let plain_cf = ClassFile {
+            version: JAVA_21,
+            access_flags: ClassAccessFlags::PUBLIC | ClassAccessFlags::SUPER,
+            this_class: plain_cls,
+            super_class: obj_cls,
+            constant_pool: cp2,
+            ..Default::default()
+        };
+        let Some(ParsedClassfile::Type(plain_ty)) =
+            parse_class_bytes(&serialize(&plain_cf), jdk_base_origin()).unwrap()
+        else {
+            panic!("expected ParsedClassfile::Type");
+        };
+        assert_eq!(plain_ty.super_class_generic, None);
+        assert!(plain_ty.interfaces_generic.is_empty());
     }
 }

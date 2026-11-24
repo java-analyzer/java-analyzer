@@ -1,7 +1,7 @@
 //! Pure, IO-free Java name resolution at a source offset.
 //! See `docs/specs/0005-symbol-indexing-and-name-resolution.md`.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use rustc_hash::FxHashSet;
 use smol_str::SmolStr;
@@ -20,11 +20,21 @@ use crate::{
     hierarchy::{
         direct_supertypes, find_overridden_method, linearized_supertypes, parse_type_ref_segments,
     },
+    infer::{
+        self, erase_type_vars_to_bound, find_functional_interface_sam, infer_expr_ty,
+        infer_local_ty, is_raw_class_ty, parameter_for_arg, resolve_params_in_binary,
+        resolve_params_in_file,
+    },
     item_tree::{AstIdMap, FileItemTree, MemberId, TypeId},
     symbols::{
         ImportKind, MemberKind, MemberSymbol, ParamSummary, TypeKind, TypeSymbol, WorkspaceIndex,
         extract_field_decl, extract_local_type_symbol, extract_method_or_ctor,
         format_params_signature, node_ident_text,
+    },
+    ty::{
+        Substitution, Ty, is_assignable, is_subtype, resolve_binary_type_ref_for_owner,
+        resolve_type_ref_in_file_for_owner, supertype_substitution_for_ty,
+        type_param_bounds_of_fqn,
     },
 };
 
@@ -146,7 +156,7 @@ impl ResolvedSymbol {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct LocalSymbol {
+pub(crate) struct LocalSymbol {
     file_id: FileId,
     name: SmolStr,
     kind: LocalKind,
@@ -156,7 +166,7 @@ struct LocalSymbol {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct TypeParamSymbol {
+pub(crate) struct TypeParamSymbol {
     file_id: FileId,
     name: SmolStr,
     bounds: Vec<String>,
@@ -188,7 +198,7 @@ impl TypeRefTarget {
 }
 
 #[derive(Debug, Clone)]
-enum ResolvedTarget {
+pub(crate) enum ResolvedTarget {
     IndexedType(FileId, TypeId),
     LocalType(TypeSymbol),
     BinaryType(String),
@@ -201,6 +211,10 @@ enum ResolvedTarget {
     Local(LocalSymbol),
     TypeParam(TypeParamSymbol),
     Package(String),
+    WithDetail {
+        inner: Box<ResolvedTarget>,
+        detail: SymbolDetail,
+    },
 }
 
 impl From<TypeRefTarget> for ResolvedTarget {
@@ -234,6 +248,23 @@ fn member_detail(
 }
 
 impl ResolvedTarget {
+    pub(crate) fn is_static_member(&self, db: &dyn DefDatabase) -> bool {
+        match self {
+            Self::IndexedMember(fid, mid) => db.file_item_tree(*fid).members[*mid].is_static,
+            Self::LocalMember(m) => m.is_static,
+            Self::BinaryMember {
+                owner_fqn,
+                member_index,
+            } => db
+                .classpath_index()
+                .type_by_fqn(owner_fqn)
+                .and_then(|t| t.members.get(*member_index))
+                .is_some_and(|m| m.is_static),
+            Self::WithDetail { inner, .. } => inner.is_static_member(db),
+            _ => false,
+        }
+    }
+
     fn into_resolved_symbol(
         self,
         db: &dyn DefDatabase,
@@ -407,18 +438,23 @@ impl ResolvedTarget {
                     overrides: None,
                 })
             }
+            Self::WithDetail { inner, detail } => {
+                let mut sym = inner.into_resolved_symbol(db, classpath)?;
+                sym.detail = Some(detail);
+                Some(sym)
+            }
         }
     }
 }
 
 #[derive(Clone, Copy)]
-struct ResolveCtx<'a> {
-    db: &'a dyn DefDatabase,
-    file_id: FileId,
-    file_tree: &'a FileItemTree,
-    ast_id_map: &'a AstIdMap,
-    index: &'a WorkspaceIndex,
-    classpath: &'a ClasspathIndex,
+pub(crate) struct ResolveCtx<'a> {
+    pub(crate) db: &'a dyn DefDatabase,
+    pub(crate) file_id: FileId,
+    pub(crate) file_tree: &'a FileItemTree,
+    pub(crate) ast_id_map: &'a AstIdMap,
+    pub(crate) index: &'a WorkspaceIndex,
+    pub(crate) classpath: &'a ClasspathIndex,
 }
 
 /// Resolves the Java identifier or `super` keyword at byte `offset` in `file_id`, if any.
@@ -480,12 +516,99 @@ pub fn resolve_type_of_symbol_at_offset(
     let parent = token.parent()?;
 
     if token.kind() == THIS_KW && parent.kind() == THIS_EXPR {
+        let inferred = infer_expr_ty(db, file_id, &parent, None);
+        if !matches!(inferred, Ty::Unknown) {
+            return unwrap_ty_to_target(ctx, &inferred)
+                .and_then(|t| ResolvedTarget::from(t).into_resolved_symbol(db, &classpath));
+        }
         let ty = resolve_expr_type(ctx, &parent, 0)?;
         return ResolvedTarget::from(ty).into_resolved_symbol(db, &classpath);
     }
 
+    if token.kind() == NEW_KW && parent.kind() == NEW_EXPR {
+        let inferred = infer_expr_ty(db, file_id, &parent, None);
+        if !matches!(inferred, Ty::Unknown) {
+            return unwrap_ty_to_target(ctx, &inferred)
+                .and_then(|t| ResolvedTarget::from(t).into_resolved_symbol(db, &classpath));
+        }
+        let ty = resolve_expr_type(ctx, &parent, 0)?;
+        return ResolvedTarget::from(ty).into_resolved_symbol(db, &classpath);
+    }
+
+    if token.kind() == IDENT
+        && parent.kind() == NAME
+        && let Some(decl) = parent.parent()
+        && matches!(
+            decl.kind(),
+            VARIABLE_DECLARATOR | PARAM | FOREACH_STMT | RESOURCE | TYPE_PATTERN | CATCH_CLAUSE
+        )
+        && decl.parent().is_none_or(|p| p.kind() != FIELD_DECL)
+    {
+        let inferred = infer_local_ty(db, file_id, &decl);
+        if !matches!(inferred, Ty::Unknown) {
+            return unwrap_ty_to_target(ctx, &inferred)
+                .and_then(|t| ResolvedTarget::from(t).into_resolved_symbol(db, &classpath));
+        }
+    }
+
     if let Some(target) = resolve_target_at_offset(ctx, &root, offset) {
-        let ty = match target {
+        let unwrapped_inner = match &target {
+            ResolvedTarget::WithDetail { inner, .. } => inner.as_ref(),
+            other => other,
+        };
+        let is_type_or_ctor = matches!(
+            unwrapped_inner,
+            ResolvedTarget::IndexedType(_, _)
+                | ResolvedTarget::LocalType(_)
+                | ResolvedTarget::BinaryType(_)
+        ) || match unwrapped_inner {
+            ResolvedTarget::IndexedMember(m_file, m_id) => {
+                db.file_item_tree(*m_file).members[*m_id].kind == MemberKind::Constructor
+            }
+            ResolvedTarget::LocalMember(m) => m.kind == MemberKind::Constructor,
+            ResolvedTarget::BinaryMember {
+                owner_fqn,
+                member_index,
+            } => classpath
+                .type_by_fqn(owner_fqn)
+                .and_then(|t| t.members.get(*member_index))
+                .is_some_and(|m| m.kind == MemberKind::Constructor),
+            _ => false,
+        };
+
+        if !is_type_or_ctor
+            && token.kind() == IDENT
+            && parent.kind() == NAME_REF
+            && let Some(gp) = parent.parent()
+        {
+            let expr_node = if gp.kind() == NAME_REF_EXPR {
+                if let Some(call) = gp.parent().filter(|p| {
+                    p.kind() == CALL_EXPR
+                        && p.children()
+                            .next()
+                            .is_some_and(|c| c.text_range() == gp.text_range())
+                }) {
+                    Some(call)
+                } else {
+                    Some(gp)
+                }
+            } else if matches!(gp.kind(), FIELD_ACCESS_EXPR | METHOD_CALL_EXPR) {
+                Some(gp)
+            } else {
+                None
+            };
+
+            if let Some(expr) = expr_node {
+                let inferred = infer_expr_ty(db, file_id, &expr, None);
+                if !matches!(inferred, Ty::Unknown) {
+                    return unwrap_ty_to_target(ctx, &inferred).and_then(|t| {
+                        ResolvedTarget::from(t).into_resolved_symbol(db, &classpath)
+                    });
+                }
+            }
+        }
+
+        let ty = match unwrapped_inner.clone() {
             ResolvedTarget::IndexedMember(m_file, m_id) => {
                 let m_tree = db.file_item_tree(m_file);
                 if m_tree.members[m_id].kind == MemberKind::Constructor {
@@ -526,11 +649,24 @@ pub fn resolve_type_of_symbol_at_offset(
         return ResolvedTarget::from(ty).into_resolved_symbol(db, &classpath);
     }
 
-    if token.kind() == NEW_KW && parent.kind() == NEW_EXPR {
-        let ty = resolve_expr_type(ctx, &parent, 0)?;
-        return ResolvedTarget::from(ty).into_resolved_symbol(db, &classpath);
-    }
+    None
+}
 
+fn unwrap_ty_to_target(ctx: ResolveCtx<'_>, ty: &Ty) -> Option<TypeRefTarget> {
+    let mut cur = ty;
+    for _ in 0..crate::ty::MAX_SUBST_DEPTH {
+        match cur {
+            Ty::Array { elem, .. } => cur = elem,
+            Ty::Class { fqn, .. } => return type_ref_from_fqn(ctx, fqn),
+            Ty::TypeVar { bounds, .. } => {
+                cur = bounds.first()?;
+            }
+            Ty::Intersection(members) => {
+                cur = members.first()?;
+            }
+            Ty::Primitive(_) | Ty::Void | Ty::Null | Ty::Unknown => return None,
+        }
+    }
     None
 }
 
@@ -595,6 +731,20 @@ fn local_symbol_with_type(
     }
 }
 
+fn enrich_local_inferred_type(
+    ctx: ResolveCtx<'_>,
+    decl_node: &SyntaxNode,
+    mut local: LocalSymbol,
+) -> LocalSymbol {
+    if local.type_ref.as_deref().is_none_or(|t| t == "var") {
+        let inferred = infer_local_ty(ctx.db, ctx.file_id, decl_node);
+        if !matches!(inferred, Ty::Unknown) {
+            local.type_ref = Some(inferred.display_short());
+        }
+    }
+    local
+}
+
 fn resolve_declaration_site(ctx: ResolveCtx<'_>, name_node: &SyntaxNode) -> Option<ResolvedTarget> {
     let decl = name_node.parent()?;
     let range = name_node.text_range();
@@ -621,13 +771,16 @@ fn resolve_declaration_site(ctx: ResolveCtx<'_>, name_node: &SyntaxNode) -> Opti
                 ),
                 LOCAL_VAR_DECL => {
                     let base_type = decl_parent.children().find(|n| is_type_node(n.kind()));
-                    Some(ResolvedTarget::Local(local_symbol_with_type(
+                    let local = local_symbol_with_type(
                         ctx.file_id,
                         &decl,
                         name_node,
                         LocalKind::LocalVar,
                         base_type.as_ref(),
                         true,
+                    );
+                    Some(ResolvedTarget::Local(enrich_local_inferred_type(
+                        ctx, &decl, local,
                     )))
                 }
                 _ => None,
@@ -649,21 +802,23 @@ fn resolve_declaration_site(ctx: ResolveCtx<'_>, name_node: &SyntaxNode) -> Opti
             } else {
                 LocalKind::Param
             };
-            Some(ResolvedTarget::Local(local_symbol_from_node(
+            let local = local_symbol_from_node(ctx.file_id, &decl, name_node, kind, true);
+            Some(ResolvedTarget::Local(enrich_local_inferred_type(
+                ctx, &decl, local,
+            )))
+        }
+        FOREACH_STMT => {
+            let local = local_symbol_from_node(
                 ctx.file_id,
                 &decl,
                 name_node,
-                kind,
-                true,
+                LocalKind::ForEachVar,
+                false,
+            );
+            Some(ResolvedTarget::Local(enrich_local_inferred_type(
+                ctx, &decl, local,
             )))
         }
-        FOREACH_STMT => Some(ResolvedTarget::Local(local_symbol_from_node(
-            ctx.file_id,
-            &decl,
-            name_node,
-            LocalKind::ForEachVar,
-            false,
-        ))),
         CATCH_CLAUSE => Some(ResolvedTarget::Local(local_symbol_from_node(
             ctx.file_id,
             &decl,
@@ -671,20 +826,30 @@ fn resolve_declaration_site(ctx: ResolveCtx<'_>, name_node: &SyntaxNode) -> Opti
             LocalKind::CatchParam,
             false,
         ))),
-        RESOURCE => Some(ResolvedTarget::Local(local_symbol_from_node(
-            ctx.file_id,
-            &decl,
-            name_node,
-            LocalKind::ResourceVar,
-            false,
-        ))),
-        TYPE_PATTERN => Some(ResolvedTarget::Local(local_symbol_from_node(
-            ctx.file_id,
-            &decl,
-            name_node,
-            LocalKind::PatternVar,
-            false,
-        ))),
+        RESOURCE => {
+            let local = local_symbol_from_node(
+                ctx.file_id,
+                &decl,
+                name_node,
+                LocalKind::ResourceVar,
+                false,
+            );
+            Some(ResolvedTarget::Local(enrich_local_inferred_type(
+                ctx, &decl, local,
+            )))
+        }
+        TYPE_PATTERN => {
+            let local = local_symbol_from_node(
+                ctx.file_id,
+                &decl,
+                name_node,
+                LocalKind::PatternVar,
+                false,
+            );
+            Some(ResolvedTarget::Local(enrich_local_inferred_type(
+                ctx, &decl, local,
+            )))
+        }
         TYPE_PARAM => {
             let bounds = decl
                 .children()
@@ -794,6 +959,8 @@ fn resolve_member_declaration(
             is_default: false,
             is_abstract: false,
             has_override: false,
+            type_params: Vec::new(),
+            type_param_bounds: std::collections::BTreeMap::new(),
             type_ref: None,
             params: Vec::new(),
             full_range: member_node.text_range(),
@@ -927,7 +1094,29 @@ fn resolve_path_type_ref(
     }
 
     let seg_refs: Vec<&str> = prefix.iter().map(SmolStr::as_str).collect();
-    resolve_type_segments(ctx, path_type, &seg_refs)
+    if let Some(found) = resolve_type_segments(ctx, path_type, &seg_refs) {
+        return Some(found);
+    }
+
+    if seg_refs == ["var"]
+        && let Some(parent) = path_type.parent()
+    {
+        let decl_node = match parent.kind() {
+            LOCAL_VAR_DECL => parent
+                .children()
+                .find(|n| n.kind() == VARIABLE_DECLARATOR),
+            FOREACH_STMT | RESOURCE | PARAM | TYPE_PATTERN => Some(parent),
+            _ => None,
+        };
+        if let Some(decl) = decl_node {
+            let inferred = infer_local_ty(ctx.db, ctx.file_id, &decl);
+            if !matches!(inferred, Ty::Unknown) {
+                return unwrap_ty_to_target(ctx, &inferred).map(ResolvedTarget::from);
+            }
+        }
+    }
+
+    None
 }
 
 fn resolve_field_access_ref(
@@ -945,8 +1134,30 @@ fn resolve_field_access_ref(
 
     // 2. Resolve receiver expression's type and look up member/nested type on it.
     let receiver = field_access.children().next()?;
-    let recv_ty = resolve_expr_type(ctx, &receiver, 0)?;
     let member_name = node_ident_text(ref_node);
+
+    let inferred_recv = infer_expr_ty(ctx.db, ctx.file_id, &receiver, None);
+    if !matches!(inferred_recv, Ty::Unknown) {
+        if let Some(fqn) = inferred_recv.erased_fqn()
+            && let Some(recv_target) = type_ref_from_fqn(ctx, fqn)
+            && let Some(found) = lookup_member_on_type(ctx, &recv_target, &member_name, None, false)
+        {
+            return Some(infer::resolve_field_access_target(
+                ctx.db,
+                ctx.file_id,
+                &inferred_recv,
+                found,
+            ));
+        }
+        if matches!(inferred_recv, Ty::Array { .. })
+            && let Some(obj_target) = type_ref_from_fqn(ctx, "java.lang.Object")
+            && let Some(found) = lookup_member_on_type(ctx, &obj_target, &member_name, None, false)
+        {
+            return Some(found);
+        }
+    }
+
+    let recv_ty = resolve_expr_type(ctx, &receiver, 0)?;
     lookup_member_on_type(ctx, &recv_ty, &member_name, None, false)
 }
 
@@ -955,13 +1166,26 @@ fn resolve_method_call_ref(
     method_call: &SyntaxNode,
     ref_node: &SyntaxNode,
 ) -> Option<ResolvedTarget> {
+    if let Some(found) = infer::resolve_method_call_target(ctx.db, ctx.file_id, method_call) {
+        return Some(found);
+    }
+
     let receiver = method_call.children().next()?;
-    let recv_ty = resolve_expr_type(ctx, &receiver, 0)?;
     let member_name = node_ident_text(ref_node);
     let arg_count = method_call
         .children()
         .find(|n| n.kind() == ARG_LIST)
         .map(|al| count_args(&al));
+
+    let inferred_recv = infer_expr_ty(ctx.db, ctx.file_id, &receiver, None);
+    if let Some(fqn) = inferred_recv.erased_fqn()
+        && let Some(recv_target) = type_ref_from_fqn(ctx, fqn)
+        && let Some(found) = lookup_member_on_type(ctx, &recv_target, &member_name, arg_count, true)
+    {
+        return Some(found);
+    }
+
+    let recv_ty = resolve_expr_type(ctx, &receiver, 0)?;
     lookup_member_on_type(ctx, &recv_ty, &member_name, arg_count, true)
 }
 
@@ -970,6 +1194,10 @@ fn resolve_method_ref(
     method_ref: &SyntaxNode,
     ref_node: &SyntaxNode,
 ) -> Option<ResolvedTarget> {
+    if let Some(found) = infer::resolve_method_ref_target_with_context(ctx.db, ctx.file_id, method_ref) {
+        return Some(found);
+    }
+
     let qualifier = method_ref.children().next()?;
     let target_ty = if qualifier.kind() == PATH_TYPE {
         let segs = path_segments(&qualifier);
@@ -1002,6 +1230,11 @@ fn resolve_name_ref_expr(
                 .next()
                 .is_some_and(|c| c.text_range() == expr_node.text_range())
     }) {
+        if let Some(found) = infer::resolve_unqualified_call_target(ctx.db, ctx.file_id, &call_expr)
+        {
+            return Some(found);
+        }
+
         let arg_count = call_expr
             .children()
             .find(|n| n.kind() == ARG_LIST)
@@ -1038,15 +1271,49 @@ fn resolve_name_ref_expr(
 
     // Non-call unqualified identifier:
     // 1. Lexical local scopes (innermost to outermost).
-    if let Some(local) = resolve_local_scope(ctx.file_id, ref_node, &name) {
-        return Some(ResolvedTarget::Local(local));
+    if let Some((local, decl_node)) = find_local_binding(ctx.file_id, ref_node, &name) {
+        return Some(ResolvedTarget::Local(enrich_local_inferred_type(
+            ctx, &decl_node, local,
+        )));
     }
 
     // 2. Enclosing type(s) members (direct + inherited fields, record components, enum constants,
     //    nested types) plus compact-source top-level fields.
     for ty in enclosing_type_targets(ctx.file_id, ctx.file_tree, ctx.ast_id_map, expr_node) {
         if let Some(found) = lookup_non_method_member_or_nested_with_supers(ctx, &ty, &name) {
-            return Some(found);
+            let enc_fqn = ty.qualified_name(ctx.db, ctx.file_tree);
+            let tp_bounds = type_param_bounds_of_fqn(ctx.db, &enc_fqn);
+            let enc_args = crate::ty::type_params_of_fqn(ctx.db, &enc_fqn)
+                .into_iter()
+                .map(|tp| {
+                    let bounds = tp_bounds
+                        .get(&tp)
+                        .map(|raw_b| {
+                            raw_b
+                                .iter()
+                                .map(|b| {
+                                    resolve_type_ref_in_file_for_owner(
+                                        ctx.db,
+                                        ctx.file_id,
+                                        Some(&enc_fqn),
+                                        b,
+                                        &tp_bounds,
+                                    )
+                                })
+                                .filter(|t| !matches!(t, Ty::Unknown))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    crate::ty::TypeArg::Type(Ty::type_var(tp, bounds))
+                })
+                .collect();
+            let recv_ty = Ty::class(enc_fqn, enc_args);
+            return Some(infer::resolve_field_access_target(
+                ctx.db,
+                ctx.file_id,
+                &recv_ty,
+                found,
+            ));
         }
     }
     if let Some(&mid) = ctx.file_tree.top_level_members.iter().find(|&&mid| {
@@ -1067,7 +1334,15 @@ fn resolve_name_ref_expr(
 
 // ---- Lexical local scope resolution ----
 
-fn resolve_local_scope(file_id: FileId, ref_node: &SyntaxNode, name: &str) -> Option<LocalSymbol> {
+pub(crate) fn find_local_decl_node(ref_node: &SyntaxNode, name: &str) -> Option<SyntaxNode> {
+    find_local_binding(FileId(0), ref_node, name).map(|(_, decl_node)| decl_node)
+}
+
+fn find_local_binding(
+    file_id: FileId,
+    ref_node: &SyntaxNode,
+    name: &str,
+) -> Option<(LocalSymbol, SyntaxNode)> {
     let ref_range = ref_node.text_range();
     let mut child_on_path = ref_node.clone();
 
@@ -1094,26 +1369,28 @@ fn resolve_local_scope(file_id: FileId, ref_node: &SyntaxNode, name: &str) -> Op
                     && let Some(name_node) = ancestor.children().find(|n| n.kind() == NAME)
                     && name_node.text() == name
                 {
-                    return Some(local_symbol_from_node(
+                    let sym = local_symbol_from_node(
                         file_id,
                         &ancestor,
                         &name_node,
                         LocalKind::ForEachVar,
                         false,
-                    ));
+                    );
+                    return Some((sym, ancestor));
                 }
             }
             CATCH_CLAUSE if child_on_path.kind() == BLOCK => {
                 if let Some(name_node) = ancestor.children().find(|n| n.kind() == NAME)
                     && name_node.text() == name
                 {
-                    return Some(local_symbol_from_node(
+                    let sym = local_symbol_from_node(
                         file_id,
                         &ancestor,
                         &name_node,
                         LocalKind::CatchParam,
                         false,
-                    ));
+                    );
+                    return Some((sym, ancestor));
                 }
             }
             TRY_STMT => {
@@ -1134,13 +1411,14 @@ fn resolve_local_scope(file_id: FileId, ref_node: &SyntaxNode, name: &str) -> Op
                             && let Some(name_node) = res.children().find(|n| n.kind() == NAME)
                             && name_node.text() == name
                         {
-                            return Some(local_symbol_from_node(
+                            let sym = local_symbol_from_node(
                                 file_id,
                                 &res,
                                 &name_node,
                                 LocalKind::ResourceVar,
                                 false,
-                            ));
+                            );
+                            return Some((sym, res));
                         }
                     }
                 }
@@ -1157,13 +1435,14 @@ fn resolve_local_scope(file_id: FileId, ref_node: &SyntaxNode, name: &str) -> Op
                         if let Some(name_node) = param.children().find(|n| n.kind() == NAME)
                             && name_node.text() == name
                         {
-                            return Some(local_symbol_from_node(
+                            let sym = local_symbol_from_node(
                                 file_id,
                                 &param,
                                 &name_node,
                                 LocalKind::LambdaParam,
                                 true,
-                            ));
+                            );
+                            return Some((sym, param));
                         }
                     }
                 }
@@ -1177,7 +1456,7 @@ fn resolve_local_scope(file_id: FileId, ref_node: &SyntaxNode, name: &str) -> Op
                 {
                     let mut patterns = Vec::new();
                     collect_positive_patterns(file_id, &lhs, &mut patterns);
-                    if let Some(found) = patterns.into_iter().rev().find(|p| p.name == name) {
+                    if let Some(found) = patterns.into_iter().rev().find(|(p, _)| p.name == name) {
                         return Some(found);
                     }
                 }
@@ -1200,7 +1479,7 @@ fn resolve_local_scope(file_id: FileId, ref_node: &SyntaxNode, name: &str) -> Op
                 {
                     let mut patterns = Vec::new();
                     collect_positive_patterns(file_id, &cond, &mut patterns);
-                    if let Some(found) = patterns.into_iter().rev().find(|p| p.name == name) {
+                    if let Some(found) = patterns.into_iter().rev().find(|(p, _)| p.name == name) {
                         return Some(found);
                     }
                 }
@@ -1215,7 +1494,7 @@ fn resolve_local_scope(file_id: FileId, ref_node: &SyntaxNode, name: &str) -> Op
                             collect_type_pattern(file_id, &desc, &mut patterns);
                         }
                     }
-                    if let Some(found) = patterns.into_iter().rev().find(|p| p.name == name) {
+                    if let Some(found) = patterns.into_iter().rev().find(|(p, _)| p.name == name) {
                         return Some(found);
                     }
                 }
@@ -1232,13 +1511,14 @@ fn resolve_local_scope(file_id: FileId, ref_node: &SyntaxNode, name: &str) -> Op
                         if let Some(name_node) = param.children().find(|n| n.kind() == NAME)
                             && name_node.text() == name
                         {
-                            return Some(local_symbol_from_node(
+                            let sym = local_symbol_from_node(
                                 file_id,
                                 &param,
                                 &name_node,
                                 LocalKind::Param,
                                 true,
-                            ));
+                            );
+                            return Some((sym, param));
                         }
                     }
                 }
@@ -1260,7 +1540,7 @@ fn find_local_var_in_block(
     block: &SyntaxNode,
     ref_range: TextRange,
     name: &str,
-) -> Option<LocalSymbol> {
+) -> Option<(LocalSymbol, SyntaxNode)> {
     let decls: Vec<SyntaxNode> = block
         .children()
         .filter(|n| n.kind() == LOCAL_VAR_DECL)
@@ -1278,7 +1558,7 @@ fn find_declarator_before(
     local_var_decl: &SyntaxNode,
     ref_range: TextRange,
     name: &str,
-) -> Option<LocalSymbol> {
+) -> Option<(LocalSymbol, SyntaxNode)> {
     let base_type = local_var_decl.children().find(|n| is_type_node(n.kind()));
     let declarators: Vec<SyntaxNode> = local_var_decl
         .children()
@@ -1291,20 +1571,25 @@ fn find_declarator_before(
         if let Some(name_node) = declarator.children().find(|n| n.kind() == NAME)
             && name_node.text() == name
         {
-            return Some(local_symbol_with_type(
+            let sym = local_symbol_with_type(
                 file_id,
                 &declarator,
                 &name_node,
                 LocalKind::LocalVar,
                 base_type.as_ref(),
                 true,
-            ));
+            );
+            return Some((sym, declarator));
         }
     }
     None
 }
 
-fn collect_positive_patterns(file_id: FileId, node: &SyntaxNode, out: &mut Vec<LocalSymbol>) {
+fn collect_positive_patterns(
+    file_id: FileId,
+    node: &SyntaxNode,
+    out: &mut Vec<(LocalSymbol, SyntaxNode)>,
+) {
     match node.kind() {
         PAREN_EXPR => {
             if let Some(inner) = node.children().next() {
@@ -1333,7 +1618,11 @@ fn collect_positive_patterns(file_id: FileId, node: &SyntaxNode, out: &mut Vec<L
     }
 }
 
-fn collect_record_pattern(file_id: FileId, node: &SyntaxNode, out: &mut Vec<LocalSymbol>) {
+fn collect_record_pattern(
+    file_id: FileId,
+    node: &SyntaxNode,
+    out: &mut Vec<(LocalSymbol, SyntaxNode)>,
+) {
     for child in node.children() {
         match child.kind() {
             TYPE_PATTERN => collect_type_pattern(file_id, &child, out),
@@ -1343,15 +1632,14 @@ fn collect_record_pattern(file_id: FileId, node: &SyntaxNode, out: &mut Vec<Loca
     }
 }
 
-fn collect_type_pattern(file_id: FileId, node: &SyntaxNode, out: &mut Vec<LocalSymbol>) {
+fn collect_type_pattern(
+    file_id: FileId,
+    node: &SyntaxNode,
+    out: &mut Vec<(LocalSymbol, SyntaxNode)>,
+) {
     if let Some(name_node) = node.children().find(|n| n.kind() == NAME) {
-        out.push(local_symbol_from_node(
-            file_id,
-            node,
-            &name_node,
-            LocalKind::PatternVar,
-            false,
-        ));
+        let sym = local_symbol_from_node(file_id, node, &name_node, LocalKind::PatternVar, false);
+        out.push((sym, node.clone()));
     }
 }
 
@@ -1754,6 +2042,15 @@ fn lookup_type_by_fqn(
 }
 
 // ---- Member lookup & static imports ----
+
+pub(crate) fn resolve_via_static_imports_pub(
+    ctx: ResolveCtx<'_>,
+    name: &str,
+    call_arity: Option<usize>,
+    prefer_callable: bool,
+) -> Option<ResolvedTarget> {
+    resolve_via_static_imports(ctx, name, call_arity, prefer_callable)
+}
 
 fn resolve_via_static_imports(
     ctx: ResolveCtx<'_>,
@@ -2560,12 +2857,30 @@ fn resolve_super_expr_target(
                 .next()
                 .is_some_and(|c| c.text_range() == super_expr.text_range())
     }) {
-        let arg_count = call_expr
+        let arg_nodes: Vec<SyntaxNode> = call_expr
             .children()
             .find(|n| n.kind() == ARG_LIST)
-            .map(|al| count_args(&al));
+            .map(|al| al.children().collect())
+            .unwrap_or_default();
         let super_ty = resolve_super_target_type(ctx, super_expr)?;
-        return lookup_constructor_on_type(ctx, &super_ty, arg_count)
+        let super_fqn = super_ty.qualified_name(ctx.db, ctx.file_tree);
+        let arg_tys: Vec<Ty> = arg_nodes
+            .iter()
+            .map(|n| {
+                if matches!(n.kind(), LAMBDA_EXPR | METHOD_REF_EXPR) {
+                    Ty::Unknown
+                } else {
+                    infer_expr_ty(ctx.db, ctx.file_id, n, None)
+                }
+            })
+            .collect();
+        let ctors = collect_constructor_candidates(ctx, &super_fqn, arg_nodes.len());
+        if let Some(best) =
+            select_best_callable_candidate(ctx.db, ctors, &arg_tys, Some(&arg_nodes))
+        {
+            return Some(best.target);
+        }
+        return lookup_constructor_on_type(ctx, &super_ty, Some(arg_nodes.len()))
             .or_else(|| Some(ResolvedTarget::from(super_ty)));
     }
 
@@ -2774,6 +3089,7 @@ fn target_to_type_ref(
             }
         }
         ResolvedTarget::TypeParam(_) | ResolvedTarget::Package(_) => None,
+        ResolvedTarget::WithDetail { inner, .. } => target_to_type_ref(ctx, *inner, depth + 1),
     }
 }
 
@@ -2849,7 +3165,7 @@ fn resolve_type_ref_in_file(
     }
 }
 
-fn extract_dotted_name_chain(node: &SyntaxNode) -> Option<Vec<SmolStr>> {
+pub(crate) fn extract_dotted_name_chain(node: &SyntaxNode) -> Option<Vec<SmolStr>> {
     let mut out = Vec::new();
     collect_dotted_chain(node, &mut out).then_some(out)
 }
@@ -2883,4 +3199,716 @@ fn collect_dotted_chain(node: &SyntaxNode, out: &mut Vec<SmolStr>) -> bool {
 
 fn count_args(arg_list: &SyntaxNode) -> usize {
     arg_list.children().count()
+}
+
+// ---- JLS §15.12.2 Type-Based Overload Resolution ----
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum OverloadPhase {
+    Strict = 1,
+    Loose = 2,
+    Varargs = 3,
+    Fallback = 4,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CallableCandidate {
+    pub target: ResolvedTarget,
+    pub owner_fqn: String,
+    pub is_static: bool,
+    pub is_raw_receiver: bool,
+    pub method_type_params: Vec<SmolStr>,
+    pub method_type_param_bounds: BTreeMap<SmolStr, Vec<String>>,
+    pub param_tys: Vec<(Ty, bool)>,
+    pub return_ty: Ty,
+    pub owner_subst: Substitution,
+}
+
+fn arity_compatible(params: &[ParamSummary], arity: usize) -> bool {
+    let is_varargs = params.last().is_some_and(|p| p.is_varargs);
+    if is_varargs {
+        arity + 1 >= params.len()
+    } else {
+        params.len() == arity
+    }
+}
+
+pub(crate) fn collect_method_candidates_on_ty(
+    ctx: ResolveCtx<'_>,
+    recv_ty: &Ty,
+    name: &str,
+    arity: usize,
+) -> Vec<CallableCandidate> {
+    let mut roots: Vec<String> = Vec::new();
+    match recv_ty {
+        Ty::Array { .. } => roots.push("java.lang.Object".to_string()),
+        Ty::TypeVar { bounds, .. } => {
+            if bounds.is_empty() {
+                roots.push("java.lang.Object".to_string());
+            } else {
+                for b in bounds {
+                    if let Some(fqn) = b.erased_fqn() {
+                        roots.push(fqn.to_string());
+                    }
+                }
+            }
+        }
+        Ty::Intersection(members) => {
+            for m in members {
+                if let Some(fqn) = m.erased_fqn() {
+                    roots.push(fqn.to_string());
+                }
+            }
+        }
+        _ => {
+            if let Some(fqn) = recv_ty.erased_fqn() {
+                roots.push(fqn.to_string());
+            }
+        }
+    }
+
+    let mut visited = FxHashSet::default();
+    let mut ordered_owners: Vec<(String, bool)> = Vec::new();
+    for root in roots {
+        if visited.insert(root.clone()) {
+            ordered_owners.push((root.clone(), false));
+        }
+        for sup in linearized_supertypes(ctx.db, &root) {
+            if visited.insert(sup.clone()) {
+                ordered_owners.push((sup, true));
+            }
+        }
+    }
+
+    let is_raw = is_raw_class_ty(ctx.db, recv_ty);
+    let mut out = Vec::new();
+    for (owner_fqn, is_super) in ordered_owners {
+        let owner_subst = supertype_substitution_for_ty(ctx.db, recv_ty, &owner_fqn)
+            .unwrap_or_default();
+        collect_owner_methods(
+            ctx,
+            &owner_fqn,
+            name,
+            arity,
+            is_super,
+            false,
+            is_raw,
+            &owner_subst,
+            &mut out,
+        );
+    }
+    out
+}
+
+pub(crate) fn collect_top_level_method_candidates(
+    ctx: ResolveCtx<'_>,
+    name: &str,
+    arity: usize,
+) -> Vec<CallableCandidate> {
+    let mut out = Vec::new();
+    for &mid in &ctx.file_tree.top_level_members {
+        let m = &ctx.file_tree.members[mid];
+        if m.kind != MemberKind::Method || m.name != name || !arity_compatible(&m.params, arity) {
+            continue;
+        }
+        let mut scope = BTreeMap::new();
+        for tp in &m.type_params {
+            scope.insert(
+                tp.clone(),
+                m.type_param_bounds.get(tp).cloned().unwrap_or_default(),
+            );
+        }
+        let param_tys = resolve_params_in_file(ctx.db, ctx.file_id, None, &m.params, &scope);
+        let return_ty = m.type_ref.as_deref().map_or(Ty::Unknown, |raw| {
+            resolve_type_ref_in_file_for_owner(ctx.db, ctx.file_id, None, raw, &scope)
+        });
+        out.push(CallableCandidate {
+            target: ResolvedTarget::IndexedMember(ctx.file_id, mid),
+            owner_fqn: String::new(),
+            is_static: m.is_static,
+            is_raw_receiver: false,
+            method_type_params: m.type_params.clone(),
+            method_type_param_bounds: m.type_param_bounds.clone(),
+            param_tys,
+            return_ty,
+            owner_subst: Substitution::default(),
+        });
+    }
+    out
+}
+
+pub(crate) fn collect_static_import_method_candidates(
+    ctx: ResolveCtx<'_>,
+    name: &str,
+    arity: usize,
+) -> Vec<CallableCandidate> {
+    let mut out = Vec::new();
+
+    for (_, imp) in ctx.file_tree.imports.iter() {
+        if imp.kind == ImportKind::StaticSingle
+            && imp.path.len() >= 2
+            && imp.path.last().map(String::as_str) == Some(name)
+        {
+            let owner_fqn = imp.path[..imp.path.len() - 1].join(".");
+            collect_owner_methods(
+                ctx,
+                &owner_fqn,
+                name,
+                arity,
+                false,
+                true,
+                false,
+                &Substitution::default(),
+                &mut out,
+            );
+        }
+    }
+
+    for (_, imp) in ctx.file_tree.imports.iter() {
+        if imp.kind == ImportKind::StaticOnDemand && !imp.path.is_empty() {
+            let owner_fqn = imp.path.join(".");
+            collect_owner_methods(
+                ctx,
+                &owner_fqn,
+                name,
+                arity,
+                false,
+                true,
+                false,
+                &Substitution::default(),
+                &mut out,
+            );
+        }
+    }
+
+    out
+}
+
+pub(crate) fn collect_constructor_candidates(
+    ctx: ResolveCtx<'_>,
+    owner_fqn: &str,
+    arity: usize,
+) -> Vec<CallableCandidate> {
+    let mut out = Vec::new();
+    let owner_scope = type_param_bounds_of_fqn(ctx.db, owner_fqn);
+
+    if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.index, owner_fqn) {
+        let tree = ctx.db.file_item_tree(fid);
+        let ty_item = &tree.types[tid];
+        for &mid in &ty_item.members {
+            let m = &tree.members[mid];
+            if m.kind != MemberKind::Constructor || !arity_compatible(&m.params, arity) {
+                continue;
+            }
+            let mut scope = owner_scope.clone();
+            for tp in &m.type_params {
+                scope.insert(
+                    tp.clone(),
+                    m.type_param_bounds.get(tp).cloned().unwrap_or_default(),
+                );
+            }
+            let param_tys =
+                resolve_params_in_file(ctx.db, fid, Some(owner_fqn), &m.params, &scope);
+            out.push(CallableCandidate {
+                target: ResolvedTarget::IndexedMember(fid, mid),
+                owner_fqn: owner_fqn.to_string(),
+                is_static: false,
+                is_raw_receiver: false,
+                method_type_params: m.type_params.clone(),
+                method_type_param_bounds: m.type_param_bounds.clone(),
+                param_tys,
+                return_ty: Ty::Void,
+                owner_subst: Substitution::default(),
+            });
+        }
+        return out;
+    }
+
+    if let Some(bin) = ctx.classpath.type_by_fqn(owner_fqn) {
+        for (member_index, m) in bin.members.iter().enumerate() {
+            if m.kind != MemberKind::Constructor || !arity_compatible(&m.params, arity) {
+                continue;
+            }
+            let mut scope = owner_scope.clone();
+            for tp in &m.type_params {
+                scope.insert(
+                    tp.clone(),
+                    m.type_param_bounds.get(tp).cloned().unwrap_or_default(),
+                );
+            }
+            let param_tys = resolve_params_in_binary(ctx.classpath, bin, &m.params, &scope);
+            out.push(CallableCandidate {
+                target: ResolvedTarget::BinaryMember {
+                    owner_fqn: owner_fqn.to_string(),
+                    member_index,
+                },
+                owner_fqn: owner_fqn.to_string(),
+                is_static: false,
+                is_raw_receiver: false,
+                method_type_params: m.type_params.clone(),
+                method_type_param_bounds: m.type_param_bounds.clone(),
+                param_tys,
+                return_ty: Ty::Void,
+                owner_subst: Substitution::default(),
+            });
+        }
+    }
+
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_owner_methods(
+    ctx: ResolveCtx<'_>,
+    owner_fqn: &str,
+    name: &str,
+    arity: usize,
+    is_super: bool,
+    only_static: bool,
+    is_raw_receiver: bool,
+    owner_subst: &Substitution,
+    out: &mut Vec<CallableCandidate>,
+) {
+    let owner_scope = type_param_bounds_of_fqn(ctx.db, owner_fqn);
+
+    if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.index, owner_fqn) {
+        let tree = ctx.db.file_item_tree(fid);
+        let ty_item = &tree.types[tid];
+        let exclude_static =
+            is_super && matches!(ty_item.kind, TypeKind::Interface | TypeKind::Annotation);
+        let is_record = ty_item.kind == TypeKind::Record;
+
+        for &mid in &ty_item.members {
+            let m = &tree.members[mid];
+            if m.kind == MemberKind::RecordComponent {
+                if is_record && !only_static && arity == 0 && m.name == name {
+                    let return_ty = m.type_ref.as_deref().map_or(Ty::Unknown, |raw| {
+                        resolve_type_ref_in_file_for_owner(
+                            ctx.db,
+                            fid,
+                            Some(owner_fqn),
+                            raw,
+                            &owner_scope,
+                        )
+                    });
+                    out.push(CallableCandidate {
+                        target: ResolvedTarget::IndexedMember(fid, mid),
+                        owner_fqn: owner_fqn.to_string(),
+                        is_static: false,
+                        is_raw_receiver,
+                        method_type_params: Vec::new(),
+                        method_type_param_bounds: BTreeMap::new(),
+                        param_tys: Vec::new(),
+                        return_ty,
+                        owner_subst: owner_subst.clone(),
+                    });
+                }
+                continue;
+            }
+            if m.kind != MemberKind::Method
+                || m.name != name
+                || (only_static && !m.is_static)
+                || (exclude_static && m.is_static)
+                || !arity_compatible(&m.params, arity)
+            {
+                continue;
+            }
+            let mut scope = owner_scope.clone();
+            for tp in &m.type_params {
+                scope.insert(
+                    tp.clone(),
+                    m.type_param_bounds.get(tp).cloned().unwrap_or_default(),
+                );
+            }
+            let param_tys =
+                resolve_params_in_file(ctx.db, fid, Some(owner_fqn), &m.params, &scope);
+            let return_ty = m.type_ref.as_deref().map_or(Ty::Unknown, |raw| {
+                resolve_type_ref_in_file_for_owner(ctx.db, fid, Some(owner_fqn), raw, &scope)
+            });
+            out.push(CallableCandidate {
+                target: ResolvedTarget::IndexedMember(fid, mid),
+                owner_fqn: owner_fqn.to_string(),
+                is_static: m.is_static,
+                is_raw_receiver: !m.is_static && is_raw_receiver,
+                method_type_params: m.type_params.clone(),
+                method_type_param_bounds: m.type_param_bounds.clone(),
+                param_tys,
+                return_ty,
+                owner_subst: owner_subst.clone(),
+            });
+        }
+        return;
+    }
+
+    if let Some(bin) = ctx.classpath.type_by_fqn(owner_fqn) {
+        let exclude_static =
+            is_super && matches!(bin.kind, TypeKind::Interface | TypeKind::Annotation);
+        let is_record = bin.kind == TypeKind::Record;
+
+        for (member_index, m) in bin.members.iter().enumerate() {
+            if m.kind == MemberKind::RecordComponent {
+                if is_record && !only_static && arity == 0 && m.name == name {
+                    let return_ty = m.type_ref.as_deref().map_or(Ty::Unknown, |raw| {
+                        resolve_binary_type_ref_for_owner(ctx.classpath, bin, raw, &owner_scope)
+                    });
+                    out.push(CallableCandidate {
+                        target: ResolvedTarget::BinaryMember {
+                            owner_fqn: owner_fqn.to_string(),
+                            member_index,
+                        },
+                        owner_fqn: owner_fqn.to_string(),
+                        is_static: false,
+                        is_raw_receiver,
+                        method_type_params: Vec::new(),
+                        method_type_param_bounds: BTreeMap::new(),
+                        param_tys: Vec::new(),
+                        return_ty,
+                        owner_subst: owner_subst.clone(),
+                    });
+                }
+                continue;
+            }
+            if m.kind != MemberKind::Method
+                || m.name != name
+                || (only_static && !m.is_static)
+                || (exclude_static && m.is_static)
+                || !arity_compatible(&m.params, arity)
+            {
+                continue;
+            }
+            let mut scope = owner_scope.clone();
+            for tp in &m.type_params {
+                scope.insert(
+                    tp.clone(),
+                    m.type_param_bounds.get(tp).cloned().unwrap_or_default(),
+                );
+            }
+            let param_tys = resolve_params_in_binary(ctx.classpath, bin, &m.params, &scope);
+            let return_ty = m.type_ref.as_deref().map_or(Ty::Unknown, |raw| {
+                resolve_binary_type_ref_for_owner(ctx.classpath, bin, raw, &scope)
+            });
+            out.push(CallableCandidate {
+                target: ResolvedTarget::BinaryMember {
+                    owner_fqn: owner_fqn.to_string(),
+                    member_index,
+                },
+                owner_fqn: owner_fqn.to_string(),
+                is_static: m.is_static,
+                is_raw_receiver: !m.is_static && is_raw_receiver,
+                method_type_params: m.type_params.clone(),
+                method_type_param_bounds: m.type_param_bounds.clone(),
+                param_tys,
+                return_ty,
+                owner_subst: owner_subst.clone(),
+            });
+        }
+    }
+}
+
+pub(crate) fn select_best_callable_candidate(
+    db: &dyn DefDatabase,
+    candidates: Vec<CallableCandidate>,
+    arg_tys: &[Ty],
+    arg_nodes: Option<&[SyntaxNode]>,
+) -> Option<CallableCandidate> {
+    if candidates.len() <= 1 {
+        return candidates.into_iter().next();
+    }
+
+    let scored: Vec<(OverloadPhase, CallableCandidate)> = candidates
+        .into_iter()
+        .map(|cand| {
+            let phase = score_candidate_phase(db, &cand, arg_tys, arg_nodes);
+            (phase, cand)
+        })
+        .collect();
+
+    let best_phase = scored.iter().map(|(p, _)| *p).min()?;
+    let mut in_phase: Vec<CallableCandidate> = scored
+        .into_iter()
+        .filter(|(p, _)| *p == best_phase)
+        .map(|(_, c)| c)
+        .collect();
+
+    let mut best = in_phase.drain(..1).next()?;
+    for cand in in_phase {
+        if is_candidate_strictly_more_specific(db, &cand, &best, arg_tys.len()) {
+            best = cand;
+        }
+    }
+    Some(best)
+}
+
+fn candidate_effective_subst(cand: &CallableCandidate) -> Substitution {
+    let mut subst = cand.owner_subst.clone();
+    for mp in &cand.method_type_params {
+        subst.map.remove(mp);
+    }
+    subst
+}
+
+fn candidate_param_ty(
+    cand: &CallableCandidate,
+    subst: &Substitution,
+    idx: usize,
+    for_varargs_elem: bool,
+) -> Option<Ty> {
+    let (raw_p, is_varargs) = parameter_for_arg(&cand.param_tys, idx)?;
+    let substituted = if cand.is_raw_receiver {
+        erase_type_vars_to_bound(&raw_p)
+    } else {
+        subst.apply(&raw_p)
+    };
+    if for_varargs_elem && is_varargs {
+        Some(match substituted {
+            Ty::Array { elem, .. } => *elem,
+            other => other,
+        })
+    } else {
+        Some(substituted)
+    }
+}
+
+pub(crate) fn score_candidate_phase(
+    db: &dyn DefDatabase,
+    cand: &CallableCandidate,
+    arg_tys: &[Ty],
+    arg_nodes: Option<&[SyntaxNode]>,
+) -> OverloadPhase {
+    let is_varargs_method = cand.param_tys.last().is_some_and(|(_, va)| *va);
+    let subst = candidate_effective_subst(cand);
+    let m_tvars: FxHashSet<SmolStr> = cand.method_type_params.iter().cloned().collect();
+
+    // Fixed-arity phases (1: Strict, 2: Loose).
+    if !is_varargs_method || cand.param_tys.len() == arg_tys.len() {
+        let mut all_strict = true;
+        let mut all_loose = true;
+
+        for (idx, arg_ty) in arg_tys.iter().enumerate() {
+            let Some(p_ty) = candidate_param_ty(cand, &subst, idx, false) else {
+                all_strict = false;
+                all_loose = false;
+                break;
+            };
+            let arg_node = arg_nodes.and_then(|ns| ns.get(idx));
+            match classify_arg_compatibility(db, arg_ty, arg_node, &p_ty, &m_tvars) {
+                ArgCompat::Strict => {}
+                ArgCompat::Loose => all_strict = false,
+                ArgCompat::IncompatibleOrUnknown => {
+                    all_strict = false;
+                    all_loose = false;
+                    break;
+                }
+            }
+        }
+
+        if all_strict && !is_varargs_method {
+            return OverloadPhase::Strict;
+        }
+        if all_loose && !is_varargs_method {
+            return OverloadPhase::Loose;
+        }
+        // If varargs method was passed an exact matching array argument, JLS treats it as Phase 3
+        // only if Phase 1/2 fixed-arity methods didn't match; still, Phase 3 covers varargs!
+        if all_loose && is_varargs_method {
+            return OverloadPhase::Varargs;
+        }
+    }
+
+    if is_varargs_method {
+        let fixed_len = cand.param_tys.len().saturating_sub(1);
+        let mut all_varargs_ok = true;
+        for (idx, arg_ty) in arg_tys.iter().enumerate() {
+            let is_trailing = idx >= fixed_len;
+            let Some(p_ty) = candidate_param_ty(cand, &subst, idx, is_trailing) else {
+                all_varargs_ok = false;
+                break;
+            };
+            let arg_node = arg_nodes.and_then(|ns| ns.get(idx));
+            if matches!(
+                classify_arg_compatibility(db, arg_ty, arg_node, &p_ty, &m_tvars),
+                ArgCompat::IncompatibleOrUnknown
+            ) {
+                all_varargs_ok = false;
+                break;
+            }
+        }
+        if all_varargs_ok {
+            return OverloadPhase::Varargs;
+        }
+    }
+
+    OverloadPhase::Fallback
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArgCompat {
+    Strict,
+    Loose,
+    IncompatibleOrUnknown,
+}
+
+fn classify_arg_compatibility(
+    db: &dyn DefDatabase,
+    arg_ty: &Ty,
+    arg_node: Option<&SyntaxNode>,
+    param_ty: &Ty,
+    method_tvars: &FxHashSet<SmolStr>,
+) -> ArgCompat {
+    if let Some(node) = arg_node {
+        match node.kind() {
+            LAMBDA_EXPR => {
+                let Some(sam) = find_functional_interface_sam(db, param_ty) else {
+                    return ArgCompat::IncompatibleOrUnknown;
+                };
+                let lambda_arity = node
+                    .children()
+                    .find(|n| n.kind() == LAMBDA_PARAMS)
+                    .map_or(0, |lp| lp.children().filter(|n| n.kind() == PARAM).count());
+                return if sam.param_types.len() == lambda_arity {
+                    ArgCompat::Strict
+                } else {
+                    ArgCompat::IncompatibleOrUnknown
+                };
+            }
+            METHOD_REF_EXPR => {
+                return if find_functional_interface_sam(db, param_ty).is_some() {
+                    ArgCompat::Strict
+                } else {
+                    ArgCompat::IncompatibleOrUnknown
+                };
+            }
+            _ => {}
+        }
+    }
+
+    if matches!(arg_ty, Ty::Unknown) {
+        return ArgCompat::IncompatibleOrUnknown;
+    }
+
+    if contains_any_tvar(param_ty, method_tvars) {
+        return classify_generic_param_compat(db, arg_ty, param_ty, method_tvars);
+    }
+
+    if is_subtype(db, arg_ty, param_ty) {
+        ArgCompat::Strict
+    } else if is_assignable(db, arg_ty, param_ty) {
+        ArgCompat::Loose
+    } else {
+        ArgCompat::IncompatibleOrUnknown
+    }
+}
+
+fn classify_generic_param_compat(
+    db: &dyn DefDatabase,
+    arg_ty: &Ty,
+    param_ty: &Ty,
+    method_tvars: &FxHashSet<SmolStr>,
+) -> ArgCompat {
+    match param_ty {
+        Ty::TypeVar { name, bounds, .. } if method_tvars.contains(name) => {
+            let satisfies_bounds = |ref_ty: &Ty| -> bool {
+                bounds.iter().all(|b| {
+                    contains_any_tvar(b, method_tvars) || is_subtype(db, ref_ty, b)
+                })
+            };
+            match arg_ty {
+                Ty::Primitive(_) => {
+                    let boxed = arg_ty.boxed();
+                    if satisfies_bounds(&boxed) {
+                        ArgCompat::Loose
+                    } else {
+                        ArgCompat::IncompatibleOrUnknown
+                    }
+                }
+                Ty::Null => ArgCompat::Strict,
+                other => {
+                    if satisfies_bounds(other) {
+                        ArgCompat::Strict
+                    } else {
+                        ArgCompat::IncompatibleOrUnknown
+                    }
+                }
+            }
+        }
+        Ty::Array { elem: p_elem, .. } => match arg_ty {
+            Ty::Null => ArgCompat::Strict,
+            Ty::Array { elem: a_elem, .. } => {
+                classify_generic_param_compat(db, a_elem, p_elem, method_tvars)
+            }
+            _ => ArgCompat::IncompatibleOrUnknown,
+        },
+        Ty::Class { fqn, .. } => {
+            let raw_target = Ty::raw_class(fqn);
+            if is_subtype(db, arg_ty, &raw_target) {
+                ArgCompat::Strict
+            } else {
+                ArgCompat::IncompatibleOrUnknown
+            }
+        }
+        _ => ArgCompat::IncompatibleOrUnknown,
+    }
+}
+
+fn contains_any_tvar(ty: &Ty, tvars: &FxHashSet<SmolStr>) -> bool {
+    if tvars.is_empty() {
+        return false;
+    }
+    contains_any_tvar_inner(ty, tvars, 0)
+}
+
+fn contains_any_tvar_inner(ty: &Ty, tvars: &FxHashSet<SmolStr>, depth: usize) -> bool {
+    if depth >= crate::ty::MAX_SUBST_DEPTH {
+        return false;
+    }
+    match ty {
+        Ty::TypeVar { name, .. } => tvars.contains(name),
+        Ty::Array { elem, .. } => contains_any_tvar_inner(elem, tvars, depth + 1),
+        Ty::Class { type_args, .. } => type_args.iter().any(|arg| match arg {
+            crate::ty::TypeArg::Type(t) => contains_any_tvar_inner(t, tvars, depth + 1),
+            crate::ty::TypeArg::Wildcard(
+                crate::ty::WildcardBound::Extends(t) | crate::ty::WildcardBound::Super(t),
+            ) => contains_any_tvar_inner(t, tvars, depth + 1),
+            crate::ty::TypeArg::Wildcard(crate::ty::WildcardBound::Unbounded) => false,
+        }),
+        Ty::Intersection(members) => members
+            .iter()
+            .any(|m| contains_any_tvar_inner(m, tvars, depth + 1)),
+        _ => false,
+    }
+}
+
+pub(crate) fn is_candidate_strictly_more_specific(
+    db: &dyn DefDatabase,
+    a: &CallableCandidate,
+    b: &CallableCandidate,
+    arity: usize,
+) -> bool {
+    more_specific_or_eq(db, a, b, arity) && !more_specific_or_eq(db, b, a, arity)
+}
+
+fn more_specific_or_eq(
+    db: &dyn DefDatabase,
+    a: &CallableCandidate,
+    b: &CallableCandidate,
+    arity: usize,
+) -> bool {
+    let subst_a = candidate_effective_subst(a);
+    let subst_b = candidate_effective_subst(b);
+    let va_a = a.param_tys.last().is_some_and(|(_, va)| *va);
+    let va_b = b.param_tys.last().is_some_and(|(_, va)| *va);
+    let for_elem = va_a && va_b;
+
+    for idx in 0..arity {
+        let Some(pa) = candidate_param_ty(a, &subst_a, idx, for_elem) else {
+            return false;
+        };
+        let Some(pb) = candidate_param_ty(b, &subst_b, idx, for_elem) else {
+            return false;
+        };
+        if pa != pb && !is_subtype(db, &pa, &pb) {
+            return false;
+        }
+    }
+    true
 }

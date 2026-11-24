@@ -111,3 +111,5 @@ flowchart LR
 - **Spec 0016 — Scale, Responsiveness & Editor Polish**
   - `TextDocumentSyncKind::INCREMENTAL`, request cancellation, background indexing `$/progress` notifications.
   - Packaging & polish for Zed, VSCode, and Neovim clients.
+- **Spec 0019 — Statically Generated GitHub Pages Site & Documentation** *(Accepted in [0019-github-pages-site-and-documentation.md](specs/0019-github-pages-site-and-documentation.md))*
+  - Astro + Starlight static site with a 3-pillar landing page (what it is, why consider it, how to start using it), [Diátaxis](https://diataxis.fr/) end-user documentation (`Tutorials`, `How-to Guides`, `Reference`, `Explanation`), a dedicated `Contributors` section, auto-synced canonical reports/specs (`CONFORMANCE.md`, `BENCHMARKS.md`, interactive Vega-Lite `/benchmarks/report/`, `ROADMAP.md`, `docs/specs/*.md`), and GitHub Actions Pages deployment.

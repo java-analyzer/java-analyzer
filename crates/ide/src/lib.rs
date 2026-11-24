@@ -1288,13 +1288,17 @@ Method main (String[] args)
             package: "java.lang".to_string(),
             enclosing_type: None,
             kind: TypeKind::Class,
+            identity: hir::TypeIdentity::Identity,
             is_public: true,
             is_static: false,
             is_final: true,
             is_abstract: false,
             type_params: vec![],
+            type_param_bounds: Default::default(),
             super_class: Some("java.lang.Object".to_string()),
+            super_class_generic: None,
             interfaces: vec![],
+            interfaces_generic: vec![],
             permitted_subclasses: vec![],
             members: vec![BinaryMemberSymbol {
                 owner_type: "java.lang.String".to_string(),
@@ -1302,6 +1306,9 @@ Method main (String[] args)
                 kind: MemberKind::Method,
                 is_public: true,
                 is_static: false,
+                is_abstract: false,
+                type_params: vec![],
+                type_param_bounds: Default::default(),
                 type_ref: Some("int".to_string()),
                 params: vec![],
                 is_varargs: false,
@@ -1317,13 +1324,17 @@ Method main (String[] args)
             package: "java.util".to_string(),
             enclosing_type: None,
             kind: TypeKind::Class,
+            identity: hir::TypeIdentity::Identity,
             is_public: true,
             is_static: false,
             is_final: false,
             is_abstract: false,
             type_params: vec![],
+            type_param_bounds: Default::default(),
             super_class: Some("java.lang.Object".to_string()),
+            super_class_generic: None,
             interfaces: vec![],
+            interfaces_generic: vec![],
             permitted_subclasses: vec![],
             members: vec![],
             nested_types: vec![],
@@ -1337,13 +1348,17 @@ Method main (String[] args)
             package: "org.demo".to_string(),
             enclosing_type: None,
             kind: TypeKind::Class,
+            identity: hir::TypeIdentity::Identity,
             is_public: true,
             is_static: false,
             is_final: false,
             is_abstract: false,
             type_params: vec![],
+            type_param_bounds: Default::default(),
             super_class: Some("java.lang.Object".to_string()),
+            super_class_generic: None,
             interfaces: vec![],
+            interfaces_generic: vec![],
             permitted_subclasses: vec![],
             members: vec![BinaryMemberSymbol {
                 owner_type: "org.demo.Assert".to_string(),
@@ -1351,6 +1366,9 @@ Method main (String[] args)
                 kind: MemberKind::Field,
                 is_public: true,
                 is_static: true,
+                is_abstract: false,
+                type_params: vec![],
+                type_param_bounds: Default::default(),
                 type_ref: Some("int".to_string()),
                 params: vec![],
                 is_varargs: false,
@@ -1498,13 +1516,17 @@ class App { Assert a; }
             package: "java.lang".to_string(),
             enclosing_type: None,
             kind: TypeKind::Class,
+            identity: hir::TypeIdentity::Identity,
             is_public: true,
             is_static: false,
             is_final: false,
             is_abstract: false,
             type_params: vec![],
+            type_param_bounds: Default::default(),
             super_class: None,
+            super_class_generic: None,
             interfaces: vec![],
+            interfaces_generic: vec![],
             permitted_subclasses: vec![],
             members: vec![BinaryMemberSymbol {
                 owner_type: "java.lang.Object".to_string(),
@@ -1512,6 +1534,9 @@ class App { Assert a; }
                 kind: MemberKind::Method,
                 is_public: true,
                 is_static: false,
+                is_abstract: false,
+                type_params: vec![],
+                type_param_bounds: Default::default(),
                 type_ref: Some("java.lang.String".to_string()),
                 params: vec![],
                 is_varargs: false,
@@ -1527,13 +1552,17 @@ class App { Assert a; }
             package: "java.util".to_string(),
             enclosing_type: None,
             kind: TypeKind::Interface,
+            identity: hir::TypeIdentity::Unspecified,
             is_public: true,
             is_static: false,
             is_final: false,
             is_abstract: true,
             type_params: vec![SmolStr::new("E")],
+            type_param_bounds: Default::default(),
             super_class: None,
+            super_class_generic: None,
             interfaces: vec![],
+            interfaces_generic: vec![],
             permitted_subclasses: vec![],
             members: vec![],
             nested_types: vec![],
@@ -1547,13 +1576,17 @@ class App { Assert a; }
             package: "java.util".to_string(),
             enclosing_type: None,
             kind: TypeKind::Interface,
+            identity: hir::TypeIdentity::Unspecified,
             is_public: true,
             is_static: false,
             is_final: false,
             is_abstract: true,
             type_params: vec![SmolStr::new("E")],
+            type_param_bounds: Default::default(),
             super_class: None,
+            super_class_generic: None,
             interfaces: vec!["java.util.Collection".to_string()],
+            interfaces_generic: vec![],
             permitted_subclasses: vec![],
             members: vec![BinaryMemberSymbol {
                 owner_type: "java.util.List".to_string(),
@@ -1561,6 +1594,9 @@ class App { Assert a; }
                 kind: MemberKind::Method,
                 is_public: true,
                 is_static: false,
+                is_abstract: false,
+                type_params: vec![],
+                type_param_bounds: Default::default(),
                 type_ref: Some("int".to_string()),
                 params: vec![],
                 is_varargs: false,
@@ -1889,5 +1925,557 @@ public class Leaf extends Mid {}
         // Direct subtypes of binary java.util.List: Mid.
         let list_subs = snap.type_hierarchy_subtypes("java.util.List").unwrap();
         assert_eq!(list_subs, vec![mid_node]);
+    }
+
+    fn bin_cls(
+        fqn: &str,
+        kind: TypeKind,
+        type_params: &[&str],
+        super_class_generic: Option<&str>,
+        interfaces_generic: &[&str],
+        members: Vec<BinaryMemberSymbol>,
+    ) -> BinaryTypeSymbol {
+        let (pkg, name) = match fqn.rsplit_once('.') {
+            Some((p, n)) => (p.to_string(), SmolStr::new(n)),
+            None => (String::new(), SmolStr::new(fqn)),
+        };
+        let strip_generics = |raw: &str| raw.split('<').next().unwrap_or(raw).to_string();
+        BinaryTypeSymbol {
+            name,
+            qualified_name: fqn.to_string(),
+            internal_name: fqn.replace('.', "/"),
+            package: pkg,
+            enclosing_type: None,
+            kind,
+            identity: if kind == TypeKind::Interface {
+                hir::TypeIdentity::Unspecified
+            } else {
+                hir::TypeIdentity::Identity
+            },
+            is_public: true,
+            is_static: false,
+            is_final: false,
+            is_abstract: kind == TypeKind::Interface,
+            type_params: type_params.iter().map(|s| SmolStr::new(*s)).collect(),
+            type_param_bounds: Default::default(),
+            super_class: super_class_generic.map(strip_generics),
+            super_class_generic: super_class_generic.map(str::to_string),
+            interfaces: interfaces_generic.iter().map(|s| strip_generics(s)).collect(),
+            interfaces_generic: interfaces_generic.iter().map(|s| (*s).to_string()).collect(),
+            permitted_subclasses: Vec::new(),
+            members,
+            nested_types: Vec::new(),
+            origin: BinaryOrigin::Jdk {
+                module_name: Some(SmolStr::new("java.base")),
+            },
+        }
+    }
+
+    fn bin_method(
+        owner: &str,
+        name: &str,
+        is_static: bool,
+        is_abstract: bool,
+        type_params: &[&str],
+        ret: &str,
+        params: &[(&str, &str, bool)],
+    ) -> BinaryMemberSymbol {
+        BinaryMemberSymbol {
+            owner_type: owner.to_string(),
+            name: SmolStr::new(name),
+            kind: MemberKind::Method,
+            is_public: true,
+            is_static,
+            is_abstract,
+            type_params: type_params.iter().map(|s| SmolStr::new(*s)).collect(),
+            type_param_bounds: Default::default(),
+            type_ref: Some(ret.to_string()),
+            params: params
+                .iter()
+                .map(|(n, ty, va)| ParamSummary {
+                    name: Some(SmolStr::new(*n)),
+                    type_ref: (*ty).to_string(),
+                    is_varargs: *va,
+                })
+                .collect(),
+            is_varargs: params.last().is_some_and(|(_, _, va)| *va),
+        }
+    }
+
+    fn generics_classpath() -> ClasspathIndex {
+        let mut cp = ClasspathIndex::default();
+        cp.insert_type(bin_cls(
+            "java.lang.Object",
+            TypeKind::Class,
+            &[],
+            None,
+            &[],
+            vec![
+                bin_method("java.lang.Object", "toString", false, false, &[], "java.lang.String", &[]),
+                bin_method(
+                    "java.lang.Object",
+                    "equals",
+                    false,
+                    false,
+                    &[],
+                    "boolean",
+                    &[("obj", "java.lang.Object", false)],
+                ),
+                bin_method("java.lang.Object", "hashCode", false, false, &[], "int", &[]),
+            ],
+        ));
+        cp.insert_type(bin_cls(
+            "java.lang.String",
+            TypeKind::Class,
+            &[],
+            Some("java.lang.Object"),
+            &[],
+            vec![bin_method("java.lang.String", "length", false, false, &[], "int", &[])],
+        ));
+        cp.insert_type(bin_cls(
+            "java.lang.Number",
+            TypeKind::Class,
+            &[],
+            Some("java.lang.Object"),
+            &[],
+            vec![],
+        ));
+        cp.insert_type(bin_cls(
+            "java.lang.Integer",
+            TypeKind::Class,
+            &[],
+            Some("java.lang.Number"),
+            &[],
+            vec![],
+        ));
+        cp.insert_type(bin_cls(
+            "java.util.function.Function",
+            TypeKind::Interface,
+            &["T", "R"],
+            None,
+            &[],
+            vec![bin_method(
+                "java.util.function.Function",
+                "apply",
+                false,
+                true,
+                &[],
+                "R",
+                &[("t", "T", false)],
+            )],
+        ));
+        cp.insert_type(bin_cls(
+            "java.util.function.Consumer",
+            TypeKind::Interface,
+            &["T"],
+            None,
+            &[],
+            vec![bin_method(
+                "java.util.function.Consumer",
+                "accept",
+                false,
+                true,
+                &[],
+                "void",
+                &[("t", "T", false)],
+            )],
+        ));
+        cp.insert_type(bin_cls(
+            "java.util.stream.Stream",
+            TypeKind::Interface,
+            &["T"],
+            None,
+            &[],
+            vec![
+                bin_method(
+                    "java.util.stream.Stream",
+                    "map",
+                    false,
+                    true,
+                    &["R"],
+                    "java.util.stream.Stream<R>",
+                    &[("mapper", "java.util.function.Function<? super T, ? extends R>", false)],
+                ),
+                bin_method(
+                    "java.util.stream.Stream",
+                    "toList",
+                    false,
+                    false,
+                    &[],
+                    "java.util.List<T>",
+                    &[],
+                ),
+            ],
+        ));
+        cp.insert_type(bin_cls(
+            "java.lang.Iterable",
+            TypeKind::Interface,
+            &["T"],
+            None,
+            &[],
+            vec![bin_method(
+                "java.lang.Iterable",
+                "forEach",
+                false,
+                false,
+                &[],
+                "void",
+                &[("action", "java.util.function.Consumer<? super T>", false)],
+            )],
+        ));
+        cp.insert_type(bin_cls(
+            "java.util.Collection",
+            TypeKind::Interface,
+            &["E"],
+            None,
+            &["java.lang.Iterable<E>"],
+            vec![bin_method(
+                "java.util.Collection",
+                "stream",
+                false,
+                false,
+                &[],
+                "java.util.stream.Stream<E>",
+                &[],
+            )],
+        ));
+        cp.insert_type(bin_cls(
+            "java.util.List",
+            TypeKind::Interface,
+            &["E"],
+            None,
+            &["java.util.Collection<E>"],
+            vec![
+                bin_method("java.util.List", "get", false, true, &[], "E", &[("index", "int", false)]),
+                bin_method(
+                    "java.util.List",
+                    "of",
+                    true,
+                    false,
+                    &["E"],
+                    "java.util.List<E>",
+                    &[("e1", "E", false)],
+                ),
+                bin_method(
+                    "java.util.List",
+                    "remove",
+                    false,
+                    true,
+                    &[],
+                    "E",
+                    &[("index", "int", false)],
+                ),
+                bin_method(
+                    "java.util.List",
+                    "remove",
+                    false,
+                    true,
+                    &[],
+                    "boolean",
+                    &[("o", "java.lang.Object", false)],
+                ),
+            ],
+        ));
+        cp.insert_type(bin_cls(
+            "java.util.ArrayList",
+            TypeKind::Class,
+            &["E"],
+            Some("java.lang.Object"),
+            &["java.util.List<E>"],
+            vec![],
+        ));
+        cp.finalize();
+        cp
+    }
+
+    #[test]
+    fn hover_generics_var_lambdas_and_substituted_calls() {
+        let user_src = "\
+package com.example;
+public class User {
+    public String getName() { return \"\"; }
+    public void ping() {}
+}
+";
+        let box_src = "\
+package com.example;
+public class Box<T> {
+    public T get() { return null; }
+}
+";
+        let app_src = "\
+package com.example;
+import java.util.List;
+public class App {
+    void demo(List<User> users, Box<User> box) {
+        var /*var_x*/x = List.of(new User());
+        /*use_x*/x.get(0);
+        var /*names*/names = users.stream()./*map_call*/map(/*lparam*/u -> /*luse*/u./*get_name*/getName())./*to_list*/toList();
+        users./*list_get*/get(0);
+        box./*box_get*/get();
+        for (var /*fe_u*/u : users) {
+            /*fe_use*/u.ping();
+        }
+    }
+}
+";
+        let mut host = AnalysisHost::new();
+        host.set_file_text(FileId(1), Arc::new(user_src.to_string()));
+        host.set_file_text(FileId(2), Arc::new(box_src.to_string()));
+        host.set_file_text(FileId(3), Arc::new(app_src.to_string()));
+        host.set_workspace_files(Arc::new(vec![FileId(1), FileId(2), FileId(3)]));
+        host.set_classpath_index(Arc::new(generics_classpath()));
+
+        let snap = host.analysis();
+        let fid = FileId(3);
+
+        for marker in ["/*var_x*/", "/*use_x*/"] {
+            let h = snap.hover(fid, cursor(app_src, marker)).unwrap().unwrap();
+            assert_eq!(h.content, "```java\nList<User> x\n```\nlocal variable");
+        }
+
+        let names_h = snap.hover(fid, cursor(app_src, "/*names*/")).unwrap().unwrap();
+        assert_eq!(names_h.content, "```java\nList<String> names\n```\nlocal variable");
+
+        for marker in ["/*lparam*/", "/*luse*/"] {
+            let h = snap.hover(fid, cursor(app_src, marker)).unwrap().unwrap();
+            assert_eq!(h.content, "```java\nUser u\n```\nlambda parameter");
+        }
+
+        let get_name_h = snap.hover(fid, cursor(app_src, "/*get_name*/")).unwrap().unwrap();
+        assert_eq!(
+            get_name_h.content,
+            "```java\nString com.example.User.getName()\n```"
+        );
+
+        let map_h = snap.hover(fid, cursor(app_src, "/*map_call*/")).unwrap().unwrap();
+        assert_eq!(
+            map_h.content,
+            "```java\nStream<String> java.util.stream.Stream.map(Function<? super User, ? extends String> mapper)\n```\n*from JDK module `java.base`*"
+        );
+
+        let to_list_h = snap.hover(fid, cursor(app_src, "/*to_list*/")).unwrap().unwrap();
+        assert_eq!(
+            to_list_h.content,
+            "```java\nList<String> java.util.stream.Stream.toList()\n```\n*from JDK module `java.base`*"
+        );
+
+        let list_get_h = snap.hover(fid, cursor(app_src, "/*list_get*/")).unwrap().unwrap();
+        assert_eq!(
+            list_get_h.content,
+            "```java\nUser java.util.List.get(int index)\n```\n*from JDK module `java.base`*"
+        );
+
+        let box_get_h = snap.hover(fid, cursor(app_src, "/*box_get*/")).unwrap().unwrap();
+        assert_eq!(
+            box_get_h.content,
+            "```java\nUser com.example.Box.get()\n```"
+        );
+
+        for marker in ["/*fe_u*/", "/*fe_use*/"] {
+            let h = snap.hover(fid, cursor(app_src, marker)).unwrap().unwrap();
+            assert_eq!(h.content, "```java\nUser u\n```\nfor-each variable");
+        }
+    }
+
+    #[test]
+    fn goto_definition_generics_lambdas_mrefs_and_overloads() {
+        let user_src = "\
+package com.example;
+public class User {
+    public String getName() { return \"\"; }
+    public void ping() {}
+}
+";
+        let app_src = "\
+package com.example;
+import java.util.ArrayList;
+import java.util.List;
+class UserList extends ArrayList<User> {}
+public class App {
+    void foo(int x) {}
+    void foo(String s) {}
+    void pick(Number n) {}
+    void pick(Integer i) {}
+    void run(List<User> users) {
+        users./*list_get*/get(0)./*chain_get_name*/getName();
+        new UserList().get(0)./*sub_get_name*/getName();
+        users.stream().map(u -> /*lambda_use*/u./*lambda_get_name*/getName()).toList();
+        users.forEach(User::/*mref_ping*/ping);
+        /*foo_int*/foo(1);
+        /*foo_str*/foo(\"hi\");
+        /*pick_int*/pick(1);
+        users./*rem_idx*/remove(0);
+        users./*rem_obj*/remove(\"item\");
+    }
+}
+";
+        let mut host = AnalysisHost::new();
+        host.set_file_text(FileId(1), Arc::new(user_src.to_string()));
+        host.set_file_text(FileId(2), Arc::new(app_src.to_string()));
+        host.set_workspace_files(Arc::new(vec![FileId(1), FileId(2)]));
+        host.set_classpath_index(Arc::new(generics_classpath()));
+
+        let snap = host.analysis();
+        let user_fid = FileId(1);
+        let app_fid = FileId(2);
+
+        for marker in ["/*chain_get_name*/", "/*sub_get_name*/", "/*lambda_get_name*/"] {
+            let target = snap
+                .goto_definition(app_fid, cursor(app_src, marker))
+                .unwrap()
+                .unwrap();
+            let (_, focus) = assert_source_target(target, user_fid);
+            assert_eq!(slice(user_src, focus), "getName", "at {marker}");
+        }
+
+        let list_get_def = snap
+            .goto_definition(app_fid, cursor(app_src, "/*list_get*/"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            list_get_def,
+            NavigationTarget::Binary(BinaryTarget {
+                origin: BinaryOrigin::Jdk {
+                    module_name: Some(SmolStr::new("java.base")),
+                },
+                internal_name: "java/util/List".to_string(),
+                qualified_name: "java.util.List".to_string(),
+                member_name: Some(SmolStr::new("get")),
+            })
+        );
+
+        let mref_def = snap
+            .goto_definition(app_fid, cursor(app_src, "/*mref_ping*/"))
+            .unwrap()
+            .unwrap();
+        let (_, ping_focus) = assert_source_target(mref_def, user_fid);
+        assert_eq!(slice(user_src, ping_focus), "ping");
+
+        let (foo_int_full, foo_int_focus) = assert_source_target(
+            snap.goto_definition(app_fid, cursor(app_src, "/*foo_int*/"))
+                .unwrap()
+                .unwrap(),
+            app_fid,
+        );
+        assert_eq!(slice(app_src, foo_int_focus), "foo");
+        assert!(slice(app_src, foo_int_full).contains("int x"));
+
+        let (foo_str_full, foo_str_focus) = assert_source_target(
+            snap.goto_definition(app_fid, cursor(app_src, "/*foo_str*/"))
+                .unwrap()
+                .unwrap(),
+            app_fid,
+        );
+        assert_eq!(slice(app_src, foo_str_focus), "foo");
+        assert!(slice(app_src, foo_str_full).contains("String s"));
+
+        let (pick_full, pick_focus) = assert_source_target(
+            snap.goto_definition(app_fid, cursor(app_src, "/*pick_int*/"))
+                .unwrap()
+                .unwrap(),
+            app_fid,
+        );
+        assert_eq!(slice(app_src, pick_focus), "pick");
+        assert!(slice(app_src, pick_full).contains("Integer i"));
+
+        // Overload resolution against binary List.remove(int) vs List.remove(Object)
+        let rem_idx_h = snap.hover(app_fid, cursor(app_src, "/*rem_idx*/")).unwrap().unwrap();
+        assert_eq!(
+            rem_idx_h.content,
+            "```java\nUser java.util.List.remove(int index)\n```\n*from JDK module `java.base`*"
+        );
+        let rem_obj_h = snap.hover(app_fid, cursor(app_src, "/*rem_obj*/")).unwrap().unwrap();
+        assert_eq!(
+            rem_obj_h.content,
+            "```java\nboolean java.util.List.remove(java.lang.Object o)\n```\n*from JDK module `java.base`*"
+        );
+    }
+
+    #[test]
+    fn goto_type_definition_generics_var_and_lambdas() {
+        let user_src = "\
+package com.example;
+public class User {
+    public String getName() { return \"\"; }
+}
+";
+        let app_src = "\
+package com.example;
+import java.util.List;
+public class App {
+    void demo(List<User> users) {
+        /*var_kw*/var /*var_u*/u = users./*call_get*/get(0);
+        var /*var_name*/name = /*use_u*/u./*call_name*/getName();
+        var /*var_list*/list = List.of(new User());
+        users.stream().map(/*lparam*/item -> /*luse*/item.getName()).toList();
+        for (var /*fe_u*/elem : users) {
+            /*fe_use*/elem.getName();
+        }
+    }
+}
+";
+        let mut host = AnalysisHost::new();
+        host.set_file_text(FileId(1), Arc::new(user_src.to_string()));
+        host.set_file_text(FileId(2), Arc::new(app_src.to_string()));
+        host.set_workspace_files(Arc::new(vec![FileId(1), FileId(2)]));
+        host.set_classpath_index(Arc::new(generics_classpath()));
+
+        let snap = host.analysis();
+        let user_fid = FileId(1);
+        let app_fid = FileId(2);
+
+        for marker in [
+            "/*var_kw*/",
+            "/*var_u*/",
+            "/*use_u*/",
+            "/*call_get*/",
+            "/*lparam*/",
+            "/*luse*/",
+            "/*fe_u*/",
+            "/*fe_use*/",
+        ] {
+            let td = snap
+                .goto_type_definition(app_fid, cursor(app_src, marker))
+                .unwrap()
+                .unwrap_or_else(|| panic!("expected type definition at {marker}"));
+            let (_, focus) = assert_source_target(td, user_fid);
+            assert_eq!(slice(user_src, focus), "User", "at {marker}");
+        }
+
+        let list_td = snap
+            .goto_type_definition(app_fid, cursor(app_src, "/*var_list*/"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            list_td,
+            NavigationTarget::Binary(BinaryTarget {
+                origin: BinaryOrigin::Jdk {
+                    module_name: Some(SmolStr::new("java.base")),
+                },
+                internal_name: "java/util/List".to_string(),
+                qualified_name: "java.util.List".to_string(),
+                member_name: None,
+            })
+        );
+
+        for marker in ["/*var_name*/", "/*call_name*/"] {
+            let str_td = snap
+                .goto_type_definition(app_fid, cursor(app_src, marker))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                str_td,
+                NavigationTarget::Binary(BinaryTarget {
+                    origin: BinaryOrigin::Jdk {
+                        module_name: Some(SmolStr::new("java.base")),
+                    },
+                    internal_name: "java/lang/String".to_string(),
+                    qualified_name: "java.lang.String".to_string(),
+                    member_name: None,
+                }),
+                "at {marker}"
+            );
+        }
     }
 }

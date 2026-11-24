@@ -4,6 +4,8 @@
 //! module and workspace indexes across body edits of any length. Source ranges are looked up
 //! lazily via [`AstId`] in the companion [`AstIdMap`].
 
+use std::collections::BTreeMap;
+
 use la_arena::{Arena, Idx};
 use smol_str::SmolStr;
 use syntax::{
@@ -18,8 +20,8 @@ use syntax::{
 use crate::{
     FileId,
     symbols::{
-        FileSymbols, ImportDecl, ImportKind, MemberKind, MemberSymbol, ParamSummary, TypeKind,
-        TypeSymbol, extract_import_parts, extract_params, extract_type_param_names,
+        FileSymbols, ImportDecl, ImportKind, MemberKind, MemberSymbol, ParamSummary, TypeIdentity,
+        TypeKind, TypeSymbol, extract_import_parts, extract_params, extract_type_params_and_bounds,
         format_params_signature, node_ident_text,
     },
 };
@@ -81,10 +83,13 @@ pub struct TypeItem {
     pub qualified_name: String,
     pub enclosing_type: Option<String>,
     pub kind: TypeKind,
+    pub identity: TypeIdentity,
     pub is_static: bool,
     pub is_abstract: bool,
     pub is_final: bool,
     pub type_params: Vec<SmolStr>,
+    /// Explicit `extends` bounds per type parameter (omits parameters with no explicit bounds).
+    pub type_param_bounds: BTreeMap<SmolStr, Vec<String>>,
     /// Raw type references from `extends` clause (e.g. `["Base", "com.foo.Iface<T>"]`).
     pub extends: Vec<String>,
     /// Raw type references from `implements` clause.
@@ -108,6 +113,8 @@ pub struct MemberItem {
     pub is_default: bool,
     pub is_abstract: bool,
     pub has_override: bool,
+    pub type_params: Vec<SmolStr>,
+    pub type_param_bounds: BTreeMap<SmolStr, Vec<String>>,
     pub type_ref: Option<String>,
     pub params: Vec<ParamSummary>,
     pub ast_id: AstId,
@@ -337,10 +344,12 @@ fn type_symbol_from_item(ty: &TypeItem, members: &Arena<MemberItem>, map: &AstId
         qualified_name: ty.qualified_name.clone(),
         enclosing_type: ty.enclosing_type.clone(),
         kind: ty.kind,
+        identity: ty.identity,
         is_static: ty.is_static,
         is_abstract: ty.is_abstract,
         is_final: ty.is_final,
         type_params: ty.type_params.clone(),
+        type_param_bounds: ty.type_param_bounds.clone(),
         extends: ty.extends.clone(),
         implements: ty.implements.clone(),
         permits: ty.permits.clone(),
@@ -362,6 +371,8 @@ fn member_symbol_from_item(item: &MemberItem, map: &AstIdMap) -> MemberSymbol {
         is_default: item.is_default,
         is_abstract: item.is_abstract,
         has_override: item.has_override,
+        type_params: item.type_params.clone(),
+        type_param_bounds: item.type_param_bounds.clone(),
         type_ref: item.type_ref.clone(),
         params: item.params.clone(),
         full_range: range.full_range,
@@ -435,7 +446,12 @@ fn lower_type_decl(
     let is_abstract = has_modifier(node, ABSTRACT_KW)
         || matches!(kind, TypeKind::Interface | TypeKind::Annotation);
     let is_final = has_modifier(node, FINAL_KW) || kind == TypeKind::Record;
-    let type_params = extract_type_param_names(node);
+    let identity = if matches!(kind, TypeKind::Interface | TypeKind::Annotation) || is_abstract {
+        TypeIdentity::Unspecified
+    } else {
+        TypeIdentity::Identity
+    };
+    let (type_params, type_param_bounds) = extract_type_params_and_bounds(node);
     let extends = extract_clause_types(node, EXTENDS_CLAUSE);
     let implements = extract_clause_types(node, IMPLEMENTS_CLAUSE);
     let permits = extract_clause_types(node, PERMITS_CLAUSE);
@@ -449,10 +465,12 @@ fn lower_type_decl(
         qualified_name: qualified_name.clone(),
         enclosing_type: enclosing_fqn.map(str::to_string),
         kind,
+        identity,
         is_static,
         is_abstract,
         is_final,
         type_params,
+        type_param_bounds,
         extends,
         implements,
         permits,
@@ -483,6 +501,8 @@ fn lower_type_decl(
                             is_default: false,
                             is_abstract: false,
                             has_override: false,
+                            type_params: Vec::new(),
+                            type_param_bounds: BTreeMap::new(),
                             type_ref,
                             params: Vec::new(),
                             ast_id: comp_ast_id,
@@ -509,6 +529,8 @@ fn lower_type_decl(
                                     is_default: false,
                                     is_abstract: false,
                                     has_override: false,
+                                    type_params: Vec::new(),
+                                    type_param_bounds: BTreeMap::new(),
                                     type_ref: None,
                                     params: Vec::new(),
                                     ast_id: const_ast_id,
@@ -614,6 +636,8 @@ fn lower_field_decl(
             is_default: false,
             is_abstract: false,
             has_override: false,
+            type_params: Vec::new(),
+            type_param_bounds: BTreeMap::new(),
             type_ref,
             params: Vec::new(),
             ast_id,
@@ -641,6 +665,7 @@ fn lower_method_or_ctor(
                 && !is_static
                 && !has_modifier(node, PRIVATE_KW)));
     let has_override = kind == MemberKind::Method && has_override_annotation(node);
+    let (type_params, type_param_bounds) = extract_type_params_and_bounds(node);
     let type_ref = if kind == MemberKind::Method {
         type_child(node).map(|t| type_text_with_dims(&t, node))
     } else {
@@ -666,8 +691,98 @@ fn lower_method_or_ctor(
         is_default,
         is_abstract,
         has_override,
+        type_params,
+        type_param_bounds,
         type_ref,
         params,
         ast_id,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use smol_str::SmolStr;
+    use syntax::parse;
+
+    use super::*;
+
+    #[test]
+    fn extracts_type_param_bounds_and_generic_member_type_params() {
+        let src = "\
+package com.example;
+
+public class Box<T extends Number & Comparable<T>, U> {
+    public <E extends Exception> Box(E err) {}
+    public <K extends CharSequence & java.io.Serializable, V> V pick(K key, V val) {
+        return val;
+    }
+    public int plain() { return 0; }
+}
+
+interface Repo<T extends AutoCloseable> {}
+record Pair<A extends Comparable<A>, B>(A first, B second) {}
+";
+        let root = parse(src).syntax_node();
+        let (tree, map) = lower_file_item_tree(FileId(1), &root);
+        let syms = file_symbols_from_item_tree(&tree, &map);
+
+        let (_, box_item) = tree.find_type_by_fqn("com.example.Box").unwrap();
+        assert_eq!(box_item.type_params, vec![SmolStr::new("T"), SmolStr::new("U")]);
+        assert_eq!(
+            box_item.type_param_bounds,
+            BTreeMap::from([(
+                SmolStr::new("T"),
+                vec!["Number".to_string(), "Comparable<T>".to_string()]
+            )])
+        );
+
+        let ctor = &tree.members[box_item.members[0]];
+        assert_eq!(ctor.kind, MemberKind::Constructor);
+        assert_eq!(ctor.type_params, vec![SmolStr::new("E")]);
+        assert_eq!(
+            ctor.type_param_bounds,
+            BTreeMap::from([(SmolStr::new("E"), vec!["Exception".to_string()])])
+        );
+
+        let pick = &tree.members[box_item.members[1]];
+        assert_eq!(pick.kind, MemberKind::Method);
+        assert_eq!(pick.type_params, vec![SmolStr::new("K"), SmolStr::new("V")]);
+        assert_eq!(
+            pick.type_param_bounds,
+            BTreeMap::from([(
+                SmolStr::new("K"),
+                vec![
+                    "CharSequence".to_string(),
+                    "java.io.Serializable".to_string()
+                ]
+            )])
+        );
+
+        let plain = &tree.members[box_item.members[2]];
+        assert!(plain.type_params.is_empty());
+        assert!(plain.type_param_bounds.is_empty());
+
+        let (_, repo_item) = tree.find_type_by_fqn("com.example.Repo").unwrap();
+        assert_eq!(
+            repo_item.type_param_bounds,
+            BTreeMap::from([(SmolStr::new("T"), vec!["AutoCloseable".to_string()])])
+        );
+
+        let (_, pair_item) = tree.find_type_by_fqn("com.example.Pair").unwrap();
+        assert_eq!(
+            pair_item.type_param_bounds,
+            BTreeMap::from([(SmolStr::new("A"), vec!["Comparable<A>".to_string()])])
+        );
+
+        // Also propagated to legacy TypeSymbol / MemberSymbol.
+        let box_sym = &syms.types[0];
+        assert_eq!(box_sym.type_param_bounds, box_item.type_param_bounds);
+        assert_eq!(box_sym.members[0].type_params, vec![SmolStr::new("E")]);
+        assert_eq!(
+            box_sym.members[1].type_param_bounds,
+            pick.type_param_bounds
+        );
+    }
 }

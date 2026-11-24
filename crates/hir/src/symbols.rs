@@ -6,7 +6,10 @@ use std::{collections::BTreeMap, sync::Arc};
 use smol_str::SmolStr;
 use syntax::{
     SyntaxNode, TextRange,
-    ext::{has_direct_token, name_child, path_segments, type_child, type_text_with_dims},
+    ext::{
+        collapsed_text, has_direct_token, is_type_node, name_child, path_segments, type_child,
+        type_text_with_dims,
+    },
     syntax_kind::SyntaxKind::{self, *},
 };
 
@@ -52,6 +55,19 @@ pub struct ImportDecl {
     pub range: TextRange,
 }
 
+/// Object identity semantics of a declared type (JEP 401: Value Classes and Objects).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TypeIdentity {
+    /// Standard identity class, enum, or identity record.
+    #[default]
+    Identity,
+    /// Identity-free value class or value record (`value class` / `value record`).
+    Value,
+    /// Interfaces, annotations, and abstract classes that do not mandate identity or value
+    /// semantics and may be extended/implemented by either.
+    Unspecified,
+}
+
 /// Kind of a declared Java type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TypeKind {
@@ -86,10 +102,13 @@ pub struct TypeSymbol {
     /// Enclosing type's `qualified_name`, if nested.
     pub enclosing_type: Option<String>,
     pub kind: TypeKind,
+    pub identity: TypeIdentity,
     pub is_static: bool,
     pub is_abstract: bool,
     pub is_final: bool,
     pub type_params: Vec<SmolStr>,
+    /// Explicit `extends` bounds per type parameter (omits parameters with no explicit bounds).
+    pub type_param_bounds: BTreeMap<SmolStr, Vec<String>>,
     /// Raw type references from `extends` clause (e.g. `["Base", "com.foo.Iface<T>"]`).
     pub extends: Vec<String>,
     /// Raw type references from `implements` clause.
@@ -148,6 +167,10 @@ pub struct MemberSymbol {
     pub is_default: bool,
     pub is_abstract: bool,
     pub has_override: bool,
+    /// Type parameter names for generic methods and constructors (e.g. `["T", "U"]`).
+    pub type_params: Vec<SmolStr>,
+    /// Explicit `extends` bounds per type parameter (omits parameters with no explicit bounds).
+    pub type_param_bounds: BTreeMap<SmolStr, Vec<String>>,
     /// Collapsed source text of the declared type (`None` for constructors and enum constants).
     pub type_ref: Option<String>,
     /// Parameter list summary for methods and constructors.
@@ -429,14 +452,28 @@ pub(crate) fn extract_params(param_list: &SyntaxNode) -> Vec<ParamSummary> {
         .collect()
 }
 
-pub(crate) fn extract_type_param_names(node: &SyntaxNode) -> Vec<SmolStr> {
-    node.children()
-        .find(|n| n.kind() == TYPE_PARAMS)
-        .map(|tps| {
-            tps.children()
-                .filter(|n| n.kind() == TYPE_PARAM)
-                .filter_map(|tp| name_child(&tp).map(|n| node_ident_text(&n)))
-                .collect()
-        })
-        .unwrap_or_default()
+pub(crate) fn extract_type_params_and_bounds(
+    node: &SyntaxNode,
+) -> (Vec<SmolStr>, BTreeMap<SmolStr, Vec<String>>) {
+    let mut names = Vec::new();
+    let mut bounds = BTreeMap::new();
+    let Some(tps) = node.children().find(|n| n.kind() == TYPE_PARAMS) else {
+        return (names, bounds);
+    };
+    for tp in tps.children().filter(|n| n.kind() == TYPE_PARAM) {
+        let Some(name_node) = name_child(&tp) else {
+            continue;
+        };
+        let name = node_ident_text(&name_node);
+        let tp_bounds: Vec<String> = tp
+            .children()
+            .filter(|n| is_type_node(n.kind()))
+            .map(|t| collapsed_text(&t))
+            .collect();
+        if !tp_bounds.is_empty() {
+            bounds.insert(name.clone(), tp_bounds);
+        }
+        names.push(name);
+    }
+    (names, bounds)
 }
