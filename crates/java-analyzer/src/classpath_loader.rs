@@ -198,6 +198,10 @@ fn parse_jdk_class_tasks_parallel(
                         },
                     ) {
                         Ok(Some(ParsedClassfile::Type(ty))) => local.insert_type(ty),
+                        Ok(Some(ParsedClassfile::Package {
+                            package,
+                            nullness_scope,
+                        })) => local.insert_package_nullness(package, nullness_scope),
                         Ok(Some(ParsedClassfile::Module(_)) | None) => {}
                         Err(err) => {
                             tracing::warn!(
@@ -839,6 +843,10 @@ fn load_jmod(path: &Path) -> Option<ClasspathIndex> {
             },
         ) {
             Ok(Some(ParsedClassfile::Type(ty))) => partial.insert_type(ty),
+            Ok(Some(ParsedClassfile::Package {
+                package,
+                nullness_scope,
+            })) => partial.insert_package_nullness(package, nullness_scope),
             Ok(Some(ParsedClassfile::Module(_)) | None) => {}
             Err(err) => {
                 tracing::warn!(
@@ -927,6 +935,10 @@ fn load_jdk8_rt_jar(path: &Path) -> Option<ClasspathIndex> {
 
         match parse_class_bytes(&buf, origin.clone()) {
             Ok(Some(ParsedClassfile::Type(ty))) => partial.insert_type(ty),
+            Ok(Some(ParsedClassfile::Package {
+                package,
+                nullness_scope,
+            })) => partial.insert_package_nullness(package, nullness_scope),
             Ok(Some(ParsedClassfile::Module(_)) | None) => {}
             Err(err) => {
                 tracing::warn!(
@@ -1041,6 +1053,10 @@ fn load_jar(path: &Path, label: &str, target_release: Release) -> Option<Classpa
         match parse_class_bytes(class_bytes, origin.clone()) {
             Ok(Some(ParsedClassfile::Type(ty))) => partial.insert_type(ty),
             Ok(Some(ParsedClassfile::Module(module))) => partial.insert_module(module),
+            Ok(Some(ParsedClassfile::Package {
+                package,
+                nullness_scope,
+            })) => partial.insert_package_nullness(package, nullness_scope),
             Ok(None) => {}
             Err(err) => {
                 tracing::warn!(
@@ -1077,6 +1093,10 @@ fn load_class_directory(dir: &Path, label: &str) -> Option<ClasspathIndex> {
         match parse_class_bytes(&bytes, origin.clone()) {
             Ok(Some(ParsedClassfile::Type(ty))) => partial.insert_type(ty),
             Ok(Some(ParsedClassfile::Module(module))) => partial.insert_module(module),
+            Ok(Some(ParsedClassfile::Package {
+                package,
+                nullness_scope,
+            })) => partial.insert_package_nullness(package, nullness_scope),
             Ok(None) => {}
             Err(err) => {
                 tracing::warn!(path = %class_path.display(), error = %err, "failed to parse class file");

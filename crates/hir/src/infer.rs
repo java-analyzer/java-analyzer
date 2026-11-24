@@ -7,10 +7,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smol_str::SmolStr;
 use syntax::{
     SyntaxNode, TextRange,
-    ext::{
-        collapsed_text, has_direct_token, has_modifier, is_type_node, name_child, path_segments,
-        type_text_with_dims,
-    },
+    ext::{collapsed_text, has_direct_token, has_modifier, is_type_node, name_child, path_segments},
     syntax_kind::SyntaxKind::*,
 };
 
@@ -20,12 +17,20 @@ use crate::{
     hierarchy::linearized_supertypes,
     item_tree::{AstIdMap, FileItemTree, MemberItem},
     resolve::{self, ResolveCtx, ResolvedTarget, SymbolDetail},
-    symbols::{MemberKind, ParamSummary, TypeKind, WorkspaceIndex, format_params_signature, node_ident_text},
+    symbols::{
+        ImportResolver, MemberKind, NullnessScope, ParamSummary, TypeKind, WorkspaceIndex,
+        extract_modifier_nullability, extract_modifier_nullness_scope, format_params_signature,
+        node_ident_text, render_type_node, render_type_with_dims_and_nullability,
+    },
     ty::{
-        MAX_SUBST_DEPTH, PrimitiveType, Substitution, Ty, TypeArg, WildcardBound,
-        binary_numeric_promotion, is_subtype, least_upper_bound, parse_type_ref,
-        resolve_binary_type_ref_for_owner, resolve_type_ref_in_file_for_owner,
-        supertype_substitution_for_ty, type_param_bounds_of_fqn, type_params_of_fqn,
+        MAX_SUBST_DEPTH, Nullability, PrimitiveType, Substitution, Ty, TypeArg, WildcardBound,
+        apply_nullness_scope, binary_numeric_promotion, effective_nullness_scope_for_binary_member,
+        effective_nullness_scope_for_file, effective_nullness_scope_for_member,
+        effective_nullness_scope_for_type, is_subtype, least_upper_bound, parse_type_ref,
+        resolve_binary_type_ref_for_member, resolve_binary_type_ref_for_owner,
+        resolve_type_ref_in_file_for_member, resolve_type_ref_in_file_for_owner,
+        resolve_type_ref_in_file_with_scope, supertype_substitution_for_ty,
+        ty_has_explicit_nullability, type_param_bounds_of_fqn, type_params_of_fqn,
         unary_numeric_promotion,
     },
 };
@@ -145,12 +150,26 @@ pub fn find_functional_interface_sam(db: &dyn DefDatabase, ty: &Ty) -> Option<Sa
                         m.type_param_bounds.get(tp).cloned().unwrap_or_default(),
                     );
                 }
-                let param_tys = resolve_params_in_file(db, fid, Some(&iface_fqn), &m.params, &m_scope);
+                let param_tys = resolve_params_in_file_for_member(
+                    db,
+                    fid,
+                    Some(&iface_fqn),
+                    m.nullness_scope,
+                    &m.params,
+                    &m_scope,
+                );
                 let ret_ty = m
                     .type_ref
                     .as_deref()
                     .map_or(Ty::Void, |r| {
-                        resolve_type_ref_in_file_for_owner(db, fid, Some(&iface_fqn), r, &m_scope)
+                        resolve_type_ref_in_file_for_member(
+                            db,
+                            fid,
+                            Some(&iface_fqn),
+                            m.nullness_scope,
+                            r,
+                            &m_scope,
+                        )
                     });
                 candidates.push(SamCandidate {
                     owner_fqn: iface_fqn.clone(),
@@ -186,12 +205,18 @@ pub fn find_functional_interface_sam(db: &dyn DefDatabase, ty: &Ty) -> Option<Sa
                         m.type_param_bounds.get(tp).cloned().unwrap_or_default(),
                     );
                 }
-                let param_tys = resolve_params_in_binary(&classpath, bin, &m.params, &m_scope);
+                let param_tys = resolve_params_in_binary_for_member(
+                    &classpath,
+                    bin,
+                    m.nullness_scope,
+                    &m.params,
+                    &m_scope,
+                );
                 let ret_ty = m
                     .type_ref
                     .as_deref()
                     .map_or(Ty::Void, |r| {
-                        resolve_binary_type_ref_for_owner(&classpath, bin, r, &m_scope)
+                        resolve_binary_type_ref_for_member(&classpath, bin, m.nullness_scope, r, &m_scope)
                     });
                 candidates.push(SamCandidate {
                     owner_fqn: iface_fqn.clone(),
@@ -302,22 +327,18 @@ fn is_object_public_method_source(
     scope: &BTreeMap<SmolStr, Vec<String>>,
 ) -> bool {
     match (m.name.as_str(), m.params.as_slice()) {
-        ("toString", []) => m
-            .type_ref
-            .as_deref()
-            .is_some_and(|r| {
-                resolve_type_ref_in_file_for_owner(db, fid, Some(owner_fqn), r, scope)
-                    == Ty::string()
-            }),
-        ("hashCode", []) => m
-            .type_ref
-            .as_deref()
-            .is_some_and(|r| {
-                resolve_type_ref_in_file_for_owner(db, fid, Some(owner_fqn), r, scope)
-                    == Ty::Primitive(PrimitiveType::Int)
-            }),
+        ("toString", []) => m.type_ref.as_deref().is_some_and(|r| {
+            resolve_type_ref_in_file_for_owner(db, fid, Some(owner_fqn), r, scope)
+                .with_nullability(Nullability::Unspecified)
+                == Ty::string()
+        }),
+        ("hashCode", []) => m.type_ref.as_deref().is_some_and(|r| {
+            resolve_type_ref_in_file_for_owner(db, fid, Some(owner_fqn), r, scope)
+                == Ty::Primitive(PrimitiveType::Int)
+        }),
         ("equals", [p]) => {
-            let p_ty = resolve_type_ref_in_file_for_owner(db, fid, Some(owner_fqn), &p.type_ref, scope);
+            let p_ty = resolve_type_ref_in_file_for_owner(db, fid, Some(owner_fqn), &p.type_ref, scope)
+                .with_nullability(Nullability::Unspecified);
             let ret_ok = m.type_ref.as_deref().is_some_and(|r| {
                 resolve_type_ref_in_file_for_owner(db, fid, Some(owner_fqn), r, scope)
                     == Ty::Primitive(PrimitiveType::Boolean)
@@ -335,19 +356,18 @@ fn is_object_public_method_binary(
     scope: &BTreeMap<SmolStr, Vec<String>>,
 ) -> bool {
     match (m.name.as_str(), m.params.as_slice()) {
-        ("toString", []) => m
-            .type_ref
-            .as_deref()
-            .is_some_and(|r| resolve_binary_type_ref_for_owner(classpath, owner, r, scope) == Ty::string()),
-        ("hashCode", []) => m
-            .type_ref
-            .as_deref()
-            .is_some_and(|r| {
-                resolve_binary_type_ref_for_owner(classpath, owner, r, scope)
-                    == Ty::Primitive(PrimitiveType::Int)
-            }),
+        ("toString", []) => m.type_ref.as_deref().is_some_and(|r| {
+            resolve_binary_type_ref_for_owner(classpath, owner, r, scope)
+                .with_nullability(Nullability::Unspecified)
+                == Ty::string()
+        }),
+        ("hashCode", []) => m.type_ref.as_deref().is_some_and(|r| {
+            resolve_binary_type_ref_for_owner(classpath, owner, r, scope)
+                == Ty::Primitive(PrimitiveType::Int)
+        }),
         ("equals", [p]) => {
-            let p_ty = resolve_binary_type_ref_for_owner(classpath, owner, &p.type_ref, scope);
+            let p_ty = resolve_binary_type_ref_for_owner(classpath, owner, &p.type_ref, scope)
+                .with_nullability(Nullability::Unspecified);
             let ret_ok = m.type_ref.as_deref().is_some_and(|r| {
                 resolve_binary_type_ref_for_owner(classpath, owner, r, scope)
                     == Ty::Primitive(PrimitiveType::Boolean)
@@ -367,10 +387,22 @@ fn erase_type_vars_inner(ty: &Ty, depth: usize) -> Ty {
         return Ty::object();
     }
     match ty {
-        Ty::TypeVar { bounds, .. } => bounds
-            .first()
-            .map_or_else(Ty::object, |b| erase_type_vars_inner(b, depth + 1)),
-        Ty::Class { fqn, .. } => Ty::raw_class(fqn),
+        Ty::TypeVar {
+            bounds,
+            nullability,
+            ..
+        } => {
+            let base = bounds
+                .first()
+                .map_or_else(Ty::object, |b| erase_type_vars_inner(b, depth + 1));
+            match nullability {
+                Nullability::Unspecified => base,
+                n @ (Nullability::NonNull | Nullability::Nullable) => base.with_nullability(*n),
+            }
+        }
+        Ty::Class {
+            fqn, nullability, ..
+        } => Ty::raw_class(fqn).with_nullability(*nullability),
         Ty::Array { elem, nullability } => Ty::Array {
             elem: Box::new(erase_type_vars_inner(elem, depth + 1)),
             nullability: *nullability,
@@ -391,6 +423,7 @@ struct InferCtx<'a> {
     ast_id_map: Arc<AstIdMap>,
     index: Arc<WorkspaceIndex>,
     classpath: Arc<ClasspathIndex>,
+    import_resolver: ImportResolver,
     depth: usize,
     visiting_nodes: FxHashSet<TextRange>,
     lambda_param_bindings: FxHashMap<TextRange, Ty>,
@@ -398,17 +431,37 @@ struct InferCtx<'a> {
 
 impl<'a> InferCtx<'a> {
     fn new(db: &'a dyn DefDatabase, file_id: FileId) -> Self {
+        let file_tree = db.file_item_tree(file_id);
+        let import_resolver = ImportResolver::from_imports(
+            file_tree.package.as_deref(),
+            file_tree
+                .imports
+                .iter()
+                .map(|(_, imp)| (imp.kind, imp.path.as_slice())),
+        );
         Self {
             db,
             file_id,
-            file_tree: db.file_item_tree(file_id),
+            file_tree,
             ast_id_map: db.ast_id_map(file_id),
             index: db.workspace_index(),
             classpath: db.classpath_index(),
+            import_resolver,
             depth: 0,
             visiting_nodes: FxHashSet::default(),
             lambda_param_bindings: FxHashMap::default(),
         }
+    }
+
+    fn effective_scope_at(&self, node: &SyntaxNode) -> NullnessScope {
+        effective_nullness_scope_at_inner(
+            self.db,
+            self.file_id,
+            &self.file_tree,
+            &self.ast_id_map,
+            &self.import_resolver,
+            node,
+        )
     }
 
     fn resolve_ctx(&self) -> ResolveCtx<'_> {
@@ -455,7 +508,7 @@ impl<'a> InferCtx<'a> {
 
     fn infer_expr_inner(&mut self, expr: &SyntaxNode, expected: Option<&Ty>) -> Ty {
         match expr.kind() {
-            LITERAL => infer_literal_ty(expr),
+            LITERAL => infer_literal_ty(expr, self.effective_scope_at(expr)),
             CLASS_LITERAL => self.infer_class_literal(expr),
             THIS_EXPR => self.infer_this_expr(expr),
             SUPER_EXPR => self.infer_super_expr(expr),
@@ -528,26 +581,61 @@ impl<'a> InferCtx<'a> {
             Ty::Unknown
         };
 
+        let is_marked = matches!(self.effective_scope_at(expr), NullnessScope::NonNullByDefault(_));
         let boxed = match inner_ty {
-            Ty::Primitive(p) => Ty::raw_class(p.boxed_fqn()),
-            Ty::Void => Ty::raw_class("java.lang.Void"),
-            Ty::Unknown => return Ty::raw_class(CLASS_FQN),
+            Ty::Primitive(p) => {
+                let b = Ty::raw_class(p.boxed_fqn());
+                if is_marked {
+                    b.with_nullability(Nullability::NonNull)
+                } else {
+                    b
+                }
+            }
+            Ty::Void => {
+                let v = Ty::raw_class("java.lang.Void");
+                if is_marked {
+                    v.with_nullability(Nullability::NonNull)
+                } else {
+                    v
+                }
+            }
+            Ty::Unknown => {
+                let c = Ty::raw_class(CLASS_FQN);
+                return if is_marked {
+                    c.with_nullability(Nullability::NonNull)
+                } else {
+                    c
+                };
+            }
             other => other,
         };
 
-        Ty::class(CLASS_FQN, vec![TypeArg::Type(boxed)])
+        let cls = Ty::class(CLASS_FQN, vec![TypeArg::Type(boxed)]);
+        if is_marked {
+            cls.with_nullability(Nullability::NonNull)
+        } else {
+            cls
+        }
     }
 
     fn infer_this_expr(&self, expr: &SyntaxNode) -> Ty {
+        let is_marked = matches!(self.effective_scope_at(expr), NullnessScope::NonNullByDefault(_));
+        let mark = |ty: Ty| {
+            if is_marked {
+                ty.with_nullability(Nullability::NonNull)
+            } else {
+                ty
+            }
+        };
         if let Some(qual) = expr.children().next()
             && let Some(segs) = resolve::extract_dotted_name_chain(&qual)
         {
             let raw = segs.iter().map(SmolStr::as_str).collect::<Vec<_>>().join(".");
             let ty = self.resolve_type_str(&raw, expr);
             if let Ty::Class { fqn, .. } = ty {
-                return self.parameterized_self_ty(&fqn);
+                return mark(self.parameterized_self_ty(&fqn));
             }
-            return ty;
+            return mark(ty);
         }
 
         for ancestor in expr.ancestors().skip(1) {
@@ -555,11 +643,11 @@ impl<'a> InferCtx<'a> {
                 && ancestor.children().any(|n| n.kind() == CLASS_BODY)
                 && let Some(path_type) = ancestor.children().find(|n| n.kind() == PATH_TYPE)
             {
-                return self.resolve_type_node(&path_type, &ancestor);
+                return mark(self.resolve_type_node(&path_type, &ancestor));
             }
             if TypeKind::from_syntax(ancestor.kind()).is_some() {
                 if let Some(fqn) = self.type_fqn_for_decl(&ancestor) {
-                    return self.parameterized_self_ty(&fqn);
+                    return mark(self.parameterized_self_ty(&fqn));
                 }
                 break;
             }
@@ -569,6 +657,14 @@ impl<'a> InferCtx<'a> {
     }
 
     fn infer_super_expr(&self, expr: &SyntaxNode) -> Ty {
+        let is_marked = matches!(self.effective_scope_at(expr), NullnessScope::NonNullByDefault(_));
+        let mark = |ty: Ty| {
+            if is_marked {
+                ty.with_nullability(Nullability::NonNull)
+            } else {
+                ty
+            }
+        };
         if let Some(qual) = expr.children().next()
             && let Some(segs) = resolve::extract_dotted_name_chain(&qual)
         {
@@ -577,10 +673,12 @@ impl<'a> InferCtx<'a> {
             if let Ty::Class { fqn, .. } = &qual_ty {
                 let self_ty = self.parameterized_self_ty(fqn);
                 if self.is_interface_fqn(fqn) {
-                    return supertype_substitution_for_ty(self.db, &self.infer_enclosing_self_ty(expr), fqn)
-                        .map_or(self_ty, |subst| subst.apply_covariant(&self.parameterized_self_ty(fqn)));
+                    return mark(
+                        supertype_substitution_for_ty(self.db, &self.infer_enclosing_self_ty(expr), fqn)
+                            .map_or(self_ty, |subst| subst.apply_covariant(&self.parameterized_self_ty(fqn))),
+                    );
                 }
-                return self.direct_superclass_ty(&self_ty).unwrap_or(Ty::Unknown);
+                return mark(self.direct_superclass_ty(&self_ty).unwrap_or(Ty::Unknown));
             }
             return Ty::Unknown;
         }
@@ -590,12 +688,12 @@ impl<'a> InferCtx<'a> {
                 && ancestor.children().any(|n| n.kind() == CLASS_BODY)
                 && let Some(path_type) = ancestor.children().find(|n| n.kind() == PATH_TYPE)
             {
-                return self.resolve_type_node(&path_type, &ancestor);
+                return mark(self.resolve_type_node(&path_type, &ancestor));
             }
             if TypeKind::from_syntax(ancestor.kind()).is_some() {
                 if let Some(fqn) = self.type_fqn_for_decl(&ancestor) {
                     let self_ty = self.parameterized_self_ty(&fqn);
-                    return self.direct_superclass_ty(&self_ty).unwrap_or(Ty::Unknown);
+                    return mark(self.direct_superclass_ty(&self_ty).unwrap_or(Ty::Unknown));
                 }
                 break;
             }
@@ -609,6 +707,7 @@ impl<'a> InferCtx<'a> {
             return Ty::Unknown;
         };
         let name = node_ident_text(&ref_node);
+        let site_scope = self.effective_scope_at(expr);
 
         // 1. Local variables, parameters, lambda params, foreach, catch, resource, pattern vars.
         if let Some(decl_node) = resolve::find_local_decl_node(&ref_node, &name) {
@@ -622,7 +721,7 @@ impl<'a> InferCtx<'a> {
                 && let Some(path_type) = enc_node.children().find(|n| n.kind() == PATH_TYPE)
             {
                 let base_ty = self.resolve_type_node(&path_type, &enc_node);
-                if let Some(ty) = self.lookup_field_ty_on_ty(&base_ty, &name) {
+                if let Some(ty) = self.lookup_field_ty_on_ty(&base_ty, &name, site_scope) {
                     return ty;
                 }
             }
@@ -630,7 +729,7 @@ impl<'a> InferCtx<'a> {
                 && let Some(fqn) = self.type_fqn_for_decl(&enc_node)
             {
                 let self_ty = self.parameterized_self_ty(&fqn);
-                if let Some(ty) = self.lookup_field_ty_on_ty(&self_ty, &name) {
+                if let Some(ty) = self.lookup_field_ty_on_ty(&self_ty, &name, site_scope) {
                     return ty;
                 }
             }
@@ -643,10 +742,11 @@ impl<'a> InferCtx<'a> {
         }) {
             let m = &self.file_tree.members[mid];
             if let Some(raw) = m.type_ref.as_deref() {
-                return resolve_type_ref_in_file_for_owner(
+                return resolve_type_ref_in_file_for_member(
                     self.db,
                     self.file_id,
                     None,
+                    m.nullness_scope,
                     raw,
                     &BTreeMap::new(),
                 );
@@ -655,7 +755,7 @@ impl<'a> InferCtx<'a> {
 
         // 4. Static imports (fields / enum constants / nested types).
         if let Some(target) = resolve::resolve_via_static_imports_pub(self.resolve_ctx(), &name, None, false) {
-            return self.target_ty(&target, &Substitution::default());
+            return self.target_ty_with_site_scope(&target, &Substitution::default(), site_scope);
         }
 
         // 5. Type reference (e.g., `Collections` in `Collections.emptyList()` or `User` in `User.FOO`).
@@ -678,12 +778,13 @@ impl<'a> InferCtx<'a> {
         };
         let member_name = node_ident_text(&ref_node);
         let recv_ty = self.infer_expr(&receiver, None);
+        let site_scope = self.effective_scope_at(expr);
 
         if matches!(recv_ty, Ty::Array { .. }) && member_name == "length" {
             return Ty::Primitive(PrimitiveType::Int);
         }
 
-        self.lookup_field_ty_on_ty(&recv_ty, &member_name)
+        self.lookup_field_ty_on_ty(&recv_ty, &member_name, site_scope)
             .unwrap_or(Ty::Unknown)
     }
 
@@ -913,13 +1014,31 @@ impl<'a> InferCtx<'a> {
             }
 
             // 4. Default any remaining unbound method type parameters to their upper bound or Object.
+            let eff_member_scope = if cand.owner_fqn.is_empty() {
+                if cand.member_nullness_scope != NullnessScope::Inherited {
+                    cand.member_nullness_scope
+                } else {
+                    effective_nullness_scope_for_file(self.db, self.file_id)
+                }
+            } else {
+                effective_nullness_scope_for_member(
+                    self.db,
+                    &cand.owner_fqn,
+                    cand.member_nullness_scope,
+                )
+            };
+            let implicit_obj = if matches!(eff_member_scope, NullnessScope::NonNullByDefault(_)) {
+                Ty::object().with_nullability(Nullability::NonNull)
+            } else {
+                Ty::object()
+            };
             for mp in &cand.method_type_params {
                 if !subst.map.contains_key(mp) {
                     let fallback = cand
                         .method_type_param_bounds
                         .get(mp)
                         .and_then(|b| b.first())
-                        .map_or_else(Ty::object, |raw| {
+                        .map_or_else(|| implicit_obj.clone(), |raw| {
                             self.resolve_member_type_in_owner(
                                 &cand.target,
                                 &cand.owner_fqn,
@@ -928,7 +1047,7 @@ impl<'a> InferCtx<'a> {
                             )
                         });
                     let fallback = if matches!(fallback, Ty::Unknown) {
-                        Ty::object()
+                        implicit_obj.clone()
                     } else {
                         fallback
                     };
@@ -970,6 +1089,7 @@ impl<'a> InferCtx<'a> {
         let Some(type_node) = expr.children().find(|n| is_type_node(n.kind())) else {
             return Ty::Unknown;
         };
+        let is_marked = matches!(self.effective_scope_at(expr), NullnessScope::NonNullByDefault(_));
 
         // Count direct `[` tokens on `NEW_EXPR` (`new int[3][]`, `new String[n]`).
         let new_array_dims = expr
@@ -1003,6 +1123,9 @@ impl<'a> InferCtx<'a> {
             for _ in 0..new_array_dims {
                 if !matches!(base_ty, Ty::Unknown | Ty::Void) {
                     base_ty = Ty::array(base_ty);
+                    if is_marked {
+                        base_ty = base_ty.with_nullability(Nullability::NonNull);
+                    }
                 }
             }
             return base_ty;
@@ -1072,12 +1195,21 @@ impl<'a> InferCtx<'a> {
                                 .unwrap_or_else(|| TypeArg::Type(Ty::object()))
                         })
                         .collect();
-                    return Ty::class(fqn.clone(), final_args);
+                    let cls = Ty::class(fqn.clone(), final_args);
+                    return if is_marked {
+                        cls.with_nullability(Nullability::NonNull)
+                    } else {
+                        cls
+                    };
                 }
             }
         }
 
-        base_ty
+        if is_marked {
+            base_ty.with_nullability(Nullability::NonNull)
+        } else {
+            base_ty
+        }
     }
 
     fn infer_cast_expr(&self, expr: &SyntaxNode) -> Ty {
@@ -1163,7 +1295,12 @@ impl<'a> InferCtx<'a> {
                 let lty = self.infer_expr(&lhs, None);
                 let rty = self.infer_expr(&rhs, None);
                 if is_string_ty(&lty) || is_string_ty(&rty) {
-                    return Ty::string();
+                    let s = Ty::string();
+                    return if matches!(self.effective_scope_at(expr), NullnessScope::NonNullByDefault(_)) {
+                        s.with_nullability(Nullability::NonNull)
+                    } else {
+                        s
+                    };
                 }
                 binary_numeric_promotion(&lty, &rty)
                     .map(Ty::Primitive)
@@ -1265,8 +1402,13 @@ impl<'a> InferCtx<'a> {
                 if let Some(tn) = type_node
                     && !is_var_type_node(&tn)
                 {
-                    let raw = type_text_with_dims(&tn, binding);
-                    return self.resolve_type_str(&raw, binding);
+                    let is_local_root = decl_parent.kind() == LOCAL_VAR_DECL;
+                    return self.resolve_explicit_type_node(
+                        &tn,
+                        binding,
+                        &decl_parent,
+                        is_local_root,
+                    );
                 }
                 // `var x = init;`
                 let init = binding.children().find(|n| n.kind() != NAME);
@@ -1284,7 +1426,7 @@ impl<'a> InferCtx<'a> {
                 if let Some(tn) = type_node
                     && !is_var_type_node(&tn)
                 {
-                    return self.resolve_type_node(&tn, binding);
+                    return self.resolve_explicit_type_node(&tn, binding, binding, true);
                 }
                 let colon_end = binding
                     .children_with_tokens()
@@ -1323,7 +1465,7 @@ impl<'a> InferCtx<'a> {
                 if let Some(tn) = type_node
                     && !is_var_type_node(&tn)
                 {
-                    return self.resolve_type_node(&tn, binding);
+                    return self.resolve_explicit_type_node(&tn, binding, binding, true);
                 }
                 let eq_end = binding
                     .children_with_tokens()
@@ -1340,8 +1482,31 @@ impl<'a> InferCtx<'a> {
                 if let Some(type_node) = binding.children().find(|n| is_type_node(n.kind()))
                     && !is_var_type_node(&type_node)
                 {
-                    let raw = type_text_with_dims(&type_node, binding);
-                    return self.resolve_type_str(&raw, binding);
+                    let is_lambda_param =
+                        binding.parent().is_some_and(|p| p.kind() == LAMBDA_PARAMS);
+                    let is_varargs = has_direct_token(binding, DOT3);
+                    let mod_null = extract_modifier_nullability(binding, &self.import_resolver);
+                    let (raw, decl_null) = render_type_with_dims_and_nullability(
+                        &type_node,
+                        binding,
+                        mod_null,
+                        is_varargs,
+                        &self.import_resolver,
+                    );
+                    let base =
+                        self.resolve_type_str_with_local(&raw, binding, is_lambda_param);
+                    if is_varargs && !matches!(base, Ty::Unknown | Ty::Void) {
+                        let arr = Ty::array(base);
+                        let eff_scope = self.effective_scope_at(binding);
+                        return if let Some((n, _)) = decl_null {
+                            arr.with_nullability(n)
+                        } else if matches!(eff_scope, NullnessScope::NonNullByDefault(_)) {
+                            arr.with_nullability(Nullability::NonNull)
+                        } else {
+                            arr
+                        };
+                    }
+                    return base;
                 }
                 if let Some(bound) = self.lambda_param_bindings.get(&binding.text_range()) {
                     return bound.clone();
@@ -1389,7 +1554,7 @@ impl<'a> InferCtx<'a> {
                 if let Some(type_node) = binding.children().find(|n| is_type_node(n.kind()))
                     && !is_var_type_node(&type_node)
                 {
-                    return self.resolve_type_node(&type_node, binding);
+                    return self.resolve_explicit_type_node(&type_node, binding, binding, true);
                 }
                 self.infer_record_pattern_component(binding)
             }
@@ -1397,8 +1562,7 @@ impl<'a> InferCtx<'a> {
                 let Some(type_node) = binding.children().find(|n| is_type_node(n.kind())) else {
                     return Ty::Unknown;
                 };
-                let raw = type_text_with_dims(&type_node, binding);
-                self.resolve_type_str(&raw, binding)
+                self.resolve_explicit_type_node(&type_node, binding, binding, false)
             }
             _ => Ty::Unknown,
         }
@@ -1436,10 +1600,11 @@ impl<'a> InferCtx<'a> {
                 && let Some(raw) = comp.type_ref.as_deref()
             {
                 let scope = type_param_bounds_of_fqn(self.db, rec_fqn);
-                let ty = resolve_type_ref_in_file_for_owner(
+                let ty = resolve_type_ref_in_file_for_member(
                     self.db,
                     fid,
                     Some(rec_fqn),
+                    comp.nullness_scope,
                     raw,
                     &scope,
                 );
@@ -1455,7 +1620,13 @@ impl<'a> InferCtx<'a> {
                 && let Some(raw) = comp.type_ref.as_deref()
             {
                 let scope = type_param_bounds_of_fqn(self.db, rec_fqn);
-                let ty = resolve_binary_type_ref_for_owner(&self.classpath, bin, raw, &scope);
+                let ty = resolve_binary_type_ref_for_member(
+                    &self.classpath,
+                    bin,
+                    comp.nullness_scope,
+                    raw,
+                    &scope,
+                );
                 return subst.apply_covariant(&ty);
             }
         }
@@ -1483,8 +1654,13 @@ impl<'a> InferCtx<'a> {
                 if is_var_type_node(&type_node) {
                     return None;
                 }
-                let raw = type_text_with_dims(&type_node, &parent);
-                let ty = self.resolve_type_str(&raw, &parent);
+                let is_local_root = decl_parent.kind() == LOCAL_VAR_DECL;
+                let ty = self.resolve_explicit_type_node(
+                    &type_node,
+                    &parent,
+                    &decl_parent,
+                    is_local_root,
+                );
                 (!matches!(ty, Ty::Unknown)).then_some(ty)
             }
             ASSIGN_EXPR => {
@@ -1509,8 +1685,12 @@ impl<'a> InferCtx<'a> {
                             if has_direct_token(&type_node, VOID_KW) {
                                 return None;
                             }
-                            let raw = type_text_with_dims(&type_node, &ancestor);
-                            let ty = self.resolve_type_str(&raw, &ancestor);
+                            let ty = self.resolve_explicit_type_node(
+                                &type_node,
+                                &ancestor,
+                                &ancestor,
+                                false,
+                            );
                             return (!matches!(ty, Ty::Unknown | Ty::Void)).then_some(ty);
                         }
                         CONSTRUCTOR_DECL => return None,
@@ -1794,7 +1974,10 @@ impl<'a> InferCtx<'a> {
                 && let Some(fqn) = self.type_fqn_for_decl(&enc_node)
             {
                 let self_ty = self.parameterized_self_ty(&fqn);
-                if self.lookup_field_ty_on_ty(&self_ty, name).is_some() {
+                if self
+                    .lookup_field_ty_on_ty(&self_ty, name, NullnessScope::Inherited)
+                    .is_some()
+                {
                     return true;
                 }
             }
@@ -1985,7 +2168,12 @@ impl<'a> InferCtx<'a> {
 
     // ---- Member & Type Scope Helpers ----
 
-    fn lookup_field_ty_on_ty(&self, recv_ty: &Ty, field_name: &str) -> Option<Ty> {
+    fn lookup_field_ty_on_ty(
+        &self,
+        recv_ty: &Ty,
+        field_name: &str,
+        site_scope: NullnessScope,
+    ) -> Option<Ty> {
         let recv_fqn = recv_ty.erased_fqn()?;
         let mut chain = Vec::with_capacity(1);
         chain.push(recv_fqn.to_string());
@@ -2003,14 +2191,26 @@ impl<'a> InferCtx<'a> {
                 }) {
                     let m = &tree.members[mid];
                     if m.kind == MemberKind::EnumConstant {
-                        return Some(Ty::raw_class(owner_fqn));
+                        let member_scope =
+                            effective_nullness_scope_for_member(self.db, &owner_fqn, m.nullness_scope);
+                        let ty = Ty::raw_class(owner_fqn);
+                        return Some(
+                            if matches!(member_scope, NullnessScope::NonNullByDefault(_))
+                                || matches!(site_scope, NullnessScope::NonNullByDefault(_))
+                            {
+                                ty.with_nullability(Nullability::NonNull)
+                            } else {
+                                ty
+                            },
+                        );
                     }
                     let raw = m.type_ref.as_deref()?;
                     let scope = type_param_bounds_of_fqn(self.db, &owner_fqn);
-                    let raw_ty = resolve_type_ref_in_file_for_owner(
+                    let raw_ty = resolve_type_ref_in_file_for_member(
                         self.db,
                         fid,
                         Some(&owner_fqn),
+                        m.nullness_scope,
                         raw,
                         &scope,
                     );
@@ -2029,12 +2229,31 @@ impl<'a> InferCtx<'a> {
                         && m.name == field_name
                 }) {
                     if m.kind == MemberKind::EnumConstant {
-                        return Some(Ty::raw_class(owner_fqn));
+                        let member_scope = effective_nullness_scope_for_binary_member(
+                            &self.classpath,
+                            bin,
+                            m.nullness_scope,
+                        );
+                        let ty = Ty::raw_class(owner_fqn);
+                        return Some(
+                            if matches!(member_scope, NullnessScope::NonNullByDefault(_))
+                                || matches!(site_scope, NullnessScope::NonNullByDefault(_))
+                            {
+                                ty.with_nullability(Nullability::NonNull)
+                            } else {
+                                ty
+                            },
+                        );
                     }
                     let raw = m.type_ref.as_deref()?;
                     let scope = type_param_bounds_of_fqn(self.db, &owner_fqn);
-                    let raw_ty =
-                        resolve_binary_type_ref_for_owner(&self.classpath, bin, raw, &scope);
+                    let raw_ty = resolve_binary_type_ref_for_member(
+                        &self.classpath,
+                        bin,
+                        m.nullness_scope,
+                        raw,
+                        &scope,
+                    );
                     if m.is_static {
                         return Some(raw_ty);
                     }
@@ -2058,6 +2277,26 @@ impl<'a> InferCtx<'a> {
     }
 
     fn target_ty(&self, target: &ResolvedTarget, subst: &Substitution) -> Ty {
+        self.target_ty_with_site_scope(target, subst, NullnessScope::Inherited)
+    }
+
+    fn target_ty_with_site_scope(
+        &self,
+        target: &ResolvedTarget,
+        subst: &Substitution,
+        site_scope: NullnessScope,
+    ) -> Ty {
+        let enum_const_ty = |owner_fqn: &str, member_scope: NullnessScope| {
+            let eff = effective_nullness_scope_for_member(self.db, owner_fqn, member_scope);
+            let ty = Ty::raw_class(owner_fqn);
+            if matches!(eff, NullnessScope::NonNullByDefault(_))
+                || matches!(site_scope, NullnessScope::NonNullByDefault(_))
+            {
+                ty.with_nullability(Nullability::NonNull)
+            } else {
+                ty
+            }
+        };
         let raw_ty = match target {
             ResolvedTarget::IndexedType(fid, tid) => {
                 let fqn = self.db.file_item_tree(*fid).types[*tid]
@@ -2075,7 +2314,10 @@ impl<'a> InferCtx<'a> {
                 let tree = self.db.file_item_tree(*fid);
                 let m = &tree.members[*mid];
                 if m.kind == MemberKind::EnumConstant {
-                    return m.owner_type.as_ref().map_or(Ty::Unknown, Ty::raw_class);
+                    return m
+                        .owner_type
+                        .as_deref()
+                        .map_or(Ty::Unknown, |fqn| enum_const_ty(fqn, m.nullness_scope));
                 }
                 let Some(raw) = m.type_ref.as_deref() else {
                     return Ty::Unknown;
@@ -2085,25 +2327,30 @@ impl<'a> InferCtx<'a> {
                     .as_deref()
                     .map(|fqn| type_param_bounds_of_fqn(self.db, fqn))
                     .unwrap_or_default();
-                resolve_type_ref_in_file_for_owner(
+                resolve_type_ref_in_file_for_member(
                     self.db,
                     *fid,
                     m.owner_type.as_deref(),
+                    m.nullness_scope,
                     raw,
                     &scope,
                 )
             }
             ResolvedTarget::LocalMember(m) => {
                 if m.kind == MemberKind::EnumConstant {
-                    return m.owner_type.as_ref().map_or(Ty::Unknown, Ty::raw_class);
+                    return m
+                        .owner_type
+                        .as_deref()
+                        .map_or(Ty::Unknown, |fqn| enum_const_ty(fqn, m.nullness_scope));
                 }
                 let Some(raw) = m.type_ref.as_deref() else {
                     return Ty::Unknown;
                 };
-                resolve_type_ref_in_file_for_owner(
+                resolve_type_ref_in_file_for_member(
                     self.db,
                     m.file_id,
                     m.owner_type.as_deref(),
+                    m.nullness_scope,
                     raw,
                     &BTreeMap::new(),
                 )
@@ -2119,13 +2366,19 @@ impl<'a> InferCtx<'a> {
                     return Ty::Unknown;
                 };
                 if m.kind == MemberKind::EnumConstant {
-                    return Ty::raw_class(owner_fqn);
+                    return enum_const_ty(owner_fqn, m.nullness_scope);
                 }
                 let Some(raw) = m.type_ref.as_deref() else {
                     return Ty::Unknown;
                 };
                 let scope = type_param_bounds_of_fqn(self.db, owner_fqn);
-                resolve_binary_type_ref_for_owner(&self.classpath, bin, raw, &scope)
+                resolve_binary_type_ref_for_member(
+                    &self.classpath,
+                    bin,
+                    m.nullness_scope,
+                    raw,
+                    &scope,
+                )
             }
             _ => return Ty::Unknown,
         };
@@ -2144,35 +2397,82 @@ impl<'a> InferCtx<'a> {
             scope.insert(k.clone(), v.clone());
         }
         match target {
-            ResolvedTarget::IndexedMember(fid, _) => {
-                resolve_type_ref_in_file_for_owner(self.db, *fid, Some(owner_fqn), raw, &scope)
+            ResolvedTarget::IndexedMember(fid, mid) => {
+                let m_scope = self.db.file_item_tree(*fid).members[*mid].nullness_scope;
+                resolve_type_ref_in_file_for_member(
+                    self.db,
+                    *fid,
+                    Some(owner_fqn),
+                    m_scope,
+                    raw,
+                    &scope,
+                )
             }
-            ResolvedTarget::BinaryMember { .. } => {
+            ResolvedTarget::BinaryMember { member_index, .. } => {
                 if let Some(bin) = self.classpath.type_by_fqn(owner_fqn) {
-                    resolve_binary_type_ref_for_owner(&self.classpath, bin, raw, &scope)
+                    let m_scope = bin
+                        .members
+                        .get(*member_index)
+                        .map_or(NullnessScope::Inherited, |m| m.nullness_scope);
+                    resolve_binary_type_ref_for_member(&self.classpath, bin, m_scope, raw, &scope)
                 } else {
                     Ty::Unknown
                 }
             }
-            ResolvedTarget::LocalMember(m) => {
-                resolve_type_ref_in_file_for_owner(self.db, m.file_id, Some(owner_fqn), raw, &scope)
-            }
+            ResolvedTarget::LocalMember(m) => resolve_type_ref_in_file_for_member(
+                self.db,
+                m.file_id,
+                Some(owner_fqn),
+                m.nullness_scope,
+                raw,
+                &scope,
+            ),
             _ => Ty::Unknown,
         }
     }
 
+    fn resolve_explicit_type_node(
+        &self,
+        type_node: &SyntaxNode,
+        dims_owner: &SyntaxNode,
+        mod_holder: &SyntaxNode,
+        is_local_root: bool,
+    ) -> Ty {
+        let mod_null = extract_modifier_nullability(mod_holder, &self.import_resolver);
+        let (raw, _) = render_type_with_dims_and_nullability(
+            type_node,
+            dims_owner,
+            mod_null,
+            false,
+            &self.import_resolver,
+        );
+        self.resolve_type_str_with_local(&raw, dims_owner, is_local_root)
+    }
+
     fn resolve_type_node(&self, type_node: &SyntaxNode, site_node: &SyntaxNode) -> Ty {
-        let raw = collapsed_text(type_node);
+        let raw = render_type_node(type_node, &self.import_resolver);
         self.resolve_type_str(&raw, site_node)
     }
 
     fn resolve_type_str(&self, raw: &str, site_node: &SyntaxNode) -> Ty {
+        self.resolve_type_str_with_local(raw, site_node, false)
+    }
+
+    fn resolve_type_str_with_local(
+        &self,
+        raw: &str,
+        site_node: &SyntaxNode,
+        is_local_root: bool,
+    ) -> Ty {
         let scope = type_params_in_scope_at(self.db, &self.file_tree, &self.ast_id_map, site_node);
         let owner_fqn = enclosing_type_fqn(&self.file_tree, &self.ast_id_map, site_node);
-        resolve_type_ref_in_file_for_owner(
+        let nullness_scope = self.effective_scope_at(site_node);
+        resolve_type_ref_in_file_with_scope(
             self.db,
             self.file_id,
             owner_fqn.as_deref(),
+            nullness_scope,
+            is_local_root,
             raw,
             &scope,
         )
@@ -2182,25 +2482,36 @@ impl<'a> InferCtx<'a> {
         let Some(targs_node) = call_node.children().find(|n| n.kind() == TYPE_ARGS) else {
             return Vec::new();
         };
-        let raw = collapsed_text(&targs_node);
+        let rendered_args: Vec<String> = targs_node
+            .children()
+            .filter(|n| is_type_node(n.kind()) || n.kind() == WILDCARD_TYPE)
+            .map(|arg| render_type_node(&arg, &self.import_resolver))
+            .collect();
+        if rendered_args.is_empty() {
+            return Vec::new();
+        }
         // Parse `Dummy<...>` via `parse_type_ref` to reuse wildcard/nested arg parsing cleanly.
-        let dummy = format!("__Dummy{raw}");
+        let dummy = format!("__Dummy<{}>", rendered_args.join(", "));
         let scope = type_params_in_scope_at(self.db, &self.file_tree, &self.ast_id_map, call_node);
         let owner_fqn = enclosing_type_fqn(&self.file_tree, &self.ast_id_map, call_node);
+        let nullness_scope = self.effective_scope_at(call_node);
         let ty = parse_type_ref(&dummy, &mut |segs| {
             if segs == ["__Dummy"] {
                 Some(Ty::raw_class("__Dummy"))
             } else {
                 let joined = segs.join(".");
-                Some(resolve_type_ref_in_file_for_owner(
+                Some(resolve_type_ref_in_file_with_scope(
                     self.db,
                     self.file_id,
                     owner_fqn.as_deref(),
+                    nullness_scope,
+                    false,
                     &joined,
                     &scope,
                 ))
             }
         });
+        let ty = apply_nullness_scope(ty, nullness_scope, false);
         match ty {
             Ty::Class { type_args, .. } => type_args,
             _ => Vec::new(),
@@ -2212,7 +2523,7 @@ impl<'a> InferCtx<'a> {
         path_type: &SyntaxNode,
         site_node: &SyntaxNode,
     ) -> Option<Vec<TypeArg>> {
-        let raw = collapsed_text(path_type);
+        let raw = render_type_node(path_type, &self.import_resolver);
         let ty = self.resolve_type_str(&raw, site_node);
         match ty {
             Ty::Class { type_args, .. } => Some(type_args),
@@ -2233,25 +2544,17 @@ impl<'a> InferCtx<'a> {
         let type_args = tp_names
             .into_iter()
             .map(|tp| {
-                let bounds = tp_bounds
-                    .get(&tp)
-                    .map(|raw_bounds| {
-                        raw_bounds
-                            .iter()
-                            .filter_map(|b| {
-                                let resolved = resolve_type_ref_in_file_for_owner(
-                                    self.db,
-                                    self.file_id,
-                                    Some(fqn),
-                                    b,
-                                    &tp_bounds,
-                                );
-                                (!matches!(resolved, Ty::Unknown)).then_some(resolved)
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                TypeArg::Type(Ty::type_var(tp, bounds))
+                let tv = resolve_type_ref_in_file_for_owner(
+                    self.db,
+                    self.file_id,
+                    Some(fqn),
+                    tp.as_str(),
+                    &tp_bounds,
+                );
+                match tv {
+                    t @ Ty::TypeVar { .. } => TypeArg::Type(t),
+                    _ => TypeArg::Type(Ty::type_var(tp, Vec::new())),
+                }
             })
             .collect();
         Ty::class(fqn, type_args)
@@ -2331,7 +2634,102 @@ impl<'a> InferCtx<'a> {
 
 // ---- Pure CST helpers ----
 
-fn infer_literal_ty(literal: &SyntaxNode) -> Ty {
+pub(crate) fn effective_nullness_scope_at(
+    db: &dyn DefDatabase,
+    file_id: FileId,
+    node: &SyntaxNode,
+) -> NullnessScope {
+    let file_tree = db.file_item_tree(file_id);
+    let ast_id_map = db.ast_id_map(file_id);
+    let resolver = ImportResolver::from_imports(
+        file_tree.package.as_deref(),
+        file_tree
+            .imports
+            .iter()
+            .map(|(_, imp)| (imp.kind, imp.path.as_slice())),
+    );
+    effective_nullness_scope_at_inner(db, file_id, &file_tree, &ast_id_map, &resolver, node)
+}
+
+fn effective_nullness_scope_at_inner(
+    db: &dyn DefDatabase,
+    file_id: FileId,
+    file_tree: &FileItemTree,
+    ast_id_map: &AstIdMap,
+    import_resolver: &ImportResolver,
+    node: &SyntaxNode,
+) -> NullnessScope {
+    for ancestor in node.ancestors() {
+        match ancestor.kind() {
+            METHOD_DECL | CONSTRUCTOR_DECL => {
+                if let Some(id) = ast_id_map.find_by_full(ancestor.text_range())
+                    && let Some((_, m)) = file_tree.find_member_by_ast_id(id)
+                {
+                    if m.nullness_scope != NullnessScope::Inherited {
+                        return m.nullness_scope;
+                    }
+                } else {
+                    let s = extract_modifier_nullness_scope(&ancestor, import_resolver);
+                    if s != NullnessScope::Inherited {
+                        return s;
+                    }
+                }
+            }
+            VARIABLE_DECLARATOR if ancestor.parent().is_some_and(|p| p.kind() == FIELD_DECL) => {
+                if let Some(id) = ast_id_map.find_by_full(ancestor.text_range())
+                    && let Some((_, m)) = file_tree.find_member_by_ast_id(id)
+                {
+                    if m.nullness_scope != NullnessScope::Inherited {
+                        return m.nullness_scope;
+                    }
+                } else if let Some(field_node) = ancestor.parent() {
+                    let s = extract_modifier_nullness_scope(&field_node, import_resolver);
+                    if s != NullnessScope::Inherited {
+                        return s;
+                    }
+                }
+            }
+            FIELD_DECL => {
+                if let Some(decl) = ancestor.children().find(|n| n.kind() == VARIABLE_DECLARATOR)
+                    && let Some(id) = ast_id_map.find_by_full(decl.text_range())
+                    && let Some((_, m)) = file_tree.find_member_by_ast_id(id)
+                {
+                    if m.nullness_scope != NullnessScope::Inherited {
+                        return m.nullness_scope;
+                    }
+                } else {
+                    let s = extract_modifier_nullness_scope(&ancestor, import_resolver);
+                    if s != NullnessScope::Inherited {
+                        return s;
+                    }
+                }
+            }
+            k if TypeKind::from_syntax(k).is_some() => {
+                if let Some((_, ty)) = ast_id_map
+                    .find_by_full(ancestor.text_range())
+                    .and_then(|id| file_tree.find_type_by_ast_id(id))
+                {
+                    let s = effective_nullness_scope_for_type(db, &ty.qualified_name);
+                    if s != NullnessScope::Inherited {
+                        return s;
+                    }
+                    if ty.nullness_scope != NullnessScope::Inherited {
+                        return ty.nullness_scope;
+                    }
+                    return effective_nullness_scope_for_file(db, file_id);
+                }
+                let s = extract_modifier_nullness_scope(&ancestor, import_resolver);
+                if s != NullnessScope::Inherited {
+                    return s;
+                }
+            }
+            _ => {}
+        }
+    }
+    effective_nullness_scope_for_file(db, file_id)
+}
+
+fn infer_literal_ty(literal: &SyntaxNode, site_scope: NullnessScope) -> Ty {
     let Some(tok) = literal
         .children_with_tokens()
         .filter_map(|e| e.into_token())
@@ -2345,7 +2743,14 @@ fn infer_literal_ty(literal: &SyntaxNode) -> Ty {
         FLOAT_NUMBER => Ty::Primitive(PrimitiveType::Float),
         DOUBLE_NUMBER => Ty::Primitive(PrimitiveType::Double),
         CHAR_LITERAL => Ty::Primitive(PrimitiveType::Char),
-        STRING_LITERAL | TEXT_BLOCK => Ty::string(),
+        STRING_LITERAL | TEXT_BLOCK => {
+            let s = Ty::string();
+            if matches!(site_scope, NullnessScope::NonNullByDefault(_)) {
+                s.with_nullability(Nullability::NonNull)
+            } else {
+                s
+            }
+        }
         TRUE_KW | FALSE_KW => Ty::Primitive(PrimitiveType::Boolean),
         NULL_KW => Ty::Null,
         _ => Ty::Unknown,
@@ -2524,20 +2929,41 @@ fn collect_type_param_bounds_from_node(
     }
 }
 
-pub(crate) fn resolve_params_in_file(
+pub(crate) fn resolve_params_in_file_for_member(
     db: &dyn DefDatabase,
     file_id: FileId,
     owner_fqn: Option<&str>,
+    member_scope: NullnessScope,
     params: &[ParamSummary],
     scope: &BTreeMap<SmolStr, Vec<String>>,
 ) -> Vec<(Ty, bool)> {
+    let eff_scope = if member_scope != NullnessScope::Inherited {
+        member_scope
+    } else if let Some(fqn) = owner_fqn {
+        effective_nullness_scope_for_type(db, fqn)
+    } else {
+        effective_nullness_scope_for_file(db, file_id)
+    };
     params
         .iter()
         .map(|p| {
-            let base =
-                resolve_type_ref_in_file_for_owner(db, file_id, owner_fqn, &p.type_ref, scope);
+            let base = resolve_type_ref_in_file_for_member(
+                db,
+                file_id,
+                owner_fqn,
+                member_scope,
+                &p.type_ref,
+                scope,
+            );
             let ty = if p.is_varargs {
-                Ty::array(base)
+                let arr = Ty::array(base);
+                if let Some((n, _)) = p.decl_nullability {
+                    arr.with_nullability(n)
+                } else if matches!(eff_scope, NullnessScope::NonNullByDefault(_)) {
+                    arr.with_nullability(Nullability::NonNull)
+                } else {
+                    arr
+                }
             } else {
                 base
             };
@@ -2546,18 +2972,33 @@ pub(crate) fn resolve_params_in_file(
         .collect()
 }
 
-pub(crate) fn resolve_params_in_binary(
+pub(crate) fn resolve_params_in_binary_for_member(
     classpath: &ClasspathIndex,
     owner: &BinaryTypeSymbol,
+    member_scope: NullnessScope,
     params: &[ParamSummary],
     scope: &BTreeMap<SmolStr, Vec<String>>,
 ) -> Vec<(Ty, bool)> {
+    let eff_scope = effective_nullness_scope_for_binary_member(classpath, owner, member_scope);
     params
         .iter()
         .map(|p| {
-            let base = resolve_binary_type_ref_for_owner(classpath, owner, &p.type_ref, scope);
+            let base = resolve_binary_type_ref_for_member(
+                classpath,
+                owner,
+                member_scope,
+                &p.type_ref,
+                scope,
+            );
             let ty = if p.is_varargs {
-                Ty::array(base)
+                let arr = Ty::array(base);
+                if let Some((n, _)) = p.decl_nullability {
+                    arr.with_nullability(n)
+                } else if matches!(eff_scope, NullnessScope::NonNullByDefault(_)) {
+                    arr.with_nullability(Nullability::NonNull)
+                } else {
+                    arr
+                }
             } else {
                 base
             };
@@ -2630,15 +3071,16 @@ pub(crate) fn resolve_field_access_target(
     attach_substituted_detail(db, target, &subst, is_raw)
 }
 
+pub(crate) fn format_member_detail(db: &dyn DefDatabase, target: &ResolvedTarget) -> Option<SymbolDetail> {
+    format_substituted_detail(db, target, &Substitution::default(), false)
+}
+
 fn attach_substituted_detail(
     db: &dyn DefDatabase,
     target: ResolvedTarget,
     subst: &Substitution,
     is_raw: bool,
 ) -> ResolvedTarget {
-    if subst.map.is_empty() && !is_raw {
-        return target;
-    }
     if let Some(detail) = format_substituted_detail(db, &target, subst, is_raw) {
         ResolvedTarget::WithDetail {
             inner: Box::new(target),
@@ -2660,8 +3102,10 @@ fn format_substituted_detail(
         ResolvedTarget::IndexedMember(fid, mid) => {
             let tree = db.file_item_tree(*fid);
             let m = &tree.members[*mid];
-            let owner_fqn = m.owner_type.as_deref()?;
-            let mut scope = type_param_bounds_of_fqn(db, owner_fqn);
+            let owner_fqn = m.owner_type.as_deref();
+            let mut scope = owner_fqn
+                .map(|fqn| type_param_bounds_of_fqn(db, fqn))
+                .unwrap_or_default();
             for tp in &m.type_params {
                 scope.insert(
                     tp.clone(),
@@ -2669,7 +3113,14 @@ fn format_substituted_detail(
                 );
             }
             let resolve_fn = |raw: &str| {
-                resolve_type_ref_in_file_for_owner(db, *fid, Some(owner_fqn), raw, &scope)
+                resolve_type_ref_in_file_for_member(
+                    db,
+                    *fid,
+                    owner_fqn,
+                    m.nullness_scope,
+                    raw,
+                    &scope,
+                )
             };
             build_substituted_member_detail(m.kind, m.type_ref.as_deref(), &m.params, subst, is_raw, &resolve_fn)
         }
@@ -2687,10 +3138,11 @@ fn format_substituted_detail(
                 );
             }
             let resolve_fn = |raw: &str| {
-                resolve_type_ref_in_file_for_owner(
+                resolve_type_ref_in_file_for_member(
                     db,
                     m.file_id,
                     (!owner_fqn.is_empty()).then_some(owner_fqn),
+                    m.nullness_scope,
                     raw,
                     &scope,
                 )
@@ -2711,7 +3163,7 @@ fn format_substituted_detail(
                 );
             }
             let resolve_fn = |raw: &str| {
-                resolve_binary_type_ref_for_owner(&classpath, bin, raw, &scope)
+                resolve_binary_type_ref_for_member(&classpath, bin, m.nullness_scope, raw, &scope)
             };
             build_substituted_member_detail(m.kind, m.type_ref.as_deref(), &m.params, subst, is_raw, &resolve_fn)
         }
@@ -2740,7 +3192,7 @@ fn build_substituted_member_detail(
             let raw = type_ref?;
             let orig = resolve_fn(raw);
             let sub = apply_subst(&orig);
-            if sub != orig && !matches!(sub, Ty::Unknown) {
+            if (sub != orig || ty_has_explicit_nullability(&sub)) && !matches!(sub, Ty::Unknown) {
                 Some(SymbolDetail::TypeRef(sub.display_short()))
             } else {
                 None
@@ -2751,7 +3203,8 @@ fn build_substituted_member_detail(
             let return_type = type_ref.map(|raw| {
                 let orig = resolve_fn(raw);
                 let sub = apply_subst(&orig);
-                if sub != orig && !matches!(sub, Ty::Unknown) {
+                if (sub != orig || ty_has_explicit_nullability(&sub)) && !matches!(sub, Ty::Unknown)
+                {
                     changed = true;
                     sub.display_short()
                 } else {
@@ -2762,7 +3215,9 @@ fn build_substituted_member_detail(
             for p in params {
                 let orig = resolve_fn(&p.type_ref);
                 let sub = apply_subst(&orig);
-                let ty_str = if sub != orig && !matches!(sub, Ty::Unknown) {
+                let ty_str = if (sub != orig || ty_has_explicit_nullability(&sub))
+                    && !matches!(sub, Ty::Unknown)
+                {
                     changed = true;
                     sub.display_short()
                 } else {
@@ -2772,6 +3227,7 @@ fn build_substituted_member_detail(
                     name: p.name.clone(),
                     type_ref: ty_str,
                     is_varargs: p.is_varargs,
+                    decl_nullability: p.decl_nullability,
                 });
             }
             changed.then(|| SymbolDetail::Method {
@@ -2785,7 +3241,9 @@ fn build_substituted_member_detail(
             for p in params {
                 let orig = resolve_fn(&p.type_ref);
                 let sub = apply_subst(&orig);
-                let ty_str = if sub != orig && !matches!(sub, Ty::Unknown) {
+                let ty_str = if (sub != orig || ty_has_explicit_nullability(&sub))
+                    && !matches!(sub, Ty::Unknown)
+                {
                     changed = true;
                     sub.display_short()
                 } else {
@@ -2795,6 +3253,7 @@ fn build_substituted_member_detail(
                     name: p.name.clone(),
                     type_ref: ty_str,
                     is_varargs: p.is_varargs,
+                    decl_nullability: p.decl_nullability,
                 });
             }
             changed.then(|| SymbolDetail::Constructor {
@@ -2852,6 +3311,7 @@ mod tests {
             is_static: false,
             is_final: false,
             is_abstract: kind == TypeKind::Interface,
+            nullness_scope: crate::NullnessScope::Inherited,
             type_params: type_params.iter().map(|s| SmolStr::new(*s)).collect(),
             type_param_bounds: BTreeMap::new(),
             super_class: super_class.map(str::to_string),
@@ -2883,6 +3343,8 @@ mod tests {
             is_public: true,
             is_static,
             is_abstract,
+            nullness_scope: crate::NullnessScope::Inherited,
+            decl_nullability: None,
             type_params: type_params.iter().map(|s| SmolStr::new(*s)).collect(),
             type_param_bounds: BTreeMap::new(),
             type_ref: Some(ret.to_string()),
@@ -2892,6 +3354,7 @@ mod tests {
                     name: Some(SmolStr::new(*n)),
                     type_ref: (*ty).to_string(),
                     is_varargs: *va,
+                    decl_nullability: None,
                 })
                 .collect(),
             is_varargs: params.last().is_some_and(|(_, _, va)| *va),
@@ -2907,6 +3370,8 @@ mod tests {
             is_public: true,
             is_static: false,
             is_abstract: false,
+            nullness_scope: crate::NullnessScope::Inherited,
+            decl_nullability: None,
             type_params: Vec::new(),
             type_param_bounds: BTreeMap::new(),
             type_ref: None,
@@ -2916,6 +3381,7 @@ mod tests {
                     name: Some(SmolStr::new(*n)),
                     type_ref: (*ty).to_string(),
                     is_varargs: *va,
+                    decl_nullability: None,
                 })
                 .collect(),
             is_varargs: params.last().is_some_and(|(_, _, va)| *va),
@@ -3728,5 +4194,144 @@ class Nav {
             assert_eq!(td.qualified_name, "com.example.User", "at {marker}");
             assert_eq!(td.file_id, Some(fid));
         }
+    }
+
+    #[test]
+    fn nullability_var_lub_local_root_and_binary_calls() {
+        let user_src = "\
+package com.example;
+import org.jspecify.annotations.*;
+
+@NullMarked
+public class User {
+    public String getName() { return \"\"; }
+}
+";
+        let app_src = "\
+package com.example;
+import org.jspecify.annotations.*;
+import java.util.List;
+
+enum Role { ADMIN, GUEST }
+
+@NullMarked
+class MarkedApp {
+    void run(boolean flag, List<String> /*param_list*/xs, BinaryRepo repo) {
+        var /*v_user*/u = new User();
+        var /*v_lub*/maybe = flag ? u : null;
+        var /*v_str*/s = \"hello\";
+        var /*v_cls*/c = User.class;
+        var /*v_this*/self = this;
+        var /*v_enum*/role = Role.ADMIN;
+        String /*loc_plain*/plainLocal = \"x\";
+        @Nullable String /*loc_q*/nullableLocal = null;
+        List<String> /*loc_list*/listLocal = xs;
+        var /*v_bin_find*/found = repo./*call_find*/findUser(\"1\");
+        var /*v_bin_req*/req = repo./*call_req*/requireUser(\"1\");
+    }
+
+    @NullUnmarked
+    void legacyMethod(User /*unmarked_param*/u) {
+        var /*unmarked_var*/x = new User();
+    }
+}
+
+class UnmarkedCaller {
+    void call(BinaryRepo repo) {
+        var /*ext_find*/f = repo.findUser(\"1\");
+        var /*ext_req*/r = repo.requireUser(\"1\");
+        var /*ext_user*/u = new User();
+    }
+}
+";
+        let mut cp = rich_jdk_classpath();
+        let mut bin_repo = bin_cls(
+            "com.example.BinaryRepo",
+            TypeKind::Interface,
+            &[],
+            None,
+            None,
+            &[],
+            &[],
+            vec![
+                bin_method(
+                    "com.example.BinaryRepo",
+                    "findUser",
+                    false,
+                    true,
+                    &[],
+                    "com.example.User?",
+                    &[("id", "java.lang.String", false)],
+                ),
+                bin_method(
+                    "com.example.BinaryRepo",
+                    "requireUser",
+                    false,
+                    true,
+                    &[],
+                    "com.example.User",
+                    &[("id", "java.lang.String", false)],
+                ),
+            ],
+        );
+        bin_repo.nullness_scope =
+            crate::NullnessScope::NonNullByDefault(crate::NullabilitySource::JSpecify);
+        cp.insert_type(bin_repo);
+        cp.finalize();
+
+        let mut db = db_with_files(&[(1, user_src), (2, app_src)]);
+        db.set_classpath_index(Arc::new(cp));
+        let fid = FileId(2);
+
+        let check_var = |marker: &str, expected: &str| {
+            let res = resolve_at_offset(&db, fid, cursor(app_src, marker))
+                .unwrap_or_else(|| panic!("missing symbol at {marker}"));
+            assert_eq!(
+                res.detail,
+                Some(SymbolDetail::TypeRef(expected.to_string())),
+                "mismatch at {marker}"
+            );
+        };
+
+        check_var("/*param_list*/", "List<String!>!");
+        check_var("/*v_user*/", "User!");
+        check_var("/*v_lub*/", "User?");
+        check_var("/*v_str*/", "String!");
+        check_var("/*v_cls*/", "Class<User!>!");
+        check_var("/*v_this*/", "MarkedApp!");
+        check_var("/*v_enum*/", "Role!");
+        // JSpecify §3.2.5: local variable root is NOT forced NonNull, nested type args ARE.
+        check_var("/*loc_plain*/", "String");
+        check_var("/*loc_q*/", "String?");
+        check_var("/*loc_list*/", "List<String!>");
+        check_var("/*v_bin_find*/", "User?");
+        check_var("/*v_bin_req*/", "User!");
+
+        // `@NullUnmarked` method inside `@NullMarked` class resets defaulting.
+        check_var("/*unmarked_param*/", "User");
+        check_var("/*unmarked_var*/", "User");
+
+        // Unmarked caller still receives `User?` / `User!` from `@NullMarked` binary JAR methods,
+        // while its own `new User()` stays `User` (zero noise on unmarked code).
+        check_var("/*ext_find*/", "User?");
+        check_var("/*ext_req*/", "User!");
+        check_var("/*ext_user*/", "User");
+
+        let call_find = resolve_at_offset(&db, fid, cursor(app_src, "/*call_find*/")).unwrap();
+        assert_eq!(
+            call_find.detail,
+            Some(SymbolDetail::Method {
+                return_type: Some("User?".to_string()),
+                params: "(String! id)".to_string(),
+            })
+        );
+        let call_req = resolve_at_offset(&db, fid, cursor(app_src, "/*call_req*/")).unwrap();
+        assert_eq!(
+            call_req.detail,
+            Some(SymbolDetail::Method {
+                return_type: Some("User!".to_string()),
+                params: "(String! id)".to_string(),
+            })
+        );
     }
 }

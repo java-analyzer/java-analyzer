@@ -10,20 +10,20 @@ use la_arena::{Arena, Idx};
 use smol_str::SmolStr;
 use syntax::{
     SyntaxNode, TextRange,
-    ext::{
-        collapsed_text, has_modifier, is_type_node, name_child, path_segments, path_text,
-        type_child, type_text_with_dims,
-    },
+    ext::{has_modifier, is_type_node, name_child, path_segments, path_text, type_child},
     syntax_kind::SyntaxKind::{self, *},
 };
 
 use crate::{
     FileId,
     symbols::{
-        FileSymbols, ImportDecl, ImportKind, MemberKind, MemberSymbol, ParamSummary, TypeIdentity,
-        TypeKind, TypeSymbol, extract_import_parts, extract_params, extract_type_params_and_bounds,
-        format_params_signature, node_ident_text,
+        FileSymbols, ImportDecl, ImportKind, ImportResolver, MemberKind, MemberSymbol,
+        NullabilitySource, NullnessScope, ParamSummary, TypeIdentity, TypeKind, TypeSymbol,
+        extract_import_parts, extract_modifier_nullability, extract_modifier_nullness_scope,
+        extract_params, extract_type_params_and_bounds, format_params_signature, node_ident_text,
+        render_type_node, render_type_with_dims_and_nullability,
     },
+    ty::Nullability,
 };
 
 /// Source full and selection byte ranges for a single lowered declaration.
@@ -87,6 +87,7 @@ pub struct TypeItem {
     pub is_static: bool,
     pub is_abstract: bool,
     pub is_final: bool,
+    pub nullness_scope: NullnessScope,
     pub type_params: Vec<SmolStr>,
     /// Explicit `extends` bounds per type parameter (omits parameters with no explicit bounds).
     pub type_param_bounds: BTreeMap<SmolStr, Vec<String>>,
@@ -113,6 +114,8 @@ pub struct MemberItem {
     pub is_default: bool,
     pub is_abstract: bool,
     pub has_override: bool,
+    pub nullness_scope: NullnessScope,
+    pub decl_nullability: Option<(Nullability, NullabilitySource)>,
     pub type_params: Vec<SmolStr>,
     pub type_param_bounds: BTreeMap<SmolStr, Vec<String>>,
     pub type_ref: Option<String>,
@@ -136,6 +139,8 @@ pub type ImportId = Idx<ImportTree>;
 pub struct FileItemTree {
     pub file_id: FileId,
     pub package: Option<String>,
+    pub module_name: Option<SmolStr>,
+    pub nullness_scope: NullnessScope,
     pub imports: Arena<ImportTree>,
     pub types: Arena<TypeItem>,
     pub members: Arena<MemberItem>,
@@ -163,15 +168,21 @@ impl FileItemTree {
 /// without descending into method, constructor, or initializer bodies.
 pub(crate) fn lower_file_item_tree(file_id: FileId, root: &SyntaxNode) -> (FileItemTree, AstIdMap) {
     let mut package = None;
+    let mut package_node: Option<SyntaxNode> = None;
+    let mut module_name = None;
+    let mut module_node: Option<SyntaxNode> = None;
     let mut imports = Arena::new();
+    let mut raw_imports: Vec<(ImportKind, Vec<String>)> = Vec::new();
     let mut types = Arena::new();
     let mut members = Arena::new();
     let mut top_level_members = Vec::new();
     let mut map = AstIdMap::default();
+    let mut decl_nodes: Vec<SyntaxNode> = Vec::new();
 
     for child in root.children() {
         match child.kind() {
             PACKAGE_DECL if package.is_none() => {
+                package_node = Some(child.clone());
                 let segs = child
                     .children()
                     .find(|n| n.kind() == PATH)
@@ -181,6 +192,13 @@ pub(crate) fn lower_file_item_tree(file_id: FileId, root: &SyntaxNode) -> (FileI
                     package = Some(segs.join("."));
                 }
             }
+            MODULE_DECL if module_name.is_none() => {
+                module_name = child
+                    .children()
+                    .find(|n| n.kind() == PATH)
+                    .map(|p| SmolStr::new(path_text(&p)));
+                module_node = Some(child);
+            }
             IMPORT_DECL => {
                 let (kind, path) = extract_import_parts(&child);
                 let range = child.text_range();
@@ -188,8 +206,32 @@ pub(crate) fn lower_file_item_tree(file_id: FileId, root: &SyntaxNode) -> (FileI
                     full_range: range,
                     selection_range: range,
                 });
+                raw_imports.push((kind, path.clone()));
                 imports.alloc(ImportTree { kind, path, ast_id });
             }
+            kind if TypeKind::from_syntax(kind).is_some()
+                || matches!(kind, FIELD_DECL | METHOD_DECL) =>
+            {
+                decl_nodes.push(child);
+            }
+            _ => {}
+        }
+    }
+
+    let resolver = ImportResolver::from_imports(
+        package.as_deref(),
+        raw_imports.iter().map(|(k, p)| (*k, p.as_slice())),
+    );
+    let nullness_scope = if let Some(mod_node) = &module_node {
+        extract_modifier_nullness_scope(mod_node, &resolver)
+    } else if let Some(pkg_node) = &package_node {
+        extract_modifier_nullness_scope(pkg_node, &resolver)
+    } else {
+        NullnessScope::Inherited
+    };
+
+    for child in decl_nodes {
+        match child.kind() {
             kind if TypeKind::from_syntax(kind).is_some() => {
                 lower_type_decl(
                     file_id,
@@ -197,6 +239,7 @@ pub(crate) fn lower_file_item_tree(file_id: FileId, root: &SyntaxNode) -> (FileI
                     package.as_deref(),
                     None,
                     None,
+                    &resolver,
                     &mut types,
                     &mut members,
                     &mut map,
@@ -208,6 +251,7 @@ pub(crate) fn lower_file_item_tree(file_id: FileId, root: &SyntaxNode) -> (FileI
                     &child,
                     None,
                     None,
+                    &resolver,
                     &mut members,
                     &mut map,
                     &mut top_level_members,
@@ -220,6 +264,7 @@ pub(crate) fn lower_file_item_tree(file_id: FileId, root: &SyntaxNode) -> (FileI
                     None,
                     None,
                     MemberKind::Method,
+                    &resolver,
                     &mut members,
                     &mut map,
                 ) {
@@ -234,6 +279,8 @@ pub(crate) fn lower_file_item_tree(file_id: FileId, root: &SyntaxNode) -> (FileI
         FileItemTree {
             file_id,
             package,
+            module_name,
+            nullness_scope,
             imports,
             types,
             members,
@@ -270,9 +317,17 @@ pub(crate) fn file_symbols_from_item_tree(tree: &FileItemTree, map: &AstIdMap) -
     FileSymbols {
         file_id: tree.file_id,
         package: tree.package.clone(),
+        nullness_scope: tree.nullness_scope,
         imports,
         types,
         top_level_members,
+    }
+}
+
+fn resolver_for_node(node: &SyntaxNode) -> (Option<String>, ImportResolver) {
+    match node.ancestors().last() {
+        Some(root) if root.kind() == SOURCE_FILE => ImportResolver::from_syntax_root(&root),
+        _ => (None, ImportResolver::default()),
     }
 }
 
@@ -280,12 +335,14 @@ pub(crate) fn extract_local_type_symbol(file_id: FileId, node: &SyntaxNode) -> O
     let mut types = Arena::new();
     let mut members = Arena::new();
     let mut map = AstIdMap::default();
+    let (_pkg, resolver) = resolver_for_node(node);
     lower_type_decl(
         file_id,
         node,
         None,
         None,
         None,
+        &resolver,
         &mut types,
         &mut members,
         &mut map,
@@ -304,11 +361,13 @@ pub(crate) fn extract_field_decl(
     let mut members = Arena::new();
     let mut map = AstIdMap::default();
     let mut ids = Vec::new();
+    let (_pkg, resolver) = resolver_for_node(node);
     lower_field_decl(
         file_id,
         node,
         owner_fqn,
         owner_kind,
+        &resolver,
         &mut members,
         &mut map,
         &mut ids,
@@ -327,7 +386,17 @@ pub(crate) fn extract_method_or_ctor(
 ) -> Option<MemberSymbol> {
     let mut members = Arena::new();
     let mut map = AstIdMap::default();
-    let id = lower_method_or_ctor(file_id, node, owner_fqn, None, kind, &mut members, &mut map)?;
+    let (_pkg, resolver) = resolver_for_node(node);
+    let id = lower_method_or_ctor(
+        file_id,
+        node,
+        owner_fqn,
+        None,
+        kind,
+        &resolver,
+        &mut members,
+        &mut map,
+    )?;
     Some(member_symbol_from_item(&members[id], &map))
 }
 
@@ -348,6 +417,7 @@ fn type_symbol_from_item(ty: &TypeItem, members: &Arena<MemberItem>, map: &AstId
         is_static: ty.is_static,
         is_abstract: ty.is_abstract,
         is_final: ty.is_final,
+        nullness_scope: ty.nullness_scope,
         type_params: ty.type_params.clone(),
         type_param_bounds: ty.type_param_bounds.clone(),
         extends: ty.extends.clone(),
@@ -371,6 +441,8 @@ fn member_symbol_from_item(item: &MemberItem, map: &AstIdMap) -> MemberSymbol {
         is_default: item.is_default,
         is_abstract: item.is_abstract,
         has_override: item.has_override,
+        nullness_scope: item.nullness_scope,
+        decl_nullability: item.decl_nullability,
         type_params: item.type_params.clone(),
         type_param_bounds: item.type_param_bounds.clone(),
         type_ref: item.type_ref.clone(),
@@ -380,7 +452,11 @@ fn member_symbol_from_item(item: &MemberItem, map: &AstIdMap) -> MemberSymbol {
     }
 }
 
-fn extract_clause_types(type_node: &SyntaxNode, clause_kind: SyntaxKind) -> Vec<String> {
+fn extract_clause_types(
+    type_node: &SyntaxNode,
+    clause_kind: SyntaxKind,
+    resolver: &ImportResolver,
+) -> Vec<String> {
     type_node
         .children()
         .find(|n| n.kind() == clause_kind)
@@ -388,7 +464,7 @@ fn extract_clause_types(type_node: &SyntaxNode, clause_kind: SyntaxKind) -> Vec<
             clause
                 .children()
                 .filter(|n| is_type_node(n.kind()))
-                .map(|t| collapsed_text(&t))
+                .map(|t| render_type_node(&t, resolver))
                 .collect()
         })
         .unwrap_or_default()
@@ -417,6 +493,7 @@ fn lower_type_decl(
     package: Option<&str>,
     enclosing_fqn: Option<&str>,
     enclosing_kind: Option<TypeKind>,
+    resolver: &ImportResolver,
     types: &mut Arena<TypeItem>,
     members: &mut Arena<MemberItem>,
     map: &mut AstIdMap,
@@ -451,10 +528,11 @@ fn lower_type_decl(
     } else {
         TypeIdentity::Identity
     };
-    let (type_params, type_param_bounds) = extract_type_params_and_bounds(node);
-    let extends = extract_clause_types(node, EXTENDS_CLAUSE);
-    let implements = extract_clause_types(node, IMPLEMENTS_CLAUSE);
-    let permits = extract_clause_types(node, PERMITS_CLAUSE);
+    let nullness_scope = extract_modifier_nullness_scope(node, resolver);
+    let (type_params, type_param_bounds) = extract_type_params_and_bounds(node, resolver);
+    let extends = extract_clause_types(node, EXTENDS_CLAUSE, resolver);
+    let implements = extract_clause_types(node, IMPLEMENTS_CLAUSE, resolver);
+    let permits = extract_clause_types(node, PERMITS_CLAUSE, resolver);
     let ast_id = map.alloc(AstRange {
         full_range: node.text_range(),
         selection_range: name_node.text_range(),
@@ -469,6 +547,7 @@ fn lower_type_decl(
         is_static,
         is_abstract,
         is_final,
+        nullness_scope,
         type_params,
         type_param_bounds,
         extends,
@@ -487,7 +566,20 @@ fn lower_type_decl(
             RECORD_COMPONENT_LIST => {
                 for comp in part.children().filter(|n| n.kind() == RECORD_COMPONENT) {
                     if let Some(comp_name) = name_child(&comp) {
-                        let type_ref = type_child(&comp).map(|t| type_text_with_dims(&t, &comp));
+                        let mod_nullability = extract_modifier_nullability(&comp, resolver);
+                        let (type_ref, decl_nullability) = match type_child(&comp) {
+                            Some(t) => {
+                                let (tr, dn) = render_type_with_dims_and_nullability(
+                                    &t,
+                                    &comp,
+                                    mod_nullability,
+                                    false,
+                                    resolver,
+                                );
+                                (Some(tr), dn)
+                            }
+                            None => (None, None),
+                        };
                         let comp_ast_id = map.alloc(AstRange {
                             full_range: comp.text_range(),
                             selection_range: comp_name.text_range(),
@@ -501,6 +593,8 @@ fn lower_type_decl(
                             is_default: false,
                             is_abstract: false,
                             has_override: false,
+                            nullness_scope: NullnessScope::Inherited,
+                            decl_nullability,
                             type_params: Vec::new(),
                             type_param_bounds: BTreeMap::new(),
                             type_ref,
@@ -529,6 +623,8 @@ fn lower_type_decl(
                                     is_default: false,
                                     is_abstract: false,
                                     has_override: false,
+                                    nullness_scope: NullnessScope::Inherited,
+                                    decl_nullability: None,
                                     type_params: Vec::new(),
                                     type_param_bounds: BTreeMap::new(),
                                     type_ref: None,
@@ -544,6 +640,7 @@ fn lower_type_decl(
                                 &member_node,
                                 Some(&qualified_name),
                                 Some(kind),
+                                resolver,
                                 members,
                                 map,
                                 &mut type_members,
@@ -556,6 +653,7 @@ fn lower_type_decl(
                                 Some(&qualified_name),
                                 Some(kind),
                                 MemberKind::Method,
+                                resolver,
                                 members,
                                 map,
                             ) {
@@ -569,6 +667,7 @@ fn lower_type_decl(
                                 Some(&qualified_name),
                                 Some(kind),
                                 MemberKind::Constructor,
+                                resolver,
                                 members,
                                 map,
                             ) {
@@ -582,6 +681,7 @@ fn lower_type_decl(
                                 package,
                                 Some(&qualified_name),
                                 Some(kind),
+                                resolver,
                                 types,
                                 members,
                                 map,
@@ -603,11 +703,13 @@ fn lower_type_decl(
     Some(name)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_field_decl(
     file_id: FileId,
     node: &SyntaxNode,
     owner_fqn: Option<&str>,
     owner_kind: Option<TypeKind>,
+    resolver: &ImportResolver,
     members: &mut Arena<MemberItem>,
     map: &mut AstIdMap,
     out: &mut Vec<MemberId>,
@@ -615,14 +717,26 @@ fn lower_field_decl(
     let base_type = type_child(node);
     let is_static = has_modifier(node, STATIC_KW)
         || matches!(owner_kind, Some(TypeKind::Interface | TypeKind::Annotation));
+    let nullness_scope = extract_modifier_nullness_scope(node, resolver);
+    let mod_nullability = extract_modifier_nullability(node, resolver);
 
     for declarator in node.children().filter(|n| n.kind() == VARIABLE_DECLARATOR) {
         let Some(name_node) = name_child(&declarator) else {
             continue;
         };
-        let type_ref = base_type
-            .as_ref()
-            .map(|t| type_text_with_dims(t, &declarator));
+        let (type_ref, decl_nullability) = match base_type.as_ref() {
+            Some(t) => {
+                let (tr, dn) = render_type_with_dims_and_nullability(
+                    t,
+                    &declarator,
+                    mod_nullability,
+                    false,
+                    resolver,
+                );
+                (Some(tr), dn)
+            }
+            None => (None, None),
+        };
         let ast_id = map.alloc(AstRange {
             full_range: declarator.text_range(),
             selection_range: name_node.text_range(),
@@ -636,6 +750,8 @@ fn lower_field_decl(
             is_default: false,
             is_abstract: false,
             has_override: false,
+            nullness_scope,
+            decl_nullability,
             type_params: Vec::new(),
             type_param_bounds: BTreeMap::new(),
             type_ref,
@@ -646,12 +762,14 @@ fn lower_field_decl(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_method_or_ctor(
     file_id: FileId,
     node: &SyntaxNode,
     owner_fqn: Option<&str>,
     owner_kind: Option<TypeKind>,
     kind: MemberKind,
+    resolver: &ImportResolver,
     members: &mut Arena<MemberItem>,
     map: &mut AstIdMap,
 ) -> Option<MemberId> {
@@ -665,17 +783,31 @@ fn lower_method_or_ctor(
                 && !is_static
                 && !has_modifier(node, PRIVATE_KW)));
     let has_override = kind == MemberKind::Method && has_override_annotation(node);
-    let (type_params, type_param_bounds) = extract_type_params_and_bounds(node);
-    let type_ref = if kind == MemberKind::Method {
-        type_child(node).map(|t| type_text_with_dims(&t, node))
+    let nullness_scope = extract_modifier_nullness_scope(node, resolver);
+    let mod_nullability = extract_modifier_nullability(node, resolver);
+    let (type_params, type_param_bounds) = extract_type_params_and_bounds(node, resolver);
+    let (type_ref, decl_nullability) = if kind == MemberKind::Method {
+        match type_child(node) {
+            Some(t) => {
+                let (tr, dn) = render_type_with_dims_and_nullability(
+                    &t,
+                    node,
+                    mod_nullability,
+                    false,
+                    resolver,
+                );
+                (Some(tr), dn)
+            }
+            None => (None, None),
+        }
     } else {
-        None
+        (None, None)
     };
 
     let params = node
         .children()
         .find(|n| n.kind() == PARAM_LIST)
-        .map(|pl| extract_params(&pl))
+        .map(|pl| extract_params(&pl, resolver))
         .unwrap_or_default();
 
     let ast_id = map.alloc(AstRange {
@@ -691,6 +823,8 @@ fn lower_method_or_ctor(
         is_default,
         is_abstract,
         has_override,
+        nullness_scope,
+        decl_nullability,
         type_params,
         type_param_bounds,
         type_ref,
@@ -784,5 +918,228 @@ record Pair<A extends Comparable<A>, B>(A first, B second) {}
             box_sym.members[1].type_param_bounds,
             pick.type_param_bounds
         );
+    }
+
+    #[test]
+    fn extracts_nullness_scopes_across_package_module_types_and_members() {
+        use crate::{DefDatabase, test_fixture::db_with_files};
+
+        let mod_info = "\
+import org.jspecify.annotations.NullMarked;
+@NullMarked
+module com.example.mod {
+    exports com.example;
+}
+";
+        let pkg_info = "\
+@NullMarked
+package com.example;
+import org.jspecify.annotations.NullMarked;
+";
+        let spring_pkg_info = "\
+@org.springframework.lang.NonNullApi
+package com.spring;
+";
+        let cls_src = "\
+package com.example;
+import org.jspecify.annotations.*;
+
+@NullMarked
+public class Outer {
+    @NullUnmarked
+    public static class Inner {
+        @NullMarked
+        public String markedMethod() { return \"\"; }
+    }
+    @NullUnmarked
+    public String unmarkedField;
+}
+";
+        let db = db_with_files(&[
+            (1, mod_info),
+            (2, pkg_info),
+            (3, spring_pkg_info),
+            (4, cls_src),
+        ]);
+
+        let ws = db.workspace_index();
+        assert_eq!(
+            ws.module_nullness("com.example.mod"),
+            NullnessScope::NonNullByDefault(NullabilitySource::JSpecify)
+        );
+        assert_eq!(
+            ws.package_nullness("com.example"),
+            NullnessScope::NonNullByDefault(NullabilitySource::JSpecify)
+        );
+        assert_eq!(
+            ws.package_nullness("com.spring"),
+            NullnessScope::NonNullByDefault(NullabilitySource::ThirdPartyAnnotation)
+        );
+        assert_eq!(ws.package_nullness("com.other"), NullnessScope::Inherited);
+
+        let tree = db.file_item_tree(FileId(4));
+        assert_eq!(tree.nullness_scope, NullnessScope::Inherited);
+
+        let (_, outer) = tree.find_type_by_fqn("com.example.Outer").unwrap();
+        assert_eq!(
+            outer.nullness_scope,
+            NullnessScope::NonNullByDefault(NullabilitySource::JSpecify)
+        );
+        let unmarked_field = &tree.members[outer.members[0]];
+        assert_eq!(
+            unmarked_field.nullness_scope,
+            NullnessScope::Unspecified(NullabilitySource::JSpecify)
+        );
+
+        let (_, inner) = tree.find_type_by_fqn("com.example.Outer.Inner").unwrap();
+        assert_eq!(
+            inner.nullness_scope,
+            NullnessScope::Unspecified(NullabilitySource::JSpecify)
+        );
+        let marked_method = &tree.members[inner.members[0]];
+        assert_eq!(
+            marked_method.nullness_scope,
+            NullnessScope::NonNullByDefault(NullabilitySource::JSpecify)
+        );
+    }
+
+    #[test]
+    fn resolves_imports_and_jls_9_7_4_array_and_type_use_nullability() {
+        let jspecify_src = "\
+package com.example;
+import org.jspecify.annotations.*;
+import javax.annotation.Nonnull;
+import com.custom.Nullable; // shadows wildcard Nullable? No, wait: single-type shadows wildcard!
+
+class ShadowTest {
+    @Nullable String shadowed;
+}
+";
+        let root_shadow = parse(jspecify_src).syntax_node();
+        let (shadow_tree, _) = lower_file_item_tree(FileId(1), &root_shadow);
+        let (_, shadow_cls) = shadow_tree.find_type_by_fqn("com.example.ShadowTest").unwrap();
+        let shadowed = &shadow_tree.members[shadow_cls.members[0]];
+        assert_eq!(shadowed.decl_nullability, None);
+        assert_eq!(shadowed.type_ref.as_deref(), Some("String"));
+
+        let src = "\
+package com.example;
+import org.jspecify.annotations.*;
+
+class Sample<T extends @Nullable Object> {
+    @Nullable String fieldStr;
+    @Nullable String[] elemNullableArr;
+    String @Nullable [] outerNullableArr;
+    @Nullable String @NonNull [] bothArr;
+    @javax.annotation.Nullable String[] javaxDeclArr;
+    Outer.@Nullable Inner nestedInner;
+    java.util.List<@Nullable String> listField;
+    @com.other.Nullable String unrelated;
+
+    @Nullable String getName(
+        @Nullable String p1,
+        @Nullable String[] p2,
+        String @Nullable [] p3,
+        @javax.annotation.Nullable String[] p4,
+        @Nullable String... p5
+    ) {
+        return null;
+    }
+}
+record Rec(@Nullable String name, @Nullable String[] tags) {}
+";
+        let root = parse(src).syntax_node();
+        let (tree, _) = lower_file_item_tree(FileId(2), &root);
+        let (_, sample) = tree.find_type_by_fqn("com.example.Sample").unwrap();
+
+        assert_eq!(
+            sample.type_param_bounds,
+            BTreeMap::from([(SmolStr::new("T"), vec!["Object?".to_string()])])
+        );
+
+        let field_str = &tree.members[sample.members[0]];
+        assert_eq!(field_str.type_ref.as_deref(), Some("String?"));
+        assert_eq!(
+            field_str.decl_nullability,
+            Some((Nullability::Nullable, NullabilitySource::JSpecify))
+        );
+
+        // JLS §9.7.4: TYPE_USE `@Nullable String[]` annotates `String`, NOT the array.
+        let elem_arr = &tree.members[sample.members[1]];
+        assert_eq!(elem_arr.type_ref.as_deref(), Some("String?[]"));
+        assert_eq!(elem_arr.decl_nullability, None);
+
+        // JLS §9.7.4: `String @Nullable []` annotates the array, NOT `String`.
+        let outer_arr = &tree.members[sample.members[2]];
+        assert_eq!(outer_arr.type_ref.as_deref(), Some("String[]?"));
+        assert_eq!(outer_arr.decl_nullability, None);
+
+        // Combined `@Nullable String @NonNull []`.
+        let both_arr = &tree.members[sample.members[3]];
+        assert_eq!(both_arr.type_ref.as_deref(), Some("String?[]!"));
+        assert_eq!(both_arr.decl_nullability, None);
+
+        // Declaration-only `@javax.annotation.Nullable String[]` annotates outer declared array.
+        let javax_arr = &tree.members[sample.members[4]];
+        assert_eq!(javax_arr.type_ref.as_deref(), Some("String[]?"));
+        assert_eq!(
+            javax_arr.decl_nullability,
+            Some((Nullability::Nullable, NullabilitySource::ThirdPartyAnnotation))
+        );
+
+        // `Outer.@Nullable Inner` annotates `Inner`.
+        let nested_inner = &tree.members[sample.members[5]];
+        assert_eq!(nested_inner.type_ref.as_deref(), Some("Outer.Inner?"));
+        assert_eq!(nested_inner.decl_nullability, None);
+
+        // `java.util.List<@Nullable String>`
+        let list_field = &tree.members[sample.members[6]];
+        assert_eq!(
+            list_field.type_ref.as_deref(),
+            Some("java.util.List<String?>")
+        );
+
+        // Unrecognized `@com.other.Nullable` is ignored.
+        let unrelated = &tree.members[sample.members[7]];
+        assert_eq!(unrelated.type_ref.as_deref(), Some("String"));
+        assert_eq!(unrelated.decl_nullability, None);
+
+        // Method + parameters
+        let get_name = &tree.members[sample.members[8]];
+        assert_eq!(get_name.type_ref.as_deref(), Some("String?"));
+        assert_eq!(
+            get_name.decl_nullability,
+            Some((Nullability::Nullable, NullabilitySource::JSpecify))
+        );
+        assert_eq!(get_name.params[0].type_ref, "String?");
+        assert_eq!(
+            get_name.params[0].decl_nullability,
+            Some((Nullability::Nullable, NullabilitySource::JSpecify))
+        );
+        assert_eq!(get_name.params[1].type_ref, "String?[]");
+        assert_eq!(get_name.params[1].decl_nullability, None);
+        assert_eq!(get_name.params[2].type_ref, "String[]?");
+        assert_eq!(get_name.params[2].decl_nullability, None);
+        assert_eq!(get_name.params[3].type_ref, "String[]?");
+        assert_eq!(
+            get_name.params[3].decl_nullability,
+            Some((Nullability::Nullable, NullabilitySource::ThirdPartyAnnotation))
+        );
+        assert_eq!(get_name.params[4].type_ref, "String?");
+        assert!(get_name.params[4].is_varargs);
+        assert_eq!(get_name.params[4].decl_nullability, None);
+
+        // Record components
+        let (_, rec) = tree.find_type_by_fqn("com.example.Rec").unwrap();
+        assert_eq!(tree.members[rec.members[0]].type_ref.as_deref(), Some("String?"));
+        assert_eq!(
+            tree.members[rec.members[0]].decl_nullability,
+            Some((Nullability::Nullable, NullabilitySource::JSpecify))
+        );
+        assert_eq!(
+            tree.members[rec.members[1]].type_ref.as_deref(),
+            Some("String?[]")
+        );
+        assert_eq!(tree.members[rec.members[1]].decl_nullability, None);
     }
 }

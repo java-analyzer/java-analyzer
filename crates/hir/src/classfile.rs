@@ -7,13 +7,21 @@ use std::{borrow::Cow, collections::BTreeMap, error::Error, fmt};
 
 use ristretto_classfile::{
     ClassAccessFlags, ClassFile, ConstantPool, FieldAccessFlags, MethodAccessFlags, Version,
-    attributes::{Attribute, NestedClassAccessFlags, RequiresFlags},
+    attributes::{
+        Annotation, Attribute, NestedClassAccessFlags, RequiresFlags, TargetPath, TargetType,
+        TypeAnnotation,
+    },
 };
 use smol_str::{SmolStr, format_smolstr};
 
 use crate::{
     classpath::{BinaryMemberSymbol, BinaryModuleInfo, BinaryOrigin, BinaryTypeSymbol},
-    symbols::{MemberKind, ParamSummary, TypeIdentity, TypeKind},
+    symbols::{
+        MemberKind, NullabilitySource, NullnessScope, ParamSummary, TypeIdentity, TypeKind,
+        classify_nullability_annotation, classify_nullness_scope_annotation,
+        is_type_use_nullability_annotation,
+    },
+    ty::Nullability,
 };
 
 /// Result of parsing a single `.class` file.
@@ -25,6 +33,10 @@ use crate::{
 pub enum ParsedClassfile {
     Type(BinaryTypeSymbol),
     Module(BinaryModuleInfo),
+    Package {
+        package: String,
+        nullness_scope: NullnessScope,
+    },
 }
 
 /// Error returned when a `.class` byte slice is malformed or unreadable.
@@ -50,7 +62,7 @@ impl fmt::Display for ClassfileError {
 impl Error for ClassfileError {}
 
 type InnerClassMap = BTreeMap<String, (String, SmolStr)>;
-type TypeParamsWithBounds = (Vec<SmolStr>, BTreeMap<SmolStr, Vec<String>>);
+type RawTypeParamsWithBounds = (Vec<SmolStr>, Vec<(SmolStr, bool, Vec<DecodedType>)>);
 
 const MAX_SIGNATURE_DEPTH: usize = 64;
 
@@ -85,11 +97,7 @@ pub fn parse_class_bytes(
     if let Some(module_info) = parse_module_attribute(&class_file, cp)? {
         return Ok(Some(ParsedClassfile::Module(module_info)));
     }
-    if class_file.access_flags.contains(ClassAccessFlags::MODULE)
-        || class_file
-            .access_flags
-            .contains(ClassAccessFlags::SYNTHETIC)
-    {
+    if class_file.access_flags.contains(ClassAccessFlags::MODULE) {
         return Ok(None);
     }
 
@@ -98,7 +106,25 @@ pub fn parse_class_bytes(
         .map_err(ClassfileError::from_ristretto)?
         .to_rust_string();
 
+    // `javac` marks `package-info.class` with `ACC_SYNTHETIC`, so check it before filtering synthetic classes.
     if internal_name == "package-info" || internal_name.ends_with("/package-info") {
+        let nullness_scope = extract_nullness_scope(&class_file.attributes, cp);
+        if nullness_scope != NullnessScope::Inherited {
+            let package = internal_name
+                .rsplit_once('/')
+                .map_or_else(String::new, |(pkg, _)| pkg.replace('/', "."));
+            return Ok(Some(ParsedClassfile::Package {
+                package,
+                nullness_scope,
+            }));
+        }
+        return Ok(None);
+    }
+
+    if class_file
+        .access_flags
+        .contains(ClassAccessFlags::SYNTHETIC)
+    {
         return Ok(None);
     }
 
@@ -172,15 +198,16 @@ pub fn parse_class_bytes(
                 TypeKind::Interface | TypeKind::Enum | TypeKind::Record | TypeKind::Annotation
             ));
 
-    let class_sig =
-        find_signature(&class_file.attributes, cp).and_then(|sig| decode_class_signature(&sig, &inner_map));
-    let (type_params, type_param_bounds, super_class_generic, interfaces_generic) = match class_sig {
-        Some(decoded) => (
-            decoded.type_params,
-            decoded.type_param_bounds,
-            decoded.super_class_generic,
-            decoded.interfaces_generic,
-        ),
+    let nullness_scope = extract_nullness_scope(&class_file.attributes, cp);
+
+    let mut class_sig = find_signature(&class_file.attributes, cp)
+        .and_then(|sig| decode_class_signature(&sig, &inner_map));
+    if let Some(ref mut decoded) = class_sig {
+        apply_class_type_annotations(&class_file.attributes, cp, decoded);
+    }
+    let (type_params, type_param_bounds, super_class_generic, interfaces_generic) = match class_sig
+    {
+        Some(decoded) => decoded.into_parts(),
         None => (Vec::new(), BTreeMap::new(), None, Vec::new()),
     };
 
@@ -216,9 +243,13 @@ pub fn parse_class_bytes(
                 .try_get_utf8(rec.descriptor_index)
                 .map_err(ClassfileError::from_ristretto)?
                 .to_rust_string();
-            let type_ref = find_signature(&rec.attributes, cp)
+            let decoded_ty = find_signature(&rec.attributes, cp)
                 .and_then(|sig| decode_field_signature(&sig, &inner_map))
                 .or_else(|| decode_field_descriptor(&desc, &inner_map));
+            let rec_scope = extract_nullness_scope(&rec.attributes, cp);
+            let rec_decl = extract_decl_nullability(&rec.attributes, cp);
+            let (type_ref, decl_nullability) =
+                finalize_field_type_and_nullability(decoded_ty, &rec.attributes, cp, rec_decl);
             members.push(BinaryMemberSymbol {
                 owner_type: qualified_name.clone(),
                 name: SmolStr::new(name),
@@ -226,6 +257,8 @@ pub fn parse_class_bytes(
                 is_public: true,
                 is_static: false,
                 is_abstract: false,
+                nullness_scope: rec_scope,
+                decl_nullability,
                 type_params: Vec::new(),
                 type_param_bounds: BTreeMap::new(),
                 type_ref,
@@ -262,6 +295,8 @@ pub fn parse_class_bytes(
                 is_public: true,
                 is_static: true,
                 is_abstract: false,
+                nullness_scope: NullnessScope::Inherited,
+                decl_nullability: None,
                 type_params: Vec::new(),
                 type_param_bounds: BTreeMap::new(),
                 type_ref: None,
@@ -275,9 +310,13 @@ pub fn parse_class_bytes(
             .try_get_utf8(field.descriptor_index)
             .map_err(ClassfileError::from_ristretto)?
             .to_rust_string();
-        let type_ref = find_signature(&field.attributes, cp)
+        let decoded_ty = find_signature(&field.attributes, cp)
             .and_then(|sig| decode_field_signature(&sig, &inner_map))
             .or_else(|| decode_field_descriptor(&desc, &inner_map));
+        let field_scope = extract_nullness_scope(&field.attributes, cp);
+        let field_decl = extract_decl_nullability(&field.attributes, cp);
+        let (type_ref, decl_nullability) =
+            finalize_field_type_and_nullability(decoded_ty, &field.attributes, cp, field_decl);
 
         members.push(BinaryMemberSymbol {
             owner_type: qualified_name.clone(),
@@ -286,6 +325,8 @@ pub fn parse_class_bytes(
             is_public: is_field_public,
             is_static: field.access_flags.contains(FieldAccessFlags::STATIC),
             is_abstract: false,
+            nullness_scope: field_scope,
+            decl_nullability,
             type_params: Vec::new(),
             type_param_bounds: BTreeMap::new(),
             type_ref,
@@ -331,46 +372,40 @@ pub fn parse_class_bytes(
             .try_get_utf8(method.descriptor_index)
             .map_err(ClassfileError::from_ristretto)?
             .to_rust_string();
-        let (method_type_params, method_type_param_bounds, param_types, return_type) =
-            if let Some(decoded) = find_signature(&method.attributes, cp)
-                .and_then(|sig| decode_method_signature(&sig, &inner_map))
-            {
-                (
-                    decoded.type_params,
-                    decoded.type_param_bounds,
-                    decoded.params,
-                    decoded.return_type,
-                )
-            } else {
-                let (params, ret) =
+        let mut decoded_method = find_signature(&method.attributes, cp)
+            .and_then(|sig| decode_method_signature(&sig, &inner_map))
+            .unwrap_or_else(|| {
+                let (params, return_type) =
                     decode_method_descriptor(&desc, &inner_map).unwrap_or_else(|| (Vec::new(), None));
-                (Vec::new(), BTreeMap::new(), params, ret)
-            };
-
-        let is_varargs = method.access_flags.contains(MethodAccessFlags::VARARGS)
-            && param_types.last().is_some_and(|t| t.ends_with("[]"));
-        let param_names = extract_method_param_names(&method.attributes, cp, param_types.len())?;
-
-        let last_idx = param_types.len().saturating_sub(1);
-        let params = param_types
-            .into_iter()
-            .enumerate()
-            .map(|(i, mut ty)| {
-                let param_varargs = is_varargs && i == last_idx;
-                if param_varargs && let Some(elem) = ty.strip_suffix("[]") {
-                    ty = elem.to_string();
+                DecodedMethodSignature {
+                    type_params: Vec::new(),
+                    type_param_bounds: Vec::new(),
+                    params,
+                    return_type,
                 }
-                let pname = param_names
-                    .get(i)
-                    .and_then(|opt| opt.clone())
-                    .unwrap_or_else(|| format_smolstr!("arg{i}"));
-                ParamSummary {
-                    name: Some(pname),
-                    type_ref: ty,
-                    is_varargs: param_varargs,
-                }
-            })
-            .collect();
+            });
+
+        let method_scope = extract_nullness_scope(&method.attributes, cp);
+        let method_decl = if is_ctor {
+            None
+        } else {
+            extract_decl_nullability(&method.attributes, cp)
+        };
+        let param_decls =
+            extract_param_decl_nullabilities(&method.attributes, cp, decoded_method.params.len());
+        let param_names =
+            extract_method_param_names(&method.attributes, cp, decoded_method.params.len())?;
+        let (method_type_params, method_type_param_bounds, params, return_type, is_varargs, decl_nullability) =
+            finalize_method_signature(
+                &mut decoded_method,
+                &method.attributes,
+                cp,
+                is_ctor,
+                method.access_flags.contains(MethodAccessFlags::VARARGS),
+                method_decl,
+                &param_decls,
+                param_names,
+            );
 
         members.push(BinaryMemberSymbol {
             owner_type: qualified_name.clone(),
@@ -379,6 +414,8 @@ pub fn parse_class_bytes(
             is_public: is_method_public,
             is_static: !is_ctor && method.access_flags.contains(MethodAccessFlags::STATIC),
             is_abstract: !is_ctor && method.access_flags.contains(MethodAccessFlags::ABSTRACT),
+            nullness_scope: method_scope,
+            decl_nullability,
             type_params: method_type_params,
             type_param_bounds: method_type_param_bounds,
             type_ref: if is_ctor { None } else { return_type },
@@ -399,6 +436,7 @@ pub fn parse_class_bytes(
         is_static,
         is_final,
         is_abstract,
+        nullness_scope,
         type_params,
         type_param_bounds,
         super_class,
@@ -452,8 +490,10 @@ fn parse_module_attribute(
                 }
             }
 
+            let nullness_scope = extract_nullness_scope(&class_file.attributes, cp);
             return Ok(Some(BinaryModuleInfo {
                 name: SmolStr::new(name),
+                nullness_scope,
                 exports,
                 requires_transitive,
             }));
@@ -706,9 +746,625 @@ fn internal_to_java_type(internal: &str, inner_map: &InnerClassMap) -> String {
     internal.replace('/', ".")
 }
 
+// ---- Annotation & Type-Annotation Decoding (JVMS §4.7.16 - §4.7.20) ----
+
+fn annotation_descriptor_to_fqn(cp: &ConstantPool<'_>, type_index: u16) -> Option<String> {
+    let raw = cp.try_get_utf8(type_index).ok()?.to_rust_string();
+    let inner = raw.strip_prefix('L')?.strip_suffix(';')?;
+    if inner.is_empty() {
+        return None;
+    }
+    Some(inner.replace(['/', '$'], "."))
+}
+
+fn collect_annotations(attributes: &[Attribute]) -> Vec<&Annotation> {
+    let mut out = Vec::new();
+    for attr in attributes {
+        match attr {
+            Attribute::RuntimeVisibleAnnotations { annotations, .. }
+            | Attribute::RuntimeInvisibleAnnotations { annotations, .. } => {
+                out.extend(annotations.iter());
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn collect_type_annotations(attributes: &[Attribute]) -> Vec<&TypeAnnotation> {
+    let mut out = Vec::new();
+    for attr in attributes {
+        match attr {
+            Attribute::RuntimeVisibleTypeAnnotations {
+                type_annotations, ..
+            }
+            | Attribute::RuntimeInvisibleTypeAnnotations {
+                type_annotations, ..
+            } => {
+                out.extend(type_annotations.iter());
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn extract_nullness_scope(attributes: &[Attribute], cp: &ConstantPool<'_>) -> NullnessScope {
+    let mut result = NullnessScope::Inherited;
+    for ann in collect_annotations(attributes) {
+        let Some(fqn) = annotation_descriptor_to_fqn(cp, ann.type_index) else {
+            continue;
+        };
+        if let Some(scope) = classify_nullness_scope_annotation(&fqn) {
+            match (result, scope) {
+                (NullnessScope::Inherited, _) => result = scope,
+                (
+                    NullnessScope::NonNullByDefault(NullabilitySource::ThirdPartyAnnotation)
+                    | NullnessScope::Unspecified(NullabilitySource::ThirdPartyAnnotation),
+                    NullnessScope::NonNullByDefault(NullabilitySource::JSpecify)
+                    | NullnessScope::Unspecified(NullabilitySource::JSpecify),
+                ) => result = scope,
+                _ => {}
+            }
+        }
+    }
+    result
+}
+
+fn classify_annotations_slice(
+    annotations: &[Annotation],
+    cp: &ConstantPool<'_>,
+) -> Option<(Nullability, NullabilitySource, bool)> {
+    let mut best: Option<(Nullability, NullabilitySource, bool)> = None;
+    for ann in annotations {
+        let Some(fqn) = annotation_descriptor_to_fqn(cp, ann.type_index) else {
+            continue;
+        };
+        if let Some((nullability, source)) = classify_nullability_annotation(&fqn) {
+            let is_type_use = is_type_use_nullability_annotation(&fqn);
+            match best {
+                None => best = Some((nullability, source, is_type_use)),
+                Some((_, NullabilitySource::ThirdPartyAnnotation, _))
+                    if source == NullabilitySource::JSpecify =>
+                {
+                    best = Some((nullability, source, is_type_use));
+                }
+                _ => {}
+            }
+        }
+    }
+    best
+}
+
+fn extract_decl_nullability(
+    attributes: &[Attribute],
+    cp: &ConstantPool<'_>,
+) -> Option<(Nullability, NullabilitySource, bool)> {
+    let mut best: Option<(Nullability, NullabilitySource, bool)> = None;
+    for ann in collect_annotations(attributes) {
+        let Some(fqn) = annotation_descriptor_to_fqn(cp, ann.type_index) else {
+            continue;
+        };
+        if let Some((nullability, source)) = classify_nullability_annotation(&fqn) {
+            let is_type_use = is_type_use_nullability_annotation(&fqn);
+            match best {
+                None => best = Some((nullability, source, is_type_use)),
+                Some((_, NullabilitySource::ThirdPartyAnnotation, _))
+                    if source == NullabilitySource::JSpecify =>
+                {
+                    best = Some((nullability, source, is_type_use));
+                }
+                _ => {}
+            }
+        }
+    }
+    best
+}
+
+fn extract_param_decl_nullabilities(
+    attributes: &[Attribute],
+    cp: &ConstantPool<'_>,
+    param_count: usize,
+) -> Vec<Option<(Nullability, NullabilitySource, bool)>> {
+    let mut result = vec![None; param_count];
+    for attr in attributes {
+        let param_anns = match attr {
+            Attribute::RuntimeVisibleParameterAnnotations {
+                parameter_annotations,
+                ..
+            }
+            | Attribute::RuntimeInvisibleParameterAnnotations {
+                parameter_annotations,
+                ..
+            } => parameter_annotations,
+            _ => continue,
+        };
+        let offset = param_count.saturating_sub(param_anns.len());
+        for (i, pa) in param_anns.iter().enumerate() {
+            let target_idx = offset + i;
+            let Some(slot) = result.get_mut(target_idx) else {
+                continue;
+            };
+            if let Some(found @ (_, source, _)) = classify_annotations_slice(&pa.annotations, cp) {
+                match *slot {
+                    None => *slot = Some(found),
+                    Some((_, NullabilitySource::ThirdPartyAnnotation, _))
+                        if source == NullabilitySource::JSpecify =>
+                    {
+                        *slot = Some(found);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    result
+}
+
+fn sorted_type_annotations<'a>(
+    attributes: &'a [Attribute],
+    cp: &ConstantPool<'_>,
+) -> Vec<(&'a TypeAnnotation, Nullability, NullabilitySource)> {
+    let mut collected = Vec::new();
+    for ta in collect_type_annotations(attributes) {
+        let Some(fqn) = annotation_descriptor_to_fqn(cp, ta.type_index) else {
+            continue;
+        };
+        if let Some((nullability, source)) = classify_nullability_annotation(&fqn) {
+            collected.push((ta, nullability, source));
+        }
+    }
+    // Apply ThirdPartyAnnotation first so JSpecify takes precedence when both target the same node.
+    collected.sort_by_key(|(_, _, src)| match src {
+        NullabilitySource::JSpecify => 1u8,
+        _ => 0u8,
+    });
+    collected
+}
+
+fn apply_bound_type_annotation(
+    bounds_entries: &mut [(SmolStr, bool, Vec<DecodedType>)],
+    type_parameter_index: u8,
+    bound_index: u8,
+    type_path: &[TargetPath],
+    nullability: Nullability,
+) {
+    let Some((_, has_explicit_class_bound, bounds)) =
+        bounds_entries.get_mut(type_parameter_index as usize)
+    else {
+        return;
+    };
+    let idx = if *has_explicit_class_bound {
+        Some(bound_index as usize)
+    } else if bound_index >= 1 {
+        Some((bound_index - 1) as usize)
+    } else {
+        None
+    };
+    if let Some(bound_ty) = idx.and_then(|i| bounds.get_mut(i)) {
+        bound_ty.apply_type_path(type_path, nullability);
+    }
+}
+
+fn apply_class_type_annotations(
+    attributes: &[Attribute],
+    cp: &ConstantPool<'_>,
+    decoded: &mut DecodedClassSignature,
+) {
+    for (ta, nullability, _) in sorted_type_annotations(attributes, cp) {
+        match ta.target_type {
+            TargetType::TypeParameterBound {
+                target_type: 0x11,
+                type_parameter_index,
+                bound_index,
+            } => {
+                apply_bound_type_annotation(
+                    &mut decoded.type_param_bounds,
+                    type_parameter_index,
+                    bound_index,
+                    &ta.type_path,
+                    nullability,
+                );
+            }
+            TargetType::SuperType {
+                target_type: 0x10,
+                supertype_index,
+            } => {
+                if supertype_index == u16::MAX {
+                    if let Some(sup) = decoded.super_class_generic.as_mut() {
+                        sup.apply_type_path(&ta.type_path, nullability);
+                    }
+                } else if let Some(iface) = decoded
+                    .interfaces_generic
+                    .get_mut(supertype_index as usize)
+                {
+                    iface.apply_type_path(&ta.type_path, nullability);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn finalize_field_type_and_nullability(
+    decoded_ty: Option<DecodedType>,
+    attributes: &[Attribute],
+    cp: &ConstantPool<'_>,
+    decl_ann: Option<(Nullability, NullabilitySource, bool)>,
+) -> (Option<String>, Option<(Nullability, NullabilitySource)>) {
+    let Some(mut ty) = decoded_ty else {
+        return (None, decl_ann.map(|(n, s, _)| (n, s)));
+    };
+    let mut has_type_ann = false;
+    for (ta, nullability, _) in sorted_type_annotations(attributes, cp) {
+        if matches!(ta.target_type, TargetType::Empty { target_type: 0x13 }) {
+            ty.apply_type_path(&ta.type_path, nullability);
+            has_type_ann = true;
+        }
+    }
+    let decl_nullability =
+        apply_decl_fallback_to_decoded(&mut ty, decl_ann, has_type_ann);
+    (Some(ty.render()), decl_nullability)
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn finalize_method_signature(
+    decoded: &mut DecodedMethodSignature,
+    attributes: &[Attribute],
+    cp: &ConstantPool<'_>,
+    is_ctor: bool,
+    has_varargs_flag: bool,
+    method_decl: Option<(Nullability, NullabilitySource, bool)>,
+    param_decls: &[Option<(Nullability, NullabilitySource, bool)>],
+    param_names: Vec<Option<SmolStr>>,
+) -> (
+    Vec<SmolStr>,
+    BTreeMap<SmolStr, Vec<String>>,
+    Vec<ParamSummary>,
+    Option<String>,
+    bool,
+    Option<(Nullability, NullabilitySource)>,
+) {
+    let mut return_has_type_ann = false;
+    let mut param_has_type_ann = vec![false; decoded.params.len()];
+
+    for (ta, nullability, _) in sorted_type_annotations(attributes, cp) {
+        match ta.target_type {
+            TargetType::Empty { target_type: 0x14 } if !is_ctor => {
+                if let Some(ret) = decoded.return_type.as_mut()
+                    && !ret.is_void()
+                {
+                    ret.apply_type_path(&ta.type_path, nullability);
+                    return_has_type_ann = true;
+                }
+            }
+            TargetType::FormalParameter {
+                target_type: 0x16,
+                formal_parameter_index,
+            } => {
+                let idx = formal_parameter_index as usize;
+                if let Some(param_ty) = decoded.params.get_mut(idx) {
+                    param_ty.apply_type_path(&ta.type_path, nullability);
+                    if let Some(flag) = param_has_type_ann.get_mut(idx) {
+                        *flag = true;
+                    }
+                }
+            }
+            TargetType::TypeParameterBound {
+                target_type: 0x12,
+                type_parameter_index,
+                bound_index,
+            } => {
+                apply_bound_type_annotation(
+                    &mut decoded.type_param_bounds,
+                    type_parameter_index,
+                    bound_index,
+                    &ta.type_path,
+                    nullability,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    let decl_nullability = if is_ctor {
+        None
+    } else if let Some(ret) = decoded.return_type.as_mut() {
+        apply_decl_fallback_to_decoded(ret, method_decl, return_has_type_ann)
+    } else {
+        None
+    };
+
+    let is_varargs =
+        has_varargs_flag && matches!(decoded.params.last(), Some(DecodedType::Array { .. }));
+    let last_idx = decoded.params.len().saturating_sub(1);
+    let params = std::mem::take(&mut decoded.params)
+        .into_iter()
+        .enumerate()
+        .map(|(i, mut ty)| {
+            let param_varargs = is_varargs && i == last_idx;
+            let p_decl_raw = param_decls.get(i).copied().flatten();
+            let p_has_type_ann = param_has_type_ann.get(i).copied().unwrap_or(false);
+            let p_decl = if param_varargs {
+                if let DecodedType::Array { elem, nullability } = ty {
+                    let mut elem_ty = *elem;
+                    let outer_decl = match p_decl_raw {
+                        Some((n, src, true)) => {
+                            if !p_has_type_ann {
+                                elem_ty.apply_decl_fallback(n, true);
+                            }
+                            nullability.map(|an| (an, src))
+                        }
+                        Some((n, src, false)) => Some((n, src)),
+                        None => nullability.map(|an| (an, NullabilitySource::JSpecify)),
+                    };
+                    ty = elem_ty;
+                    outer_decl
+                } else {
+                    apply_decl_fallback_to_decoded(&mut ty, p_decl_raw, p_has_type_ann)
+                }
+            } else {
+                apply_decl_fallback_to_decoded(&mut ty, p_decl_raw, p_has_type_ann)
+            };
+
+            let pname = param_names
+                .get(i)
+                .and_then(|opt| opt.clone())
+                .unwrap_or_else(|| format_smolstr!("arg{i}"));
+            ParamSummary {
+                name: Some(pname),
+                type_ref: ty.render(),
+                is_varargs: param_varargs,
+                decl_nullability: p_decl,
+            }
+        })
+        .collect();
+
+    let return_type = decoded.return_type.as_ref().map(DecodedType::render);
+    let type_param_bounds = render_type_param_bounds(&decoded.type_param_bounds);
+    (
+        std::mem::take(&mut decoded.type_params),
+        type_param_bounds,
+        params,
+        return_type,
+        is_varargs,
+        decl_nullability,
+    )
+}
+
+fn apply_decl_fallback_to_decoded(
+    ty: &mut DecodedType,
+    decl_ann: Option<(Nullability, NullabilitySource, bool)>,
+    has_type_ann: bool,
+) -> Option<(Nullability, NullabilitySource)> {
+    let (n, src, is_type_use) = decl_ann?;
+    if is_type_use && ty.is_array() {
+        if !has_type_ann {
+            ty.apply_decl_fallback(n, true);
+        }
+        None
+    } else {
+        if !has_type_ann || !is_type_use {
+            ty.apply_decl_fallback(n, is_type_use);
+        }
+        Some((n, src))
+    }
+}
+
+fn render_type_param_bounds(
+    entries: &[(SmolStr, bool, Vec<DecodedType>)],
+) -> BTreeMap<SmolStr, Vec<String>> {
+    let mut map = BTreeMap::new();
+    for (name, _has_explicit, bounds) in entries {
+        let rendered: Vec<String> = bounds.iter().map(DecodedType::render).collect();
+        let is_implicit_object_only =
+            rendered.len() == 1 && rendered[0] == "java.lang.Object";
+        if !rendered.is_empty() && !is_implicit_object_only {
+            map.insert(name.clone(), rendered);
+        }
+    }
+    map
+}
+
+// ---- Structured Type Tree & TypePath Application ----
+
+#[derive(Debug, Clone)]
+enum DecodedType {
+    Primitive(&'static str),
+    TypeVar {
+        name: String,
+        nullability: Option<Nullability>,
+    },
+    Class {
+        segments: Vec<ClassSegment>,
+    },
+    Array {
+        elem: Box<DecodedType>,
+        nullability: Option<Nullability>,
+    },
+    Wildcard(DecodedWildcard),
+}
+
+#[derive(Debug, Clone)]
+struct ClassSegment {
+    name: String,
+    args: Vec<DecodedType>,
+    nullability: Option<Nullability>,
+}
+
+#[derive(Debug, Clone)]
+enum DecodedWildcard {
+    Unbounded,
+    Extends(Box<DecodedType>),
+    Super(Box<DecodedType>),
+}
+
+const fn nullability_suffix_opt(n: Option<Nullability>) -> &'static str {
+    match n {
+        Some(Nullability::NonNull) => "!",
+        Some(Nullability::Nullable) => "?",
+        Some(Nullability::Unspecified) | None => "",
+    }
+}
+
+impl DecodedType {
+    fn is_array(&self) -> bool {
+        matches!(self, Self::Array { .. })
+    }
+
+    fn is_void(&self) -> bool {
+        matches!(self, Self::Primitive("void"))
+    }
+
+    fn apply_type_path(&mut self, path: &[TargetPath], nullability: Nullability) {
+        self.apply_type_path_at(path, 0, nullability);
+    }
+
+    fn apply_type_path_at(&mut self, path: &[TargetPath], seg_idx: usize, nullability: Nullability) {
+        let Some(step) = path.first() else {
+            match self {
+                Self::TypeVar {
+                    nullability: slot, ..
+                }
+                | Self::Array {
+                    nullability: slot, ..
+                } => {
+                    *slot = Some(nullability);
+                }
+                Self::Class { segments } => {
+                    let target_idx = seg_idx.min(segments.len().saturating_sub(1));
+                    if let Some(seg) = segments.get_mut(target_idx) {
+                        seg.nullability = Some(nullability);
+                    }
+                }
+                Self::Primitive(_) | Self::Wildcard(_) => {}
+            }
+            return;
+        };
+
+        let rest = &path[1..];
+        match step.type_path_kind {
+            // 0 = deeper in array type
+            0 => {
+                if let Self::Array { elem, .. } = self {
+                    elem.apply_type_path_at(rest, 0, nullability);
+                }
+            }
+            // 1 = deeper in nested type
+            1 => {
+                if let Self::Class { segments } = self {
+                    let next_seg = if seg_idx + 1 < segments.len() {
+                        seg_idx + 1
+                    } else {
+                        seg_idx
+                    };
+                    self.apply_type_path_at(rest, next_seg, nullability);
+                }
+            }
+            // 2 = on the bound of a wildcard type argument
+            2 => {
+                if let Self::Wildcard(DecodedWildcard::Extends(bound) | DecodedWildcard::Super(bound)) =
+                    self
+                {
+                    bound.apply_type_path_at(rest, 0, nullability);
+                }
+            }
+            // 3 = on a type argument of a parameterized type
+            3 => {
+                if let Self::Class { segments } = self {
+                    let arg_seg = if seg_idx < segments.len() && !segments[seg_idx].args.is_empty()
+                    {
+                        seg_idx
+                    } else if let Some(last) = segments.iter().rposition(|s| !s.args.is_empty()) {
+                        last
+                    } else {
+                        return;
+                    };
+                    if let Some(arg) = segments
+                        .get_mut(arg_seg)
+                        .and_then(|seg| seg.args.get_mut(step.type_argument_index as usize))
+                    {
+                        arg.apply_type_path_at(rest, 0, nullability);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_decl_fallback(&mut self, nullability: Nullability, is_type_use: bool) {
+        match self {
+            Self::Array {
+                elem,
+                nullability: outer,
+            } => {
+                if is_type_use {
+                    elem.apply_decl_fallback(nullability, true);
+                } else if outer.is_none() {
+                    *outer = Some(nullability);
+                }
+            }
+            Self::TypeVar {
+                nullability: slot, ..
+            } => {
+                if slot.is_none() {
+                    *slot = Some(nullability);
+                }
+            }
+            Self::Class { segments } => {
+                if let Some(last) = segments.last_mut()
+                    && last.nullability.is_none()
+                {
+                    last.nullability = Some(nullability);
+                }
+            }
+            Self::Primitive(_) | Self::Wildcard(_) => {}
+        }
+    }
+
+    fn render(&self) -> String {
+        match self {
+            Self::Primitive(kw) => (*kw).to_string(),
+            Self::TypeVar { name, nullability } => {
+                format!("{name}{}", nullability_suffix_opt(*nullability))
+            }
+            Self::Class { segments } => {
+                let last_args_idx = segments.iter().rposition(|seg| !seg.args.is_empty());
+                let mut out = String::new();
+                for (i, seg) in segments.iter().enumerate() {
+                    if i > 0 {
+                        out.push('.');
+                    }
+                    out.push_str(&seg.name);
+                    if Some(i) == last_args_idx && !seg.args.is_empty() {
+                        let args: Vec<String> = seg.args.iter().map(Self::render).collect();
+                        out.push('<');
+                        out.push_str(&args.join(", "));
+                        out.push('>');
+                    }
+                    out.push_str(nullability_suffix_opt(seg.nullability));
+                }
+                out
+            }
+            Self::Array { elem, nullability } => {
+                format!(
+                    "{}[]{}",
+                    elem.render(),
+                    nullability_suffix_opt(*nullability)
+                )
+            }
+            Self::Wildcard(wc) => match wc {
+                DecodedWildcard::Unbounded => "?".to_string(),
+                DecodedWildcard::Extends(bound) => format!("? extends {}", bound.render()),
+                DecodedWildcard::Super(bound) => format!("? super {}", bound.render()),
+            },
+        }
+    }
+}
+
 // ---- JVM Descriptor Decoding ----
 
-fn decode_field_descriptor(desc: &str, inner_map: &InnerClassMap) -> Option<String> {
+fn decode_field_descriptor(desc: &str, inner_map: &InnerClassMap) -> Option<DecodedType> {
     let mut parser = DescriptorParser::new(desc, inner_map);
     let ty = parser.parse_field_type(0)?;
     parser.is_eof().then_some(ty)
@@ -717,7 +1373,7 @@ fn decode_field_descriptor(desc: &str, inner_map: &InnerClassMap) -> Option<Stri
 fn decode_method_descriptor(
     desc: &str,
     inner_map: &InnerClassMap,
-) -> Option<(Vec<String>, Option<String>)> {
+) -> Option<(Vec<DecodedType>, Option<DecodedType>)> {
     let mut parser = DescriptorParser::new(desc, inner_map);
     parser.expect_byte(b'(')?;
     let mut params = Vec::new();
@@ -727,7 +1383,7 @@ fn decode_method_descriptor(
     parser.expect_byte(b')')?;
     let ret = if parser.peek_byte() == Some(b'V') {
         parser.advance(1);
-        Some("void".to_string())
+        Some(DecodedType::Primitive("void"))
     } else {
         Some(parser.parse_field_type(0)?)
     };
@@ -770,7 +1426,7 @@ impl<'a> DescriptorParser<'a> {
         }
     }
 
-    fn parse_field_type(&mut self, depth: usize) -> Option<String> {
+    fn parse_field_type(&mut self, depth: usize) -> Option<DecodedType> {
         if depth >= MAX_SIGNATURE_DEPTH {
             return None;
         }
@@ -782,38 +1438,38 @@ impl<'a> DescriptorParser<'a> {
                 return None;
             }
         }
-        let base = match self.peek_byte()? {
+        let mut ty = match self.peek_byte()? {
             b'B' => {
                 self.pos += 1;
-                "byte".to_string()
+                DecodedType::Primitive("byte")
             }
             b'C' => {
                 self.pos += 1;
-                "char".to_string()
+                DecodedType::Primitive("char")
             }
             b'D' => {
                 self.pos += 1;
-                "double".to_string()
+                DecodedType::Primitive("double")
             }
             b'F' => {
                 self.pos += 1;
-                "float".to_string()
+                DecodedType::Primitive("float")
             }
             b'I' => {
                 self.pos += 1;
-                "int".to_string()
+                DecodedType::Primitive("int")
             }
             b'J' => {
                 self.pos += 1;
-                "long".to_string()
+                DecodedType::Primitive("long")
             }
             b'S' => {
                 self.pos += 1;
-                "short".to_string()
+                DecodedType::Primitive("short")
             }
             b'Z' => {
                 self.pos += 1;
-                "boolean".to_string()
+                DecodedType::Primitive("boolean")
             }
             b'L' => {
                 self.pos += 1;
@@ -824,21 +1480,24 @@ impl<'a> DescriptorParser<'a> {
                     return None;
                 }
                 self.pos += semi_rel + 1;
-                internal_to_java_type(internal, self.inner_map)
+                DecodedType::Class {
+                    segments: vec![ClassSegment {
+                        name: internal_to_java_type(internal, self.inner_map),
+                        args: Vec::new(),
+                        nullability: None,
+                    }],
+                }
             }
             _ => return None,
         };
 
-        if dims == 0 {
-            Some(base)
-        } else {
-            let mut out = String::with_capacity(base.len() + dims * 2);
-            out.push_str(&base);
-            for _ in 0..dims {
-                out.push_str("[]");
-            }
-            Some(out)
+        for _ in 0..dims {
+            ty = DecodedType::Array {
+                elem: Box::new(ty),
+                nullability: None,
+            };
         }
+        Some(ty)
     }
 }
 
@@ -846,16 +1505,37 @@ impl<'a> DescriptorParser<'a> {
 
 struct DecodedClassSignature {
     type_params: Vec<SmolStr>,
-    type_param_bounds: BTreeMap<SmolStr, Vec<String>>,
-    super_class_generic: Option<String>,
-    interfaces_generic: Vec<String>,
+    type_param_bounds: Vec<(SmolStr, bool, Vec<DecodedType>)>,
+    super_class_generic: Option<DecodedType>,
+    interfaces_generic: Vec<DecodedType>,
+}
+
+impl DecodedClassSignature {
+    #[allow(clippy::type_complexity)]
+    fn into_parts(
+        self,
+    ) -> (
+        Vec<SmolStr>,
+        BTreeMap<SmolStr, Vec<String>>,
+        Option<String>,
+        Vec<String>,
+    ) {
+        let bounds = render_type_param_bounds(&self.type_param_bounds);
+        let sup = self.super_class_generic.as_ref().map(DecodedType::render);
+        let ifaces = self
+            .interfaces_generic
+            .iter()
+            .map(DecodedType::render)
+            .collect();
+        (self.type_params, bounds, sup, ifaces)
+    }
 }
 
 struct DecodedMethodSignature {
     type_params: Vec<SmolStr>,
-    type_param_bounds: BTreeMap<SmolStr, Vec<String>>,
-    params: Vec<String>,
-    return_type: Option<String>,
+    type_param_bounds: Vec<(SmolStr, bool, Vec<DecodedType>)>,
+    params: Vec<DecodedType>,
+    return_type: Option<DecodedType>,
 }
 
 fn decode_class_signature(
@@ -866,7 +1546,7 @@ fn decode_class_signature(
     let (type_params, type_param_bounds) = if parser.peek_byte() == Some(b'<') {
         parser.parse_type_parameters(0)?
     } else {
-        (Vec::new(), BTreeMap::new())
+        (Vec::new(), Vec::new())
     };
     let super_class_generic = Some(parser.parse_class_type_sig(0)?);
     let mut interfaces_generic = Vec::new();
@@ -881,7 +1561,7 @@ fn decode_class_signature(
     })
 }
 
-fn decode_field_signature(sig: &str, inner_map: &InnerClassMap) -> Option<String> {
+fn decode_field_signature(sig: &str, inner_map: &InnerClassMap) -> Option<DecodedType> {
     let mut parser = SignatureParser::new(sig, inner_map, true);
     let ty = parser.parse_ref_type_sig(0)?;
     parser.is_eof().then_some(ty)
@@ -895,7 +1575,7 @@ fn decode_method_signature(
     let (type_params, type_param_bounds) = if parser.peek_byte() == Some(b'<') {
         parser.parse_type_parameters(0)?
     } else {
-        (Vec::new(), BTreeMap::new())
+        (Vec::new(), Vec::new())
     };
     parser.shorten_java_lang = true;
     parser.expect_byte(b'(')?;
@@ -906,7 +1586,7 @@ fn decode_method_signature(
     parser.expect_byte(b')')?;
     let return_type = if parser.peek_byte() == Some(b'V') {
         parser.advance(1);
-        Some("void".to_string())
+        Some(DecodedType::Primitive("void"))
     } else {
         Some(parser.parse_java_type_sig(0)?)
     };
@@ -993,79 +1673,74 @@ impl<'a> SignatureParser<'a> {
         self.src.get(start..self.pos)
     }
 
-    fn parse_type_parameters(&mut self, depth: usize) -> Option<TypeParamsWithBounds> {
+    fn parse_type_parameters(&mut self, depth: usize) -> Option<RawTypeParamsWithBounds> {
         if depth >= MAX_SIGNATURE_DEPTH {
             return None;
         }
         self.expect_byte(b'<')?;
         let mut names = Vec::new();
-        let mut bounds_map = BTreeMap::new();
+        let mut bounds_entries = Vec::new();
         while self.peek_byte() != Some(b'>') {
             let name = SmolStr::new(self.read_identifier_until(b":")?);
             self.expect_byte(b':')?;
             let mut param_bounds = Vec::new();
-            // Optional ClassBound (may be empty if immediately followed by `:`).
-            if matches!(self.peek_byte(), Some(b'L' | b'T' | b'[')) {
+            let has_explicit_class_bound = matches!(self.peek_byte(), Some(b'L' | b'T' | b'['));
+            if has_explicit_class_bound {
                 param_bounds.push(self.parse_ref_type_sig(depth + 1)?);
             }
-            // Zero or more InterfaceBounds (`:ReferenceTypeSignature`).
             while self.peek_byte() == Some(b':') {
                 self.pos += 1;
                 param_bounds.push(self.parse_ref_type_sig(depth + 1)?);
             }
-            let is_implicit_object_only =
-                param_bounds.len() == 1 && param_bounds[0] == "java.lang.Object";
-            if !param_bounds.is_empty() && !is_implicit_object_only {
-                bounds_map.insert(name.clone(), param_bounds);
-            }
-            names.push(name);
+            names.push(name.clone());
+            bounds_entries.push((name, has_explicit_class_bound, param_bounds));
         }
         self.expect_byte(b'>')?;
-        (!names.is_empty()).then_some((names, bounds_map))
+        (!names.is_empty()).then_some((names, bounds_entries))
     }
 
-    fn parse_java_type_sig(&mut self, depth: usize) -> Option<String> {
+    fn parse_java_type_sig(&mut self, depth: usize) -> Option<DecodedType> {
         if depth >= MAX_SIGNATURE_DEPTH {
             return None;
         }
         match self.peek_byte()? {
             b'B' => {
                 self.pos += 1;
-                Some("byte".to_string())
+                Some(DecodedType::Primitive("byte"))
             }
             b'C' => {
                 self.pos += 1;
-                Some("char".to_string())
+                Some(DecodedType::Primitive("char"))
             }
             b'D' => {
                 self.pos += 1;
-                Some("double".to_string())
+                Some(DecodedType::Primitive("double"))
             }
             b'F' => {
                 self.pos += 1;
-                Some("float".to_string())
+                Some(DecodedType::Primitive("float"))
             }
             b'I' => {
                 self.pos += 1;
-                Some("int".to_string())
+                Some(DecodedType::Primitive("int"))
             }
             b'J' => {
                 self.pos += 1;
-                Some("long".to_string())
+                Some(DecodedType::Primitive("long"))
             }
             b'S' => {
                 self.pos += 1;
-                Some("short".to_string())
+                Some(DecodedType::Primitive("short"))
             }
             b'Z' => {
                 self.pos += 1;
-                Some("boolean".to_string())
+                Some(DecodedType::Primitive("boolean"))
             }
             _ => self.parse_ref_type_sig(depth + 1),
         }
     }
 
-    fn parse_ref_type_sig(&mut self, depth: usize) -> Option<String> {
+    fn parse_ref_type_sig(&mut self, depth: usize) -> Option<DecodedType> {
         if depth >= MAX_SIGNATURE_DEPTH {
             return None;
         }
@@ -1081,26 +1756,30 @@ impl<'a> SignatureParser<'a> {
                         return None;
                     }
                 }
-                let elem = self.parse_java_type_sig(depth + 1)?;
-                let mut out = String::with_capacity(elem.len() + dims * 2);
-                out.push_str(&elem);
+                let mut ty = self.parse_java_type_sig(depth + 1)?;
                 for _ in 0..dims {
-                    out.push_str("[]");
+                    ty = DecodedType::Array {
+                        elem: Box::new(ty),
+                        nullability: None,
+                    };
                 }
-                Some(out)
+                Some(ty)
             }
             _ => None,
         }
     }
 
-    fn parse_type_var_sig(&mut self) -> Option<String> {
+    fn parse_type_var_sig(&mut self) -> Option<DecodedType> {
         self.expect_byte(b'T')?;
         let name = self.read_identifier_until(b";")?;
         self.expect_byte(b';')?;
-        Some(name.to_string())
+        Some(DecodedType::TypeVar {
+            name: name.to_string(),
+            nullability: None,
+        })
     }
 
-    fn parse_class_type_sig(&mut self, depth: usize) -> Option<String> {
+    fn parse_class_type_sig(&mut self, depth: usize) -> Option<DecodedType> {
         if depth >= MAX_SIGNATURE_DEPTH {
             return None;
         }
@@ -1108,40 +1787,34 @@ impl<'a> SignatureParser<'a> {
         let internal_head = self.read_identifier_until(b"<.;")?;
         let head_name = self.format_internal_name(internal_head);
         let head_args = if self.peek_byte() == Some(b'<') {
-            Some(self.parse_type_args(depth + 1)?)
+            self.parse_type_args(depth + 1)?
         } else {
-            None
+            Vec::new()
         };
-        let mut segments = vec![(head_name, head_args)];
+        let mut segments = vec![ClassSegment {
+            name: head_name,
+            args: head_args,
+            nullability: None,
+        }];
         while self.peek_byte() == Some(b'.') {
             self.pos += 1;
             let suffix = self.read_identifier_until(b"<.;")?;
             let suffix_args = if self.peek_byte() == Some(b'<') {
-                Some(self.parse_type_args(depth + 1)?)
+                self.parse_type_args(depth + 1)?
             } else {
-                None
+                Vec::new()
             };
-            segments.push((suffix.to_string(), suffix_args));
+            segments.push(ClassSegment {
+                name: suffix.to_string(),
+                args: suffix_args,
+                nullability: None,
+            });
         }
         self.expect_byte(b';')?;
-
-        let last_args_idx = segments.iter().rposition(|(_, args)| args.is_some());
-        let mut out = String::new();
-        for (i, (name, args)) in segments.into_iter().enumerate() {
-            if i > 0 {
-                out.push('.');
-            }
-            out.push_str(&name);
-            if Some(i) == last_args_idx
-                && let Some(args) = args
-            {
-                out.push_str(&args);
-            }
-        }
-        Some(out)
+        Some(DecodedType::Class { segments })
     }
 
-    fn parse_type_args(&mut self, depth: usize) -> Option<String> {
+    fn parse_type_args(&mut self, depth: usize) -> Option<Vec<DecodedType>> {
         if depth >= MAX_SIGNATURE_DEPTH {
             return None;
         }
@@ -1151,27 +1824,24 @@ impl<'a> SignatureParser<'a> {
             let arg = match self.peek_byte()? {
                 b'*' => {
                     self.pos += 1;
-                    "?".to_string()
+                    DecodedType::Wildcard(DecodedWildcard::Unbounded)
                 }
                 b'+' => {
                     self.pos += 1;
                     let bound = self.parse_ref_type_sig(depth + 1)?;
-                    format!("? extends {bound}")
+                    DecodedType::Wildcard(DecodedWildcard::Extends(Box::new(bound)))
                 }
                 b'-' => {
                     self.pos += 1;
                     let bound = self.parse_ref_type_sig(depth + 1)?;
-                    format!("? super {bound}")
+                    DecodedType::Wildcard(DecodedWildcard::Super(Box::new(bound)))
                 }
                 _ => self.parse_ref_type_sig(depth + 1)?,
             };
             args.push(arg);
         }
         self.expect_byte(b'>')?;
-        if args.is_empty() {
-            return None;
-        }
-        Some(format!("<{}>", args.join(", ")))
+        (!args.is_empty()).then_some(args)
     }
 }
 
@@ -1952,5 +2622,428 @@ mod tests {
         };
         assert_eq!(plain_ty.super_class_generic, None);
         assert!(plain_ty.interfaces_generic.is_empty());
+    }
+
+    #[test]
+    fn parses_package_info_and_module_info_nullness_scopes() {
+        // 1. package-info.class (marked ACC_SYNTHETIC by javac!) with @NullMarked
+        let mut cp = ConstantPool::default();
+        let this_cls = cp.add_class("com/example/package-info").unwrap();
+        let obj_cls = cp.add_class("java/lang/Object").unwrap();
+        let rva_attr = cp.add_utf8("RuntimeVisibleAnnotations").unwrap();
+        let null_marked_desc = cp.add_utf8("Lorg/jspecify/annotations/NullMarked;").unwrap();
+
+        let pkg_cf = ClassFile {
+            version: JAVA_21,
+            access_flags: ClassAccessFlags::INTERFACE
+                | ClassAccessFlags::ABSTRACT
+                | ClassAccessFlags::SYNTHETIC,
+            this_class: this_cls,
+            super_class: obj_cls,
+            attributes: vec![Attribute::RuntimeVisibleAnnotations {
+                name_index: rva_attr,
+                annotations: vec![Annotation {
+                    type_index: null_marked_desc,
+                    elements: vec![],
+                }],
+            }],
+            constant_pool: cp,
+            ..Default::default()
+        };
+        let Some(ParsedClassfile::Package {
+            package,
+            nullness_scope,
+        }) = parse_class_bytes(&serialize(&pkg_cf), jdk_base_origin()).unwrap()
+        else {
+            panic!("expected ParsedClassfile::Package");
+        };
+        assert_eq!(package, "com.example");
+        assert_eq!(
+            nullness_scope,
+            NullnessScope::NonNullByDefault(NullabilitySource::JSpecify)
+        );
+
+        // 2. module-info.class with @NullMarked
+        let mut cp = ConstantPool::default();
+        let this_cls = cp.add_class("module-info").unwrap();
+        let mod_attr = cp.add_utf8("Module").unwrap();
+        let self_mod = cp.add_module("com.example.mod").unwrap();
+        let rva_attr = cp.add_utf8("RuntimeVisibleAnnotations").unwrap();
+        let null_marked_desc = cp.add_utf8("Lorg/jspecify/annotations/NullMarked;").unwrap();
+
+        let mod_cf = ClassFile {
+            version: JAVA_21,
+            access_flags: ClassAccessFlags::MODULE,
+            this_class: this_cls,
+            super_class: 0,
+            attributes: vec![
+                Attribute::Module {
+                    name_index: mod_attr,
+                    module_name_index: self_mod,
+                    flags: ModuleAccessFlags::empty(),
+                    version_index: 0,
+                    requires: vec![],
+                    exports: vec![],
+                    opens: vec![],
+                    uses: vec![],
+                    provides: vec![],
+                },
+                Attribute::RuntimeVisibleAnnotations {
+                    name_index: rva_attr,
+                    annotations: vec![Annotation {
+                        type_index: null_marked_desc,
+                        elements: vec![],
+                    }],
+                },
+            ],
+            constant_pool: cp,
+            ..Default::default()
+        };
+        let Some(ParsedClassfile::Module(m)) =
+            parse_class_bytes(&serialize(&mod_cf), jdk_base_origin()).unwrap()
+        else {
+            panic!("expected ParsedClassfile::Module");
+        };
+        assert_eq!(
+            m.nullness_scope,
+            NullnessScope::NonNullByDefault(NullabilitySource::JSpecify)
+        );
+    }
+
+    #[test]
+    fn decodes_visible_and_invisible_annotations_and_type_paths() {
+        let mut cp = ConstantPool::default();
+        let this_cls = cp.add_class("com/example/NullApi").unwrap();
+        let super_cls = cp.add_class("java/util/ArrayList").unwrap();
+
+        let sig_attr = cp.add_utf8("Signature").unwrap();
+        let rva_attr = cp.add_utf8("RuntimeVisibleAnnotations").unwrap();
+        let ria_attr = cp.add_utf8("RuntimeInvisibleAnnotations").unwrap();
+        let rvpa_attr = cp.add_utf8("RuntimeVisibleParameterAnnotations").unwrap();
+        let rvta_attr = cp.add_utf8("RuntimeVisibleTypeAnnotations").unwrap();
+        let rita_attr = cp.add_utf8("RuntimeInvisibleTypeAnnotations").unwrap();
+
+        let jspec_marked = cp.add_utf8("Lorg/jspecify/annotations/NullMarked;").unwrap();
+        let jspec_unmarked = cp
+            .add_utf8("Lorg/jspecify/annotations/NullUnmarked;")
+            .unwrap();
+        let jspec_nullable = cp.add_utf8("Lorg/jspecify/annotations/Nullable;").unwrap();
+        let jspec_nonnull = cp.add_utf8("Lorg/jspecify/annotations/NonNull;").unwrap();
+        let jb_nullable = cp
+            .add_utf8("Lorg/jetbrains/annotations/Nullable;")
+            .unwrap();
+        let javax_nullable = cp.add_utf8("Ljavax/annotation/Nullable;").unwrap();
+
+        // Class signature: `<T:Ljava/lang/Object;>Ljava/util/ArrayList<Ljava/lang/String;>;`
+        // with `<T extends @Nullable Object>` and `extends ArrayList<@Nullable String>`.
+        let class_sig = cp
+            .add_utf8("<T:Ljava/lang/Object;>Ljava/util/ArrayList<Ljava/lang/String;>;")
+            .unwrap();
+
+        // Field 1: `List<@Nullable String>`
+        let f_list = cp.add_utf8("list").unwrap();
+        let f_list_desc = cp.add_utf8("Ljava/util/List;").unwrap();
+        let f_list_sig = cp.add_utf8("Ljava/util/List<Ljava/lang/String;>;").unwrap();
+
+        // Field 2: `String @Nullable []` (type_path = [])
+        let f_arr_outer = cp.add_utf8("arrOuter").unwrap();
+        let f_arr_desc = cp.add_utf8("[Ljava/lang/String;").unwrap();
+
+        // Field 3: `@org.jetbrains.annotations.Nullable String[]` (CLASS-retention invisible!)
+        let f_arr_elem = cp.add_utf8("arrElem").unwrap();
+
+        // Field 4: `Map<String, @Nullable List<@NonNull User>>`
+        let f_map = cp.add_utf8("nestedMap").unwrap();
+        let f_map_desc = cp.add_utf8("Ljava/util/Map;").unwrap();
+        let f_map_sig = cp
+            .add_utf8("Ljava/util/Map<Ljava/lang/String;Ljava/util/List<Lcom/example/User;>;>;")
+            .unwrap();
+
+        // Method: `@NullUnmarked List<? extends @Nullable String> transform(@javax.annotation.Nullable String a, @Nullable String[] b)`
+        let m_name = cp.add_utf8("transform").unwrap();
+        let m_desc = cp
+            .add_utf8("(Ljava/lang/String;[Ljava/lang/String;)Ljava/util/List;")
+            .unwrap();
+        let m_sig = cp
+            .add_utf8("(Ljava/lang/String;[Ljava/lang/String;)Ljava/util/List<+Ljava/lang/String;>;")
+            .unwrap();
+
+        let cf = ClassFile {
+            version: JAVA_21,
+            access_flags: ClassAccessFlags::PUBLIC | ClassAccessFlags::SUPER,
+            this_class: this_cls,
+            super_class: super_cls,
+            fields: vec![
+                Field {
+                    access_flags: FieldAccessFlags::PUBLIC,
+                    name_index: f_list,
+                    descriptor_index: f_list_desc,
+                    field_type: FieldType::Object("java/util/List".into()),
+                    attributes: vec![
+                        Attribute::Signature {
+                            name_index: sig_attr,
+                            signature_index: f_list_sig,
+                        },
+                        Attribute::RuntimeVisibleTypeAnnotations {
+                            name_index: rvta_attr,
+                            type_annotations: vec![TypeAnnotation {
+                                target_type: TargetType::Empty { target_type: 0x13 },
+                                type_path: vec![TargetPath {
+                                    type_path_kind: 3,
+                                    type_argument_index: 0,
+                                }],
+                                type_index: jspec_nullable,
+                                elements: vec![],
+                            }],
+                        },
+                    ],
+                },
+                Field {
+                    access_flags: FieldAccessFlags::PUBLIC,
+                    name_index: f_arr_outer,
+                    descriptor_index: f_arr_desc,
+                    field_type: FieldType::Array(Box::new(FieldType::Object(
+                        "java/lang/String".into(),
+                    ))),
+                    attributes: vec![Attribute::RuntimeVisibleTypeAnnotations {
+                        name_index: rvta_attr,
+                        type_annotations: vec![TypeAnnotation {
+                            target_type: TargetType::Empty { target_type: 0x13 },
+                            type_path: vec![],
+                            type_index: jspec_nullable,
+                            elements: vec![],
+                        }],
+                    }],
+                },
+                Field {
+                    access_flags: FieldAccessFlags::PUBLIC,
+                    name_index: f_arr_elem,
+                    descriptor_index: f_arr_desc,
+                    field_type: FieldType::Array(Box::new(FieldType::Object(
+                        "java/lang/String".into(),
+                    ))),
+                    attributes: vec![
+                        // JetBrains emits both RuntimeInvisibleAnnotations and RuntimeInvisibleTypeAnnotations.
+                        Attribute::RuntimeInvisibleAnnotations {
+                            name_index: ria_attr,
+                            annotations: vec![Annotation {
+                                type_index: jb_nullable,
+                                elements: vec![],
+                            }],
+                        },
+                        Attribute::RuntimeInvisibleTypeAnnotations {
+                            name_index: rita_attr,
+                            type_annotations: vec![TypeAnnotation {
+                                target_type: TargetType::Empty { target_type: 0x13 },
+                                type_path: vec![TargetPath {
+                                    type_path_kind: 0,
+                                    type_argument_index: 0,
+                                }],
+                                type_index: jb_nullable,
+                                elements: vec![],
+                            }],
+                        },
+                    ],
+                },
+                Field {
+                    access_flags: FieldAccessFlags::PUBLIC,
+                    name_index: f_map,
+                    descriptor_index: f_map_desc,
+                    field_type: FieldType::Object("java/util/Map".into()),
+                    attributes: vec![
+                        Attribute::Signature {
+                            name_index: sig_attr,
+                            signature_index: f_map_sig,
+                        },
+                        Attribute::RuntimeVisibleTypeAnnotations {
+                            name_index: rvta_attr,
+                            type_annotations: vec![
+                                TypeAnnotation {
+                                    target_type: TargetType::Empty { target_type: 0x13 },
+                                    type_path: vec![TargetPath {
+                                        type_path_kind: 3,
+                                        type_argument_index: 1,
+                                    }],
+                                    type_index: jspec_nullable,
+                                    elements: vec![],
+                                },
+                                TypeAnnotation {
+                                    target_type: TargetType::Empty { target_type: 0x13 },
+                                    type_path: vec![
+                                        TargetPath {
+                                            type_path_kind: 3,
+                                            type_argument_index: 1,
+                                        },
+                                        TargetPath {
+                                            type_path_kind: 3,
+                                            type_argument_index: 0,
+                                        },
+                                    ],
+                                    type_index: jspec_nonnull,
+                                    elements: vec![],
+                                },
+                            ],
+                        },
+                    ],
+                },
+            ],
+            methods: vec![Method {
+                access_flags: MethodAccessFlags::PUBLIC,
+                name_index: m_name,
+                descriptor_index: m_desc,
+                attributes: vec![
+                    Attribute::Signature {
+                        name_index: sig_attr,
+                        signature_index: m_sig,
+                    },
+                    Attribute::RuntimeVisibleAnnotations {
+                        name_index: rva_attr,
+                        annotations: vec![Annotation {
+                            type_index: jspec_unmarked,
+                            elements: vec![],
+                        }],
+                    },
+                    Attribute::RuntimeVisibleParameterAnnotations {
+                        name_index: rvpa_attr,
+                        parameter_annotations: vec![
+                            ristretto_classfile::attributes::ParameterAnnotation {
+                                annotations: vec![Annotation {
+                                    type_index: javax_nullable,
+                                    elements: vec![],
+                                }],
+                            },
+                            ristretto_classfile::attributes::ParameterAnnotation {
+                                annotations: vec![],
+                            },
+                        ],
+                    },
+                    Attribute::RuntimeVisibleTypeAnnotations {
+                        name_index: rvta_attr,
+                        type_annotations: vec![
+                            TypeAnnotation {
+                                target_type: TargetType::Empty { target_type: 0x14 },
+                                type_path: vec![
+                                    TargetPath {
+                                        type_path_kind: 3,
+                                        type_argument_index: 0,
+                                    },
+                                    TargetPath {
+                                        type_path_kind: 2,
+                                        type_argument_index: 0,
+                                    },
+                                ],
+                                type_index: jspec_nullable,
+                                elements: vec![],
+                            },
+                            TypeAnnotation {
+                                target_type: TargetType::FormalParameter {
+                                    target_type: 0x16,
+                                    formal_parameter_index: 1,
+                                },
+                                type_path: vec![TargetPath {
+                                    type_path_kind: 0,
+                                    type_argument_index: 0,
+                                }],
+                                type_index: jspec_nullable,
+                                elements: vec![],
+                            },
+                        ],
+                    },
+                ],
+            }],
+            attributes: vec![
+                Attribute::Signature {
+                    name_index: sig_attr,
+                    signature_index: class_sig,
+                },
+                Attribute::RuntimeVisibleAnnotations {
+                    name_index: rva_attr,
+                    annotations: vec![Annotation {
+                        type_index: jspec_marked,
+                        elements: vec![],
+                    }],
+                },
+                Attribute::RuntimeVisibleTypeAnnotations {
+                    name_index: rvta_attr,
+                    type_annotations: vec![
+                        TypeAnnotation {
+                            target_type: TargetType::TypeParameterBound {
+                                target_type: 0x11,
+                                type_parameter_index: 0,
+                                bound_index: 0,
+                            },
+                            type_path: vec![],
+                            type_index: jspec_nullable,
+                            elements: vec![],
+                        },
+                        TypeAnnotation {
+                            target_type: TargetType::SuperType {
+                                target_type: 0x10,
+                                supertype_index: u16::MAX,
+                            },
+                            type_path: vec![TargetPath {
+                                type_path_kind: 3,
+                                type_argument_index: 0,
+                            }],
+                            type_index: jspec_nullable,
+                            elements: vec![],
+                        },
+                    ],
+                },
+            ],
+            constant_pool: cp,
+            ..Default::default()
+        };
+
+        let Some(ParsedClassfile::Type(ty)) =
+            parse_class_bytes(&serialize(&cf), jdk_base_origin()).unwrap()
+        else {
+            panic!("expected ParsedClassfile::Type");
+        };
+
+        assert_eq!(
+            ty.nullness_scope,
+            NullnessScope::NonNullByDefault(NullabilitySource::JSpecify)
+        );
+        assert_eq!(
+            ty.type_param_bounds,
+            BTreeMap::from([(SmolStr::new("T"), vec!["java.lang.Object?".to_string()])])
+        );
+        assert_eq!(
+            ty.super_class_generic.as_deref(),
+            Some("java.util.ArrayList<java.lang.String?>")
+        );
+
+        assert_eq!(
+            ty.members[0].type_ref.as_deref(),
+            Some("java.util.List<String?>")
+        );
+        assert_eq!(ty.members[1].type_ref.as_deref(), Some("String[]?"));
+        assert_eq!(ty.members[2].type_ref.as_deref(), Some("String?[]"));
+        assert_eq!(ty.members[2].decl_nullability, None);
+        assert_eq!(
+            ty.members[3].type_ref.as_deref(),
+            Some("java.util.Map<String, java.util.List<com.example.User!>?>")
+        );
+
+        let m = &ty.members[4];
+        assert_eq!(
+            m.nullness_scope,
+            NullnessScope::Unspecified(NullabilitySource::JSpecify)
+        );
+        assert_eq!(
+            m.type_ref.as_deref(),
+            Some("java.util.List<? extends String?>")
+        );
+        assert_eq!(m.params[0].type_ref, "String?");
+        assert_eq!(
+            m.params[0].decl_nullability,
+            Some((
+                Nullability::Nullable,
+                NullabilitySource::ThirdPartyAnnotation
+            ))
+        );
+        assert_eq!(m.params[1].type_ref, "String?[]");
+        assert_eq!(m.params[1].decl_nullability, None);
     }
 }

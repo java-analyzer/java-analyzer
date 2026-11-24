@@ -22,19 +22,19 @@ use crate::{
     },
     infer::{
         self, erase_type_vars_to_bound, find_functional_interface_sam, infer_expr_ty,
-        infer_local_ty, is_raw_class_ty, parameter_for_arg, resolve_params_in_binary,
-        resolve_params_in_file,
+        infer_local_ty, is_raw_class_ty, parameter_for_arg, resolve_params_in_binary_for_member,
+        resolve_params_in_file_for_member,
     },
     item_tree::{AstIdMap, FileItemTree, MemberId, TypeId},
     symbols::{
-        ImportKind, MemberKind, MemberSymbol, ParamSummary, TypeKind, TypeSymbol, WorkspaceIndex,
-        extract_field_decl, extract_local_type_symbol, extract_method_or_ctor,
+        ImportKind, MemberKind, MemberSymbol, NullnessScope, ParamSummary, TypeKind, TypeSymbol,
+        WorkspaceIndex, extract_field_decl, extract_local_type_symbol, extract_method_or_ctor,
         format_params_signature, node_ident_text,
     },
     ty::{
-        Substitution, Ty, is_assignable, is_subtype, resolve_binary_type_ref_for_owner,
-        resolve_type_ref_in_file_for_owner, supertype_substitution_for_ty,
-        type_param_bounds_of_fqn,
+        Substitution, Ty, is_assignable, is_subtype, resolve_binary_type_ref_for_member,
+        resolve_type_ref_in_file_for_member, resolve_type_ref_in_file_for_owner,
+        supertype_substitution_for_ty, ty_has_explicit_nullability, type_param_bounds_of_fqn,
     },
 };
 
@@ -321,6 +321,11 @@ impl ResolvedTarget {
                 })
             }
             Self::IndexedMember(file_id, member_id) => {
+                let detail = infer::format_member_detail(db, &self).or_else(|| {
+                    let tree = db.file_item_tree(file_id);
+                    let m = &tree.members[member_id];
+                    member_detail(m.kind, m.type_ref.as_deref(), &m.params)
+                });
                 let tree = db.file_item_tree(file_id);
                 let m = &tree.members[member_id];
                 let range = db.ast_id_map(file_id).range(m.ast_id);
@@ -328,7 +333,6 @@ impl ResolvedTarget {
                     Some(owner) => format!("{owner}.{}", m.name),
                     None => m.name.to_string(),
                 };
-                let detail = member_detail(m.kind, m.type_ref.as_deref(), &m.params);
                 let overrides = (m.kind == MemberKind::Method && !m.is_static)
                     .then(|| {
                         m.owner_type.as_deref().and_then(|owner_fqn| {
@@ -349,11 +353,13 @@ impl ResolvedTarget {
                 })
             }
             Self::LocalMember(m) => {
+                let target_ref = Self::LocalMember(m.clone());
+                let detail = infer::format_member_detail(db, &target_ref)
+                    .or_else(|| member_detail(m.kind, m.type_ref.as_deref(), &m.params));
                 let qualified_name = match &m.owner_type {
                     Some(owner) => format!("{owner}.{}", m.name),
                     None => m.name.to_string(),
                 };
-                let detail = member_detail(m.kind, m.type_ref.as_deref(), &m.params);
                 let overrides = (m.kind == MemberKind::Method && !m.is_static)
                     .then(|| {
                         m.owner_type.as_deref().and_then(|owner_fqn| {
@@ -374,14 +380,16 @@ impl ResolvedTarget {
                 })
             }
             Self::BinaryMember {
-                owner_fqn,
+                ref owner_fqn,
                 member_index,
             } => {
-                let t = classpath.type_by_fqn(&owner_fqn)?;
+                let detail = infer::format_member_detail(db, &self);
+                let t = classpath.type_by_fqn(owner_fqn)?;
                 let m = t.members.get(member_index)?;
-                let detail = member_detail(m.kind, m.type_ref.as_deref(), &m.params);
+                let detail = detail
+                    .or_else(|| member_detail(m.kind, m.type_ref.as_deref(), &m.params));
                 let overrides = (m.kind == MemberKind::Method && !m.is_static)
-                    .then(|| find_overridden_method(db, &owner_fqn, &m.name, m.params.len()))
+                    .then(|| find_overridden_method(db, owner_fqn, &m.name, m.params.len()))
                     .flatten();
                 Some(ResolvedSymbol {
                     file_id: None,
@@ -736,9 +744,17 @@ fn enrich_local_inferred_type(
     decl_node: &SyntaxNode,
     mut local: LocalSymbol,
 ) -> LocalSymbol {
-    if local.type_ref.as_deref().is_none_or(|t| t == "var") {
+    let missing_or_var = local.type_ref.as_deref().is_none_or(|t| t == "var");
+    let in_marked = matches!(
+        infer::effective_nullness_scope_at(ctx.db, ctx.file_id, decl_node),
+        NullnessScope::NonNullByDefault(_)
+    );
+    let has_at = local.type_ref.as_deref().is_some_and(|t| t.contains('@'));
+    if missing_or_var || in_marked || has_at {
         let inferred = infer_local_ty(ctx.db, ctx.file_id, decl_node);
-        if !matches!(inferred, Ty::Unknown) {
+        if !matches!(inferred, Ty::Unknown)
+            && (missing_or_var || in_marked || ty_has_explicit_nullability(&inferred))
+        {
             local.type_ref = Some(inferred.display_short());
         }
     }
@@ -819,13 +835,18 @@ fn resolve_declaration_site(ctx: ResolveCtx<'_>, name_node: &SyntaxNode) -> Opti
                 ctx, &decl, local,
             )))
         }
-        CATCH_CLAUSE => Some(ResolvedTarget::Local(local_symbol_from_node(
-            ctx.file_id,
-            &decl,
-            name_node,
-            LocalKind::CatchParam,
-            false,
-        ))),
+        CATCH_CLAUSE => {
+            let local = local_symbol_from_node(
+                ctx.file_id,
+                &decl,
+                name_node,
+                LocalKind::CatchParam,
+                false,
+            );
+            Some(ResolvedTarget::Local(enrich_local_inferred_type(
+                ctx, &decl, local,
+            )))
+        }
         RESOURCE => {
             let local = local_symbol_from_node(
                 ctx.file_id,
@@ -959,6 +980,8 @@ fn resolve_member_declaration(
             is_default: false,
             is_abstract: false,
             has_override: false,
+            nullness_scope: crate::NullnessScope::Inherited,
+            decl_nullability: None,
             type_params: Vec::new(),
             type_param_bounds: std::collections::BTreeMap::new(),
             type_ref: None,
@@ -1286,25 +1309,17 @@ fn resolve_name_ref_expr(
             let enc_args = crate::ty::type_params_of_fqn(ctx.db, &enc_fqn)
                 .into_iter()
                 .map(|tp| {
-                    let bounds = tp_bounds
-                        .get(&tp)
-                        .map(|raw_b| {
-                            raw_b
-                                .iter()
-                                .map(|b| {
-                                    resolve_type_ref_in_file_for_owner(
-                                        ctx.db,
-                                        ctx.file_id,
-                                        Some(&enc_fqn),
-                                        b,
-                                        &tp_bounds,
-                                    )
-                                })
-                                .filter(|t| !matches!(t, Ty::Unknown))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    crate::ty::TypeArg::Type(Ty::type_var(tp, bounds))
+                    let tv = resolve_type_ref_in_file_for_owner(
+                        ctx.db,
+                        ctx.file_id,
+                        Some(&enc_fqn),
+                        tp.as_str(),
+                        &tp_bounds,
+                    );
+                    match tv {
+                        t @ Ty::TypeVar { .. } => crate::ty::TypeArg::Type(t),
+                        _ => crate::ty::TypeArg::Type(Ty::type_var(tp, Vec::new())),
+                    }
                 })
                 .collect();
             let recv_ty = Ty::class(enc_fqn, enc_args);
@@ -3215,6 +3230,7 @@ pub(crate) enum OverloadPhase {
 pub(crate) struct CallableCandidate {
     pub target: ResolvedTarget,
     pub owner_fqn: String,
+    pub member_nullness_scope: NullnessScope,
     pub is_static: bool,
     pub is_raw_receiver: bool,
     pub method_type_params: Vec<SmolStr>,
@@ -3318,13 +3334,28 @@ pub(crate) fn collect_top_level_method_candidates(
                 m.type_param_bounds.get(tp).cloned().unwrap_or_default(),
             );
         }
-        let param_tys = resolve_params_in_file(ctx.db, ctx.file_id, None, &m.params, &scope);
+        let param_tys = resolve_params_in_file_for_member(
+            ctx.db,
+            ctx.file_id,
+            None,
+            m.nullness_scope,
+            &m.params,
+            &scope,
+        );
         let return_ty = m.type_ref.as_deref().map_or(Ty::Unknown, |raw| {
-            resolve_type_ref_in_file_for_owner(ctx.db, ctx.file_id, None, raw, &scope)
+            resolve_type_ref_in_file_for_member(
+                ctx.db,
+                ctx.file_id,
+                None,
+                m.nullness_scope,
+                raw,
+                &scope,
+            )
         });
         out.push(CallableCandidate {
             target: ResolvedTarget::IndexedMember(ctx.file_id, mid),
             owner_fqn: String::new(),
+            member_nullness_scope: m.nullness_scope,
             is_static: m.is_static,
             is_raw_receiver: false,
             method_type_params: m.type_params.clone(),
@@ -3407,11 +3438,18 @@ pub(crate) fn collect_constructor_candidates(
                     m.type_param_bounds.get(tp).cloned().unwrap_or_default(),
                 );
             }
-            let param_tys =
-                resolve_params_in_file(ctx.db, fid, Some(owner_fqn), &m.params, &scope);
+            let param_tys = resolve_params_in_file_for_member(
+                ctx.db,
+                fid,
+                Some(owner_fqn),
+                m.nullness_scope,
+                &m.params,
+                &scope,
+            );
             out.push(CallableCandidate {
                 target: ResolvedTarget::IndexedMember(fid, mid),
                 owner_fqn: owner_fqn.to_string(),
+                member_nullness_scope: m.nullness_scope,
                 is_static: false,
                 is_raw_receiver: false,
                 method_type_params: m.type_params.clone(),
@@ -3436,13 +3474,20 @@ pub(crate) fn collect_constructor_candidates(
                     m.type_param_bounds.get(tp).cloned().unwrap_or_default(),
                 );
             }
-            let param_tys = resolve_params_in_binary(ctx.classpath, bin, &m.params, &scope);
+            let param_tys = resolve_params_in_binary_for_member(
+                ctx.classpath,
+                bin,
+                m.nullness_scope,
+                &m.params,
+                &scope,
+            );
             out.push(CallableCandidate {
                 target: ResolvedTarget::BinaryMember {
                     owner_fqn: owner_fqn.to_string(),
                     member_index,
                 },
                 owner_fqn: owner_fqn.to_string(),
+                member_nullness_scope: m.nullness_scope,
                 is_static: false,
                 is_raw_receiver: false,
                 method_type_params: m.type_params.clone(),
@@ -3483,10 +3528,11 @@ fn collect_owner_methods(
             if m.kind == MemberKind::RecordComponent {
                 if is_record && !only_static && arity == 0 && m.name == name {
                     let return_ty = m.type_ref.as_deref().map_or(Ty::Unknown, |raw| {
-                        resolve_type_ref_in_file_for_owner(
+                        resolve_type_ref_in_file_for_member(
                             ctx.db,
                             fid,
                             Some(owner_fqn),
+                            m.nullness_scope,
                             raw,
                             &owner_scope,
                         )
@@ -3494,6 +3540,7 @@ fn collect_owner_methods(
                     out.push(CallableCandidate {
                         target: ResolvedTarget::IndexedMember(fid, mid),
                         owner_fqn: owner_fqn.to_string(),
+                        member_nullness_scope: m.nullness_scope,
                         is_static: false,
                         is_raw_receiver,
                         method_type_params: Vec::new(),
@@ -3520,14 +3567,28 @@ fn collect_owner_methods(
                     m.type_param_bounds.get(tp).cloned().unwrap_or_default(),
                 );
             }
-            let param_tys =
-                resolve_params_in_file(ctx.db, fid, Some(owner_fqn), &m.params, &scope);
+            let param_tys = resolve_params_in_file_for_member(
+                ctx.db,
+                fid,
+                Some(owner_fqn),
+                m.nullness_scope,
+                &m.params,
+                &scope,
+            );
             let return_ty = m.type_ref.as_deref().map_or(Ty::Unknown, |raw| {
-                resolve_type_ref_in_file_for_owner(ctx.db, fid, Some(owner_fqn), raw, &scope)
+                resolve_type_ref_in_file_for_member(
+                    ctx.db,
+                    fid,
+                    Some(owner_fqn),
+                    m.nullness_scope,
+                    raw,
+                    &scope,
+                )
             });
             out.push(CallableCandidate {
                 target: ResolvedTarget::IndexedMember(fid, mid),
                 owner_fqn: owner_fqn.to_string(),
+                member_nullness_scope: m.nullness_scope,
                 is_static: m.is_static,
                 is_raw_receiver: !m.is_static && is_raw_receiver,
                 method_type_params: m.type_params.clone(),
@@ -3549,7 +3610,13 @@ fn collect_owner_methods(
             if m.kind == MemberKind::RecordComponent {
                 if is_record && !only_static && arity == 0 && m.name == name {
                     let return_ty = m.type_ref.as_deref().map_or(Ty::Unknown, |raw| {
-                        resolve_binary_type_ref_for_owner(ctx.classpath, bin, raw, &owner_scope)
+                        resolve_binary_type_ref_for_member(
+                            ctx.classpath,
+                            bin,
+                            m.nullness_scope,
+                            raw,
+                            &owner_scope,
+                        )
                     });
                     out.push(CallableCandidate {
                         target: ResolvedTarget::BinaryMember {
@@ -3557,6 +3624,7 @@ fn collect_owner_methods(
                             member_index,
                         },
                         owner_fqn: owner_fqn.to_string(),
+                        member_nullness_scope: m.nullness_scope,
                         is_static: false,
                         is_raw_receiver,
                         method_type_params: Vec::new(),
@@ -3583,9 +3651,21 @@ fn collect_owner_methods(
                     m.type_param_bounds.get(tp).cloned().unwrap_or_default(),
                 );
             }
-            let param_tys = resolve_params_in_binary(ctx.classpath, bin, &m.params, &scope);
+            let param_tys = resolve_params_in_binary_for_member(
+                ctx.classpath,
+                bin,
+                m.nullness_scope,
+                &m.params,
+                &scope,
+            );
             let return_ty = m.type_ref.as_deref().map_or(Ty::Unknown, |raw| {
-                resolve_binary_type_ref_for_owner(ctx.classpath, bin, raw, &scope)
+                resolve_binary_type_ref_for_member(
+                    ctx.classpath,
+                    bin,
+                    m.nullness_scope,
+                    raw,
+                    &scope,
+                )
             });
             out.push(CallableCandidate {
                 target: ResolvedTarget::BinaryMember {
@@ -3593,6 +3673,7 @@ fn collect_owner_methods(
                     member_index,
                 },
                 owner_fqn: owner_fqn.to_string(),
+                member_nullness_scope: m.nullness_scope,
                 is_static: m.is_static,
                 is_raw_receiver: !m.is_static && is_raw_receiver,
                 method_type_params: m.type_params.clone(),

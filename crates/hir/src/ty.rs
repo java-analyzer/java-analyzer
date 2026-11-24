@@ -8,10 +8,10 @@ use smol_str::SmolStr;
 
 use crate::{
     DefDatabase, FileId,
-    classpath::{BinaryTypeSymbol, ClasspathIndex},
+    classpath::{BinaryOrigin, BinaryTypeSymbol, ClasspathIndex},
     hierarchy::linearized_supertypes,
     item_tree::{FileItemTree, TypeItem},
-    symbols::{ImportKind, TypeIdentity, TypeKind, WorkspaceIndex},
+    symbols::{ImportKind, NullnessScope, TypeIdentity, TypeKind, WorkspaceIndex},
 };
 
 /// Maximum recursion depth for type substitution, subtyping, and type-variable resolution.
@@ -560,10 +560,10 @@ impl Substitution {
                             if contravariant {
                                 (**lower).clone()
                             } else {
-                                Ty::object()
+                                tvar_upper_bound(bounds)
                             }
                         }
-                        TypeArg::Wildcard(WildcardBound::Unbounded) => Ty::object(),
+                        TypeArg::Wildcard(WildcardBound::Unbounded) => tvar_upper_bound(bounds),
                     };
                     apply_tvar_nullability(substituted, *nullability)
                 } else {
@@ -629,6 +629,14 @@ impl Substitution {
                 WildcardBound::Super(Box::new(self.apply_inner(ty, depth + 1, false))),
             ),
         }
+    }
+}
+
+fn tvar_upper_bound(bounds: &[Ty]) -> Ty {
+    match bounds {
+        [] => Ty::object(),
+        [single] => single.clone(),
+        many => Ty::Intersection(many.to_vec()),
     }
 }
 
@@ -1004,6 +1012,289 @@ impl<'a> TypeParser<'a> {
     }
 }
 
+// ---- Nullness Scope Resolution & JSpecify Defaulting ----
+
+/// Resolves the effective lexical [`NullnessScope`] at file/package/module level for `file_id`.
+#[must_use]
+pub fn effective_nullness_scope_for_file(db: &dyn DefDatabase, file_id: FileId) -> NullnessScope {
+    let file_tree = db.file_item_tree(file_id);
+    if file_tree.nullness_scope != NullnessScope::Inherited {
+        return file_tree.nullness_scope;
+    }
+    let workspace = db.workspace_index();
+    let pkg = file_tree.package.as_deref().unwrap_or("");
+    let pkg_scope = workspace.package_nullness(pkg);
+    if pkg_scope != NullnessScope::Inherited {
+        return pkg_scope;
+    }
+    if let Some(mod_name) = workspace.file_module(file_id) {
+        let mod_scope = workspace.module_nullness(mod_name);
+        if mod_scope != NullnessScope::Inherited {
+            return mod_scope;
+        }
+    }
+    NullnessScope::Inherited
+}
+
+fn effective_nullness_scope_in_file_tree(
+    db: &dyn DefDatabase,
+    file_tree: &FileItemTree,
+    workspace: &WorkspaceIndex,
+    start_ty: &TypeItem,
+) -> NullnessScope {
+    let mut visited = FxHashSet::default();
+    let mut cur = start_ty.clone();
+    for _ in 0..MAX_SUBST_DEPTH {
+        if cur.nullness_scope != NullnessScope::Inherited {
+            return cur.nullness_scope;
+        }
+        let Some(enc_fqn) = cur.enclosing_type.clone() else {
+            break;
+        };
+        if !visited.insert(enc_fqn.clone()) {
+            break;
+        }
+        if let Some((_, enc_ty)) = file_tree.find_type_by_fqn(&enc_fqn) {
+            cur = enc_ty.clone();
+        } else if let Some((enc_fid, enc_tid)) = workspace.get_type(&enc_fqn) {
+            cur = db.file_item_tree(enc_fid).types[enc_tid].clone();
+        } else {
+            break;
+        }
+    }
+    effective_nullness_scope_for_file(db, file_tree.file_id)
+}
+
+pub(crate) fn effective_nullness_scope_for_binary_type(
+    classpath: &ClasspathIndex,
+    bin: &BinaryTypeSymbol,
+) -> NullnessScope {
+    let mut visited = FxHashSet::default();
+    visited.insert(bin.qualified_name.clone());
+    let mut cur = bin;
+    for _ in 0..MAX_SUBST_DEPTH {
+        if cur.nullness_scope != NullnessScope::Inherited {
+            return cur.nullness_scope;
+        }
+        let Some(enc_fqn) = cur.enclosing_type.as_deref() else {
+            break;
+        };
+        if !visited.insert(enc_fqn.to_string()) {
+            break;
+        }
+        let Some(enc_bin) = classpath.type_by_fqn(enc_fqn) else {
+            break;
+        };
+        cur = enc_bin;
+    }
+
+    let pkg_scope = classpath.package_nullness(&bin.package);
+    if pkg_scope != NullnessScope::Inherited {
+        return pkg_scope;
+    }
+
+    match &bin.origin {
+        BinaryOrigin::Jdk {
+            module_name: Some(mod_name),
+        } => {
+            if let Some(mod_info) = classpath.modules.get(mod_name.as_str())
+                && mod_info.nullness_scope != NullnessScope::Inherited
+            {
+                return mod_info.nullness_scope;
+            }
+        }
+        BinaryOrigin::Jar { .. } | BinaryOrigin::Jdk { module_name: None } => {
+            if let Some(mod_info) = classpath.modules.values().find(|m| {
+                m.nullness_scope != NullnessScope::Inherited
+                    && m.exports.iter().any(|exp| exp == &bin.package)
+            }) {
+                return mod_info.nullness_scope;
+            }
+        }
+    }
+
+    NullnessScope::Inherited
+}
+
+/// Resolves the effective lexical [`NullnessScope`] for `owner_fqn`, walking:
+/// inner type -> enclosing outer types (cycle-guarded) -> package -> module.
+#[must_use]
+pub fn effective_nullness_scope_for_type(db: &dyn DefDatabase, owner_fqn: &str) -> NullnessScope {
+    let workspace = db.workspace_index();
+    if let Some((fid, tid)) = workspace.get_type(owner_fqn) {
+        let mut visited = FxHashSet::default();
+        visited.insert(owner_fqn.to_string());
+        let mut cur_fid = fid;
+        let mut cur_tid = tid;
+        for _ in 0..MAX_SUBST_DEPTH {
+            let tree = db.file_item_tree(cur_fid);
+            let ty = &tree.types[cur_tid];
+            if ty.nullness_scope != NullnessScope::Inherited {
+                return ty.nullness_scope;
+            }
+            let Some(enc_fqn) = ty.enclosing_type.clone() else {
+                return effective_nullness_scope_for_file(db, cur_fid);
+            };
+            if !visited.insert(enc_fqn.clone()) {
+                break;
+            }
+            if let Some((enc_tid, _)) = tree.find_type_by_fqn(&enc_fqn) {
+                cur_tid = enc_tid;
+            } else if let Some((enc_fid, enc_tid)) = workspace.get_type(&enc_fqn) {
+                cur_fid = enc_fid;
+                cur_tid = enc_tid;
+            } else {
+                return effective_nullness_scope_for_file(db, cur_fid);
+            }
+        }
+        return effective_nullness_scope_for_file(db, fid);
+    }
+
+    let classpath = db.classpath_index();
+    if let Some(bin) = classpath.type_by_fqn(owner_fqn) {
+        return effective_nullness_scope_for_binary_type(&classpath, bin);
+    }
+
+    NullnessScope::Inherited
+}
+
+/// Resolves the effective lexical [`NullnessScope`] for a member declared in `owner_fqn`.
+#[must_use]
+pub fn effective_nullness_scope_for_member(
+    db: &dyn DefDatabase,
+    owner_fqn: &str,
+    member_scope: NullnessScope,
+) -> NullnessScope {
+    if member_scope != NullnessScope::Inherited {
+        return member_scope;
+    }
+    effective_nullness_scope_for_type(db, owner_fqn)
+}
+
+pub(crate) fn effective_nullness_scope_for_binary_member(
+    classpath: &ClasspathIndex,
+    owner: &BinaryTypeSymbol,
+    member_scope: NullnessScope,
+) -> NullnessScope {
+    if member_scope != NullnessScope::Inherited {
+        return member_scope;
+    }
+    effective_nullness_scope_for_binary_type(classpath, owner)
+}
+
+/// Applies JSpecify 1.0 defaulting rules for `scope` to `ty`.
+///
+/// When `is_local_root` is `true` (explicit local-variable declarations per JSpecify §3.2.5),
+/// the outermost class/array root is not forced to [`Nullability::NonNull`], while nested type
+/// arguments and array element types still receive defaulting.
+#[must_use]
+pub fn apply_nullness_scope(ty: Ty, scope: NullnessScope, is_local_root: bool) -> Ty {
+    apply_nullness_scope_inner(ty, scope, is_local_root, 0)
+}
+
+fn apply_nullness_scope_inner(
+    ty: Ty,
+    scope: NullnessScope,
+    is_local_root: bool,
+    depth: usize,
+) -> Ty {
+    if depth >= MAX_SUBST_DEPTH || !matches!(scope, NullnessScope::NonNullByDefault(_)) {
+        return ty;
+    }
+    match ty {
+        Ty::Class {
+            fqn,
+            type_args,
+            nullability,
+        } => {
+            let nullability = if !is_local_root && nullability == Nullability::Unspecified {
+                Nullability::NonNull
+            } else {
+                nullability
+            };
+            let type_args = type_args
+                .into_iter()
+                .map(|arg| apply_nullness_scope_arg(arg, scope, depth + 1))
+                .collect();
+            Ty::Class {
+                fqn,
+                type_args,
+                nullability,
+            }
+        }
+        Ty::Array { elem, nullability } => {
+            let nullability = if !is_local_root && nullability == Nullability::Unspecified {
+                Nullability::NonNull
+            } else {
+                nullability
+            };
+            let elem = Box::new(apply_nullness_scope_inner(*elem, scope, false, depth + 1));
+            Ty::Array { elem, nullability }
+        }
+        // JSpecify parametric rule: unannotated `TypeVar` usages stay `Unspecified` so substitution
+        // inherits the type argument's nullability verbatim.
+        Ty::TypeVar { .. } => ty,
+        Ty::Intersection(members) => Ty::Intersection(
+            members
+                .into_iter()
+                .map(|m| apply_nullness_scope_inner(m, scope, is_local_root, depth + 1))
+                .collect(),
+        ),
+        Ty::Primitive(_) | Ty::Void | Ty::Null | Ty::Unknown => ty,
+    }
+}
+
+fn apply_nullness_scope_arg(arg: TypeArg, scope: NullnessScope, depth: usize) -> TypeArg {
+    if depth >= MAX_SUBST_DEPTH {
+        return arg;
+    }
+    match arg {
+        TypeArg::Type(t) => TypeArg::Type(apply_nullness_scope_inner(t, scope, false, depth)),
+        TypeArg::Wildcard(WildcardBound::Unbounded) => TypeArg::Wildcard(WildcardBound::Unbounded),
+        TypeArg::Wildcard(WildcardBound::Extends(t)) => TypeArg::Wildcard(WildcardBound::Extends(
+            Box::new(apply_nullness_scope_inner(*t, scope, false, depth)),
+        )),
+        TypeArg::Wildcard(WildcardBound::Super(t)) => TypeArg::Wildcard(WildcardBound::Super(
+            Box::new(apply_nullness_scope_inner(*t, scope, false, depth)),
+        )),
+    }
+}
+
+pub(crate) fn ty_has_explicit_nullability(ty: &Ty) -> bool {
+    ty_has_explicit_nullability_inner(ty, 0)
+}
+
+fn ty_has_explicit_nullability_inner(ty: &Ty, depth: usize) -> bool {
+    if depth >= MAX_SUBST_DEPTH {
+        return false;
+    }
+    match ty {
+        Ty::Class {
+            type_args,
+            nullability,
+            ..
+        } => {
+            *nullability != Nullability::Unspecified
+                || type_args.iter().any(|arg| match arg {
+                    TypeArg::Type(t) => ty_has_explicit_nullability_inner(t, depth + 1),
+                    TypeArg::Wildcard(WildcardBound::Extends(t) | WildcardBound::Super(t)) => {
+                        ty_has_explicit_nullability_inner(t, depth + 1)
+                    }
+                    TypeArg::Wildcard(WildcardBound::Unbounded) => false,
+                })
+        }
+        Ty::Array { elem, nullability } => {
+            *nullability != Nullability::Unspecified
+                || ty_has_explicit_nullability_inner(elem, depth + 1)
+        }
+        Ty::TypeVar { nullability, .. } => *nullability != Nullability::Unspecified,
+        Ty::Intersection(members) => members
+            .iter()
+            .any(|m| ty_has_explicit_nullability_inner(m, depth + 1)),
+        Ty::Primitive(_) | Ty::Void | Ty::Null | Ty::Unknown => false,
+    }
+}
+
 // ---- Scope-Aware Type Resolution ----
 
 /// Resolves a raw source type reference in `file_id` given `type_params_in_scope`.
@@ -1025,22 +1316,80 @@ pub(crate) fn resolve_type_ref_in_file_for_owner(
     raw: &str,
     type_params_in_scope: &BTreeMap<SmolStr, Vec<String>>,
 ) -> Ty {
+    resolve_type_ref_in_file_for_member(
+        db,
+        file_id,
+        owner_fqn,
+        NullnessScope::Inherited,
+        raw,
+        type_params_in_scope,
+    )
+}
+
+/// Resolves a raw source type reference in `file_id` within a member's effective nullness scope.
+pub(crate) fn resolve_type_ref_in_file_for_member(
+    db: &dyn DefDatabase,
+    file_id: FileId,
+    owner_fqn: Option<&str>,
+    member_scope: NullnessScope,
+    raw: &str,
+    type_params_in_scope: &BTreeMap<SmolStr, Vec<String>>,
+) -> Ty {
+    let file_tree = db.file_item_tree(file_id);
+    let workspace = db.workspace_index();
+    let scope = if member_scope != NullnessScope::Inherited {
+        member_scope
+    } else if let Some(fqn) = owner_fqn {
+        let s = effective_nullness_scope_for_type(db, fqn);
+        if s != NullnessScope::Inherited {
+            s
+        } else if let Some((_, ty)) = file_tree.find_type_by_fqn(fqn) {
+            effective_nullness_scope_in_file_tree(db, &file_tree, &workspace, ty)
+        } else {
+            effective_nullness_scope_for_file(db, file_id)
+        }
+    } else {
+        effective_nullness_scope_for_file(db, file_id)
+    };
+    resolve_type_ref_in_file_with_scope(
+        db,
+        file_id,
+        owner_fqn,
+        scope,
+        false,
+        raw,
+        type_params_in_scope,
+    )
+}
+
+/// Resolves a raw source type reference in `file_id` with an explicit [`NullnessScope`] and `is_local_root`.
+pub(crate) fn resolve_type_ref_in_file_with_scope(
+    db: &dyn DefDatabase,
+    file_id: FileId,
+    owner_fqn: Option<&str>,
+    nullness_scope: NullnessScope,
+    is_local_root: bool,
+    raw: &str,
+    type_params_in_scope: &BTreeMap<SmolStr, Vec<String>>,
+) -> Ty {
     let file_tree = db.file_item_tree(file_id);
     let workspace = db.workspace_index();
     let classpath = db.classpath_index();
     let owner_ty = owner_fqn.and_then(|fqn| file_tree.find_type_by_fqn(fqn).map(|(_, t)| t));
     let mut visited = FxHashSet::default();
-    resolve_type_ref_in_file_inner(
+    let ty = resolve_type_ref_in_file_inner(
         db,
         &file_tree,
         &workspace,
         &classpath,
         owner_ty,
+        nullness_scope,
         raw,
         type_params_in_scope,
         &mut visited,
         0,
-    )
+    );
+    apply_nullness_scope(ty, nullness_scope, is_local_root)
 }
 
 /// Resolves a raw binary type reference in `owner`'s scope against `classpath`.
@@ -1050,8 +1399,35 @@ pub(crate) fn resolve_binary_type_ref_for_owner(
     raw: &str,
     type_params_in_scope: &BTreeMap<SmolStr, Vec<String>>,
 ) -> Ty {
+    resolve_binary_type_ref_for_member(
+        classpath,
+        owner,
+        NullnessScope::Inherited,
+        raw,
+        type_params_in_scope,
+    )
+}
+
+/// Resolves a raw binary type reference in a binary member's effective scope against `classpath`.
+pub(crate) fn resolve_binary_type_ref_for_member(
+    classpath: &ClasspathIndex,
+    owner: &BinaryTypeSymbol,
+    member_scope: NullnessScope,
+    raw: &str,
+    type_params_in_scope: &BTreeMap<SmolStr, Vec<String>>,
+) -> Ty {
+    let scope = effective_nullness_scope_for_binary_member(classpath, owner, member_scope);
     let mut visited = FxHashSet::default();
-    resolve_binary_type_ref_in_db(classpath, owner, raw, type_params_in_scope, &mut visited, 0)
+    let ty = resolve_binary_type_ref_in_db(
+        classpath,
+        owner,
+        scope,
+        raw,
+        type_params_in_scope,
+        &mut visited,
+        0,
+    );
+    apply_nullness_scope(ty, scope, false)
 }
 
 /// Resolves a raw binary type reference (as decoded by `classfile.rs`) given `type_params_in_scope`.
@@ -1116,6 +1492,7 @@ fn resolve_type_ref_in_file_inner(
     workspace: &WorkspaceIndex,
     classpath: &ClasspathIndex,
     owner_ty: Option<&TypeItem>,
+    nullness_scope: NullnessScope,
     raw: &str,
     type_params_in_scope: &BTreeMap<SmolStr, Vec<String>>,
     visited: &mut FxHashSet<SmolStr>,
@@ -1127,23 +1504,33 @@ fn resolve_type_ref_in_file_inner(
         {
             let tv_name = SmolStr::new(name);
             let bounds = if depth < MAX_SUBST_DEPTH && visited.insert(tv_name.clone()) {
-                let resolved: Vec<Ty> = raw_bounds
-                    .iter()
-                    .map(|b| {
-                        resolve_type_ref_in_file_inner(
-                            db,
-                            file_tree,
-                            workspace,
-                            classpath,
-                            owner_ty,
-                            b,
-                            type_params_in_scope,
-                            visited,
-                            depth + 1,
-                        )
-                    })
-                    .filter(|t| !matches!(t, Ty::Unknown))
-                    .collect();
+                let resolved = if raw_bounds.is_empty() {
+                    if matches!(nullness_scope, NullnessScope::NonNullByDefault(_)) {
+                        vec![Ty::object().with_nullability(Nullability::NonNull)]
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    raw_bounds
+                        .iter()
+                        .map(|b| {
+                            let ty = resolve_type_ref_in_file_inner(
+                                db,
+                                file_tree,
+                                workspace,
+                                classpath,
+                                owner_ty,
+                                nullness_scope,
+                                b,
+                                type_params_in_scope,
+                                visited,
+                                depth + 1,
+                            );
+                            apply_nullness_scope(ty, nullness_scope, false)
+                        })
+                        .filter(|t| !matches!(t, Ty::Unknown))
+                        .collect()
+                };
                 visited.remove(&tv_name);
                 resolved
             } else {
@@ -1167,6 +1554,7 @@ fn resolve_type_ref_in_file_inner(
 fn resolve_binary_type_ref_in_db(
     classpath: &ClasspathIndex,
     owner: &BinaryTypeSymbol,
+    nullness_scope: NullnessScope,
     raw: &str,
     type_params_in_scope: &BTreeMap<SmolStr, Vec<String>>,
     visited: &mut FxHashSet<SmolStr>,
@@ -1178,20 +1566,30 @@ fn resolve_binary_type_ref_in_db(
         {
             let tv_name = SmolStr::new(name);
             let bounds = if depth < MAX_SUBST_DEPTH && visited.insert(tv_name.clone()) {
-                let resolved: Vec<Ty> = raw_bounds
-                    .iter()
-                    .map(|b| {
-                        resolve_binary_type_ref_in_db(
-                            classpath,
-                            owner,
-                            b,
-                            type_params_in_scope,
-                            visited,
-                            depth + 1,
-                        )
-                    })
-                    .filter(|t| !matches!(t, Ty::Unknown))
-                    .collect();
+                let resolved = if raw_bounds.is_empty() {
+                    if matches!(nullness_scope, NullnessScope::NonNullByDefault(_)) {
+                        vec![Ty::object().with_nullability(Nullability::NonNull)]
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    raw_bounds
+                        .iter()
+                        .map(|b| {
+                            let ty = resolve_binary_type_ref_in_db(
+                                classpath,
+                                owner,
+                                nullness_scope,
+                                b,
+                                type_params_in_scope,
+                                visited,
+                                depth + 1,
+                            );
+                            apply_nullness_scope(ty, nullness_scope, false)
+                        })
+                        .filter(|t| !matches!(t, Ty::Unknown))
+                        .collect()
+                };
                 visited.remove(&tv_name);
                 resolved
             } else {
@@ -1807,88 +2205,57 @@ fn direct_generic_supertypes(
         let tree = db.file_item_tree(fid);
         let ty_item = &tree.types[tid];
         let scope = type_param_bounds_for_workspace_item(db, &tree, ty_item);
+        let eff_scope = effective_nullness_scope_in_file_tree(db, &tree, workspace, ty_item);
         let mut out = Vec::new();
         let mut visited_tv = FxHashSet::default();
+
+        let mut resolve_ws_sup = |raw: &str| {
+            let ty = resolve_type_ref_in_file_inner(
+                db,
+                &tree,
+                workspace,
+                classpath,
+                Some(ty_item),
+                eff_scope,
+                raw,
+                &scope,
+                &mut visited_tv,
+                0,
+            );
+            apply_nullness_scope(ty, eff_scope, false)
+        };
 
         match ty_item.kind {
             TypeKind::Class => {
                 if let Some(first_ext) = ty_item.extends.first() {
-                    out.push(resolve_type_ref_in_file_inner(
-                        db,
-                        &tree,
-                        workspace,
-                        classpath,
-                        Some(ty_item),
-                        first_ext,
-                        &scope,
-                        &mut visited_tv,
-                        0,
-                    ));
+                    out.push(resolve_ws_sup(first_ext));
                 } else if ty_item.qualified_name != OBJECT_FQN {
                     out.push(Ty::object());
                 }
                 for raw in &ty_item.implements {
-                    out.push(resolve_type_ref_in_file_inner(
-                        db,
-                        &tree,
-                        workspace,
-                        classpath,
-                        Some(ty_item),
-                        raw,
-                        &scope,
-                        &mut visited_tv,
-                        0,
-                    ));
+                    out.push(resolve_ws_sup(raw));
                 }
             }
             TypeKind::Interface => {
                 for raw in &ty_item.extends {
-                    out.push(resolve_type_ref_in_file_inner(
-                        db,
-                        &tree,
-                        workspace,
-                        classpath,
-                        Some(ty_item),
-                        raw,
-                        &scope,
-                        &mut visited_tv,
-                        0,
-                    ));
+                    out.push(resolve_ws_sup(raw));
                 }
             }
             TypeKind::Enum => {
-                out.push(Ty::class(
-                    ENUM_FQN,
-                    vec![TypeArg::Type(Ty::raw_class(&ty_item.qualified_name))],
-                ));
+                let self_cls = apply_nullness_scope(
+                    Ty::raw_class(&ty_item.qualified_name),
+                    eff_scope,
+                    false,
+                );
+                out.push(Ty::class(ENUM_FQN, vec![TypeArg::Type(self_cls)]));
                 for raw in &ty_item.implements {
-                    out.push(resolve_type_ref_in_file_inner(
-                        db,
-                        &tree,
-                        workspace,
-                        classpath,
-                        Some(ty_item),
-                        raw,
-                        &scope,
-                        &mut visited_tv,
-                        0,
-                    ));
+                    out.push(resolve_ws_sup(raw));
                 }
             }
             TypeKind::Record => {
                 out.push(Ty::raw_class(RECORD_FQN));
                 for raw in &ty_item.implements {
-                    out.push(resolve_type_ref_in_file_inner(
-                        db,
-                        &tree,
-                        workspace,
-                        classpath,
-                        Some(ty_item),
-                        raw,
-                        &scope,
-                        &mut visited_tv,
-                        0,
-                    ));
+                    out.push(resolve_ws_sup(raw));
                 }
             }
             TypeKind::Annotation => {
@@ -1900,8 +2267,22 @@ fn direct_generic_supertypes(
 
     if let Some(bin) = classpath.type_by_fqn(fqn) {
         let scope = type_param_bounds_for_binary(db, bin);
+        let eff_scope = effective_nullness_scope_for_binary_type(classpath, bin);
         let mut out = Vec::new();
         let mut visited_tv = FxHashSet::default();
+
+        let mut resolve_bin_sup = |raw: &str| {
+            let ty = resolve_binary_type_ref_in_db(
+                classpath,
+                bin,
+                eff_scope,
+                raw,
+                &scope,
+                &mut visited_tv,
+                0,
+            );
+            apply_nullness_scope(ty, eff_scope, false)
+        };
 
         if bin.qualified_name != OBJECT_FQN {
             match bin.kind {
@@ -1911,33 +2292,21 @@ fn direct_generic_supertypes(
                 }
                 TypeKind::Enum => {
                     if let Some(raw) = &bin.super_class_generic {
-                        out.push(resolve_binary_type_ref_in_db(
-                            classpath,
-                            bin,
-                            raw,
-                            &scope,
-                            &mut visited_tv,
-                            0,
-                        ));
+                        out.push(resolve_bin_sup(raw));
                     } else if let Some(sup) = &bin.super_class {
                         out.push(Ty::raw_class(sup));
                     } else {
-                        out.push(Ty::class(
-                            ENUM_FQN,
-                            vec![TypeArg::Type(Ty::raw_class(&bin.qualified_name))],
-                        ));
+                        let self_cls = apply_nullness_scope(
+                            Ty::raw_class(&bin.qualified_name),
+                            eff_scope,
+                            false,
+                        );
+                        out.push(Ty::class(ENUM_FQN, vec![TypeArg::Type(self_cls)]));
                     }
                 }
                 TypeKind::Record => {
                     if let Some(raw) = &bin.super_class_generic {
-                        out.push(resolve_binary_type_ref_in_db(
-                            classpath,
-                            bin,
-                            raw,
-                            &scope,
-                            &mut visited_tv,
-                            0,
-                        ));
+                        out.push(resolve_bin_sup(raw));
                     } else {
                         out.push(Ty::raw_class(
                             bin.super_class.as_deref().unwrap_or(RECORD_FQN),
@@ -1946,14 +2315,7 @@ fn direct_generic_supertypes(
                 }
                 TypeKind::Class => {
                     if let Some(raw) = &bin.super_class_generic {
-                        out.push(resolve_binary_type_ref_in_db(
-                            classpath,
-                            bin,
-                            raw,
-                            &scope,
-                            &mut visited_tv,
-                            0,
-                        ));
+                        out.push(resolve_bin_sup(raw));
                     } else {
                         out.push(Ty::raw_class(
                             bin.super_class.as_deref().unwrap_or(OBJECT_FQN),
@@ -1965,14 +2327,7 @@ fn direct_generic_supertypes(
 
         if !bin.interfaces_generic.is_empty() {
             for raw in &bin.interfaces_generic {
-                out.push(resolve_binary_type_ref_in_db(
-                    classpath,
-                    bin,
-                    raw,
-                    &scope,
-                    &mut visited_tv,
-                    0,
-                ));
+                out.push(resolve_bin_sup(raw));
             }
         } else {
             for iface in &bin.interfaces {
@@ -2546,6 +2901,7 @@ mod tests {
             is_static: false,
             is_final: false,
             is_abstract: kind == TypeKind::Interface,
+            nullness_scope: crate::NullnessScope::Inherited,
             type_params: type_params.iter().map(|s| SmolStr::new(*s)).collect(),
             type_param_bounds: BTreeMap::new(),
             super_class: super_class.map(str::to_string),
@@ -3416,6 +3772,217 @@ interface WsInterface {}
         assert_eq!(
             subst_point.apply_covariant(&cls_with("p.Box", vec![TypeArg::Type(tvar_t_nn)])),
             cls_with("p.Box", vec![TypeArg::Type(point_nn)])
+        );
+    }
+
+    #[test]
+    fn effective_nullness_scope_nesting_across_module_package_types_and_members() {
+        use crate::symbols::{NullabilitySource, NullnessScope};
+
+        let mod_info = "\
+import org.jspecify.annotations.NullMarked;
+@NullMarked
+module com.example.app {}
+";
+        let unmarked_pkg = "\
+@NullUnmarked
+package com.example.legacy;
+import org.jspecify.annotations.NullUnmarked;
+";
+        let marked_cls = "\
+package com.example.core;
+import org.jspecify.annotations.*;
+
+public class InheritedTop {
+    public String fromMod;
+    @NullUnmarked
+    public static class UnmarkedInner {
+        public String plain;
+        @NullMarked
+        public String reMarked() { return \"\"; }
+    }
+}
+";
+        let legacy_cls = "\
+package com.example.legacy;
+import org.jspecify.annotations.*;
+
+public class Legacy {
+    public String unmarkedFromPkg;
+    @NullMarked
+    public static class OptedIn {
+        public String nonNull;
+    }
+}
+";
+        let db = db_with_files(&[
+            (1, mod_info),
+            (2, unmarked_pkg),
+            (3, marked_cls),
+            (4, legacy_cls),
+        ]);
+
+        let marked_scope = NullnessScope::NonNullByDefault(NullabilitySource::JSpecify);
+        let unmarked_scope = NullnessScope::Unspecified(NullabilitySource::JSpecify);
+
+        assert_eq!(
+            effective_nullness_scope_for_file(&db, FileId(3)),
+            marked_scope
+        );
+        assert_eq!(
+            effective_nullness_scope_for_file(&db, FileId(4)),
+            unmarked_scope
+        );
+
+        assert_eq!(
+            effective_nullness_scope_for_type(&db, "com.example.core.InheritedTop"),
+            marked_scope
+        );
+        assert_eq!(
+            effective_nullness_scope_for_type(&db, "com.example.core.InheritedTop.UnmarkedInner"),
+            unmarked_scope
+        );
+        assert_eq!(
+            effective_nullness_scope_for_member(
+                &db,
+                "com.example.core.InheritedTop.UnmarkedInner",
+                marked_scope,
+            ),
+            marked_scope
+        );
+        assert_eq!(
+            effective_nullness_scope_for_type(&db, "com.example.legacy.Legacy"),
+            unmarked_scope
+        );
+        assert_eq!(
+            effective_nullness_scope_for_type(&db, "com.example.legacy.Legacy.OptedIn"),
+            marked_scope
+        );
+    }
+
+    #[test]
+    fn jspecify_defaulting_jls_9_7_4_and_typevar_projection() {
+        use crate::symbols::{NullabilitySource, NullnessScope};
+
+        let marked = NullnessScope::NonNullByDefault(NullabilitySource::JSpecify);
+
+        // `apply_nullness_scope` with `is_local_root = false` vs `true`.
+        let list_str = cls_with("java.util.List", vec![TypeArg::Type(Ty::string())]);
+        assert_eq!(
+            apply_nullness_scope(list_str.clone(), marked, false).display_short(),
+            "List<String!>!"
+        );
+        assert_eq!(
+            apply_nullness_scope(list_str, marked, true).display_short(),
+            "List<String!>"
+        );
+
+        // JLS §9.7.4 array & nested type placement inside `@NullMarked`.
+        let src = "\
+package com.example;
+import org.jspecify.annotations.*;
+
+@NullMarked
+class Outer {
+    static class Inner {}
+}
+
+@NullMarked
+class ArraysAndNested<T, U extends @Nullable Object> {
+    @Nullable String[] elemNullableArr;
+    String @Nullable [] outerNullableArr;
+    Outer.@Nullable Inner nestedNullable;
+    Outer.Inner nestedNonNull;
+    T parametricT;
+    @Nullable T nullableT;
+    @NonNull T nonNullT;
+    U unboundedNullableBound;
+}
+";
+        let (db, fid) = db_with(src);
+        let tree = db.file_item_tree(fid);
+        let (_, cls_item) = tree.find_type_by_fqn("com.example.ArraysAndNested").unwrap();
+        let tp_bounds = type_param_bounds_of_fqn(&db, "com.example.ArraysAndNested");
+
+        let resolve_member = |idx: usize| {
+            let m = &tree.members[cls_item.members[idx]];
+            resolve_type_ref_in_file_for_member(
+                &db,
+                fid,
+                Some("com.example.ArraysAndNested"),
+                m.nullness_scope,
+                m.type_ref.as_deref().unwrap(),
+                &tp_bounds,
+            )
+        };
+
+        assert_eq!(resolve_member(0).display_short(), "String?[]!");
+        assert_eq!(resolve_member(1).display_short(), "String![]?");
+        assert_eq!(resolve_member(2).display_short(), "Outer.Inner?");
+        assert_eq!(resolve_member(3).display_short(), "Outer.Inner!");
+
+        // Parametric TypeVar T: unannotated `T` stays `Unspecified` on the TypeVar itself,
+        // with implicit upper bound `Object!`.
+        let t_ty = resolve_member(4);
+        assert_eq!(t_ty.nullability(), Nullability::Unspecified);
+        assert_eq!(t_ty.display_short(), "T");
+        assert_eq!(
+            t_ty,
+            Ty::type_var("T", vec![Ty::object().with_nullability(Nullability::NonNull)])
+        );
+
+        let t_nullable = resolve_member(5);
+        assert_eq!(t_nullable.nullability(), Nullability::Nullable);
+        assert_eq!(t_nullable.display_short(), "T?");
+
+        let t_nonnull = resolve_member(6);
+        assert_eq!(t_nonnull.nullability(), Nullability::NonNull);
+        assert_eq!(t_nonnull.display_short(), "T!");
+
+        let u_ty = resolve_member(7);
+        assert_eq!(
+            u_ty,
+            Ty::type_var("U", vec![Ty::object().with_nullability(Nullability::Nullable)])
+        );
+
+        // Substitution & TypeVar projection.
+        let str_q = Ty::string().with_nullability(Nullability::Nullable);
+        let str_nn = Ty::string().with_nullability(Nullability::NonNull);
+        let mut subst_q = Substitution::default();
+        subst_q.insert_ty(SmolStr::new("T"), str_q.clone());
+        assert_eq!(subst_q.apply(&t_ty), str_q);
+        assert_eq!(subst_q.apply(&t_nonnull), str_nn);
+
+        let mut subst_nn = Substitution::default();
+        subst_nn.insert_ty(SmolStr::new("T"), str_nn.clone());
+        assert_eq!(subst_nn.apply(&t_ty), str_nn);
+        assert_eq!(subst_nn.apply(&t_nullable), str_q);
+
+        // Wildcard `?` covariant projection respects upper bound (`Object!` vs `Object?` vs `Object`).
+        let mut subst_wc = Substitution::default();
+        subst_wc.map.insert(
+            SmolStr::new("T"),
+            TypeArg::Wildcard(WildcardBound::Unbounded),
+        );
+        subst_wc.map.insert(
+            SmolStr::new("U"),
+            TypeArg::Wildcard(WildcardBound::Unbounded),
+        );
+        assert_eq!(
+            subst_wc.apply_covariant(&t_ty),
+            Ty::object().with_nullability(Nullability::NonNull)
+        );
+        assert_eq!(
+            subst_wc.apply_covariant(&u_ty),
+            Ty::object().with_nullability(Nullability::Nullable)
+        );
+        assert_eq!(
+            subst_wc.apply_covariant(&t_nullable),
+            Ty::object().with_nullability(Nullability::Nullable)
+        );
+        assert_eq!(
+            subst_wc.apply_covariant(&Ty::type_var("T", Vec::new())),
+            Ty::object()
         );
     }
 }

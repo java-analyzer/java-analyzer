@@ -6,7 +6,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use smol_str::SmolStr;
 use syntax::Release;
 
-use crate::symbols::{MemberKind, ParamSummary, TypeIdentity, TypeKind};
+use crate::{
+    symbols::{MemberKind, NullabilitySource, NullnessScope, ParamSummary, TypeIdentity, TypeKind},
+    ty::Nullability,
+};
 
 /// Where a binary type originated (used for hover display and on-demand source/stub lookup).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -52,6 +55,7 @@ pub struct BinaryTypeSymbol {
     pub is_static: bool,
     pub is_final: bool,
     pub is_abstract: bool,
+    pub nullness_scope: NullnessScope,
     /// Type parameters from generic `Signature` attribute (e.g. `["E"]`, `["K", "V"]`).
     pub type_params: Vec<SmolStr>,
     /// Explicit `extends` bounds per type parameter from generic `Signature` (omits implicit `java.lang.Object`).
@@ -97,6 +101,8 @@ pub struct BinaryMemberSymbol {
     pub is_public: bool,
     pub is_static: bool,
     pub is_abstract: bool,
+    pub nullness_scope: NullnessScope,
+    pub decl_nullability: Option<(Nullability, NullabilitySource)>,
     /// Method/constructor type parameters from generic `Signature` attribute (e.g. `["T", "U"]`).
     pub type_params: Vec<SmolStr>,
     /// Explicit `extends` bounds per method/constructor type parameter (omits implicit `java.lang.Object`).
@@ -112,6 +118,7 @@ pub struct BinaryMemberSymbol {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BinaryModuleInfo {
     pub name: SmolStr,
+    pub nullness_scope: NullnessScope,
     /// Unqualified exported packages (e.g. `["java.lang", "java.util", ...]`).
     pub exports: Vec<String>,
     /// `requires transitive` target module names.
@@ -129,6 +136,8 @@ pub struct ClasspathIndex {
     pub package_type_map: BTreeMap<String, BTreeMap<SmolStr, String>>,
     /// JPMS module name (`"java.base"`) -> `BinaryModuleInfo`.
     pub modules: BTreeMap<SmolStr, BinaryModuleInfo>,
+    /// Package name (`"org.example"`) -> lexical nullness scope from `package-info.class`.
+    pub package_nullness: BTreeMap<String, NullnessScope>,
 }
 
 impl ClasspathIndex {
@@ -160,6 +169,22 @@ impl ClasspathIndex {
         self.modules.insert(module.name.clone(), module);
     }
 
+    /// Inserts a package-level [`NullnessScope`] from `package-info.class`.
+    pub fn insert_package_nullness(&mut self, package: String, scope: NullnessScope) {
+        if scope != NullnessScope::Inherited {
+            self.package_nullness.insert(package, scope);
+        }
+    }
+
+    /// Returns the lexical [`NullnessScope`] declared on `package` in `package-info.class`, if any.
+    #[must_use]
+    pub fn package_nullness(&self, package: &str) -> NullnessScope {
+        self.package_nullness
+            .get(package)
+            .copied()
+            .unwrap_or(NullnessScope::Inherited)
+    }
+
     /// Merges another [`ClasspathIndex`] into `self`.
     pub fn merge(&mut self, other: ClasspathIndex) {
         for (_, ty) in other.types_by_fqn {
@@ -167,6 +192,9 @@ impl ClasspathIndex {
         }
         for (_, module) in other.modules {
             self.insert_module(module);
+        }
+        for (pkg, scope) in other.package_nullness {
+            self.insert_package_nullness(pkg, scope);
         }
     }
 
@@ -375,6 +403,7 @@ mod tests {
             is_static: false,
             is_final: false,
             is_abstract: false,
+            nullness_scope: NullnessScope::Inherited,
             type_params: Vec::new(),
             type_param_bounds: BTreeMap::new(),
             super_class: Some("java.lang.Object".to_string()),
@@ -465,21 +494,25 @@ mod tests {
         // Cyclic module graph: java.se -> java.sql -> java.xml -> java.sql, plus java.base.
         a.insert_module(BinaryModuleInfo {
             name: SmolStr::new("java.se"),
+            nullness_scope: NullnessScope::Inherited,
             exports: vec![],
             requires_transitive: vec![SmolStr::new("java.sql"), SmolStr::new("java.base")],
         });
         a.insert_module(BinaryModuleInfo {
             name: SmolStr::new("java.sql"),
+            nullness_scope: NullnessScope::Inherited,
             exports: vec!["java.sql".to_string()],
             requires_transitive: vec![SmolStr::new("java.xml")],
         });
         a.insert_module(BinaryModuleInfo {
             name: SmolStr::new("java.xml"),
+            nullness_scope: NullnessScope::Inherited,
             exports: vec!["javax.xml".to_string()],
             requires_transitive: vec![SmolStr::new("java.sql")],
         });
         b.insert_module(BinaryModuleInfo {
             name: SmolStr::new("java.base"),
+            nullness_scope: NullnessScope::Inherited,
             exports: vec!["java.lang".to_string(), "java.util".to_string()],
             requires_transitive: vec![],
         });

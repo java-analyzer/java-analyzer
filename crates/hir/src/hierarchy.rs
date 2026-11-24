@@ -46,9 +46,10 @@ pub struct WorkspaceHierarchyIndex {
     pub(crate) binary_subtypes: BTreeMap<String, Vec<String>>,
 }
 
-/// Strips generics (`<...>`), leading `@Annotations(...)`, and rejects arrays, primitives, and `var`.
+/// Strips generics (`<...>`), leading `@Annotations(...)`, trailing `!`/`?` nullability markers,
+/// and rejects arrays, primitives, and `var`.
 pub(crate) fn parse_type_ref_segments(type_ref: &str) -> Option<Vec<String>> {
-    let trimmed = type_ref.trim();
+    let trimmed = type_ref.trim().trim_end_matches(['!', '?']).trim();
     if trimmed.is_empty() || trimmed.ends_with(']') {
         return None;
     }
@@ -61,6 +62,7 @@ pub(crate) fn parse_type_ref_segments(type_ref: &str) -> Option<Vec<String>> {
         match c {
             '<' => angle_depth += 1,
             '>' => angle_depth = angle_depth.saturating_sub(1),
+            '!' | '?' if angle_depth == 0 => {}
             '@' if angle_depth == 0 => {
                 while let Some(&next) = chars.peek() {
                     if next.is_alphanumeric() || next == '_' || next == '$' || next == '.' {
@@ -837,6 +839,7 @@ mod tests {
             is_static: false,
             is_final: false,
             is_abstract: matches!(kind, TypeKind::Interface | TypeKind::Annotation),
+            nullness_scope: crate::NullnessScope::Inherited,
             type_params: Vec::new(),
             type_param_bounds: BTreeMap::new(),
             super_class: super_class.map(str::to_string),
@@ -896,6 +899,8 @@ public non-sealed class Rect implements Shape {}
                 is_public: true,
                 is_static: false,
                 is_abstract: false,
+                nullness_scope: crate::NullnessScope::Inherited,
+                decl_nullability: None,
                 type_params: Vec::new(),
                 type_param_bounds: BTreeMap::new(),
                 type_ref: Some("java.lang.String".to_string()),

@@ -16,11 +16,11 @@ pub use binary::{
 pub use hir::{
     BinaryMemberSymbol, BinaryModuleInfo, BinaryOrigin, BinaryTarget, BinaryTypeSymbol,
     Cancellable, Cancelled, ClassfileError, ClasspathIndex, DeltaSet, FileId, LanguageLevel,
-    MemberKind, ModuleData, ModuleDelta, ModuleDependency, ModuleId, ModuleTarget, ParamSummary,
-    ParsedClassfile, Release, ResourceRoot, RootScope, SmolStr, SourceRoot, TypeKind,
-    WorkspaceDelta, WorkspaceLayout, infer_workspace_layout_from_sources, is_path_within,
-    normalize_rel_path, parse_class_bytes, parse_manifest_multi_release, parse_shebang_level,
-    select_mrjar_entries,
+    MemberKind, ModuleData, ModuleDelta, ModuleDependency, ModuleId, ModuleTarget, Nullability,
+    NullabilitySource, NullnessScope, ParamSummary, ParsedClassfile, Release, ResourceRoot,
+    RootScope, SmolStr, SourceRoot, TypeKind, WorkspaceDelta, WorkspaceLayout,
+    infer_workspace_layout_from_sources, is_path_within, normalize_rel_path, parse_class_bytes,
+    parse_manifest_multi_release, parse_shebang_level, select_mrjar_entries,
 };
 pub use syntax::TextRange;
 
@@ -1277,6 +1277,7 @@ Method main (String[] args)
 
         cp.insert_module(BinaryModuleInfo {
             name: SmolStr::new("java.base"),
+            nullness_scope: NullnessScope::Inherited,
             exports: vec!["java.lang".to_string(), "java.util".to_string()],
             requires_transitive: vec![],
         });
@@ -1293,6 +1294,7 @@ Method main (String[] args)
             is_static: false,
             is_final: true,
             is_abstract: false,
+            nullness_scope: NullnessScope::Inherited,
             type_params: vec![],
             type_param_bounds: Default::default(),
             super_class: Some("java.lang.Object".to_string()),
@@ -1307,6 +1309,8 @@ Method main (String[] args)
                 is_public: true,
                 is_static: false,
                 is_abstract: false,
+                nullness_scope: NullnessScope::Inherited,
+                decl_nullability: None,
                 type_params: vec![],
                 type_param_bounds: Default::default(),
                 type_ref: Some("int".to_string()),
@@ -1329,6 +1333,7 @@ Method main (String[] args)
             is_static: false,
             is_final: false,
             is_abstract: false,
+            nullness_scope: NullnessScope::Inherited,
             type_params: vec![],
             type_param_bounds: Default::default(),
             super_class: Some("java.lang.Object".to_string()),
@@ -1353,6 +1358,7 @@ Method main (String[] args)
             is_static: false,
             is_final: false,
             is_abstract: false,
+            nullness_scope: NullnessScope::Inherited,
             type_params: vec![],
             type_param_bounds: Default::default(),
             super_class: Some("java.lang.Object".to_string()),
@@ -1367,6 +1373,8 @@ Method main (String[] args)
                 is_public: true,
                 is_static: true,
                 is_abstract: false,
+                nullness_scope: NullnessScope::Inherited,
+                decl_nullability: None,
                 type_params: vec![],
                 type_param_bounds: Default::default(),
                 type_ref: Some("int".to_string()),
@@ -1521,6 +1529,7 @@ class App { Assert a; }
             is_static: false,
             is_final: false,
             is_abstract: false,
+            nullness_scope: NullnessScope::Inherited,
             type_params: vec![],
             type_param_bounds: Default::default(),
             super_class: None,
@@ -1535,6 +1544,8 @@ class App { Assert a; }
                 is_public: true,
                 is_static: false,
                 is_abstract: false,
+                nullness_scope: NullnessScope::Inherited,
+                decl_nullability: None,
                 type_params: vec![],
                 type_param_bounds: Default::default(),
                 type_ref: Some("java.lang.String".to_string()),
@@ -1557,6 +1568,7 @@ class App { Assert a; }
             is_static: false,
             is_final: false,
             is_abstract: true,
+            nullness_scope: NullnessScope::Inherited,
             type_params: vec![SmolStr::new("E")],
             type_param_bounds: Default::default(),
             super_class: None,
@@ -1581,6 +1593,7 @@ class App { Assert a; }
             is_static: false,
             is_final: false,
             is_abstract: true,
+            nullness_scope: NullnessScope::Inherited,
             type_params: vec![SmolStr::new("E")],
             type_param_bounds: Default::default(),
             super_class: None,
@@ -1595,6 +1608,8 @@ class App { Assert a; }
                 is_public: true,
                 is_static: false,
                 is_abstract: false,
+                nullness_scope: NullnessScope::Inherited,
+                decl_nullability: None,
                 type_params: vec![],
                 type_param_bounds: Default::default(),
                 type_ref: Some("int".to_string()),
@@ -1956,6 +1971,7 @@ public class Leaf extends Mid {}
             is_static: false,
             is_final: false,
             is_abstract: kind == TypeKind::Interface,
+            nullness_scope: NullnessScope::Inherited,
             type_params: type_params.iter().map(|s| SmolStr::new(*s)).collect(),
             type_param_bounds: Default::default(),
             super_class: super_class_generic.map(strip_generics),
@@ -1987,6 +2003,8 @@ public class Leaf extends Mid {}
             is_public: true,
             is_static,
             is_abstract,
+            nullness_scope: NullnessScope::Inherited,
+            decl_nullability: None,
             type_params: type_params.iter().map(|s| SmolStr::new(*s)).collect(),
             type_param_bounds: Default::default(),
             type_ref: Some(ret.to_string()),
@@ -1996,6 +2014,7 @@ public class Leaf extends Mid {}
                     name: Some(SmolStr::new(*n)),
                     type_ref: (*ty).to_string(),
                     is_varargs: *va,
+                    decl_nullability: None,
                 })
                 .collect(),
             is_varargs: params.last().is_some_and(|(_, _, va)| *va),
@@ -2477,5 +2496,109 @@ public class App {
                 "at {marker}"
             );
         }
+    }
+
+    #[test]
+    fn hover_displays_concise_nullability_suffixes_for_marked_and_binary_symbols() {
+        let user_src = "\
+package com.example;
+import org.jspecify.annotations.*;
+
+@NullMarked
+public class User {
+    public String name;
+    public @Nullable String nickname;
+    public @Nullable User findPartner(String id) { return null; }
+}
+";
+        let app_src = "\
+package com.example;
+import org.jspecify.annotations.*;
+import java.util.List;
+
+@NullMarked
+public class App {
+    void demo(List<@Nullable User> /*p_users*/users, List<User> /*p_nn*/nnUsers, BinaryApi api) {
+        var /*u_nn*/u = nnUsers./*nn_get*/get(0);
+        var /*u_q*/maybe = users./*q_get*/get(0);
+        var /*bin_q*/b1 = api./*bin_find*/findUser(\"a\");
+        var /*bin_nn*/b2 = api./*bin_req*/requireUser(\"a\");
+        var /*part*/p = u./*call_part*/findPartner(\"x\");
+        var /*lub*/m = true ? u : null;
+    }
+}
+";
+        let mut cp = generics_classpath();
+        let mut bin_api = bin_cls(
+            "com.example.BinaryApi",
+            TypeKind::Interface,
+            &[],
+            None,
+            &[],
+            vec![
+                bin_method(
+                    "com.example.BinaryApi",
+                    "findUser",
+                    false,
+                    true,
+                    &[],
+                    "com.example.User?",
+                    &[("id", "java.lang.String", false)],
+                ),
+                bin_method(
+                    "com.example.BinaryApi",
+                    "requireUser",
+                    false,
+                    true,
+                    &[],
+                    "com.example.User",
+                    &[("id", "java.lang.String", false)],
+                ),
+            ],
+        );
+        bin_api.nullness_scope = NullnessScope::NonNullByDefault(NullabilitySource::JSpecify);
+        bin_api.origin = BinaryOrigin::Jar {
+            label: "lib/null-api.jar".to_string(),
+        };
+        cp.insert_type(bin_api);
+        cp.finalize();
+
+        let mut host = AnalysisHost::new();
+        host.set_file_text(FileId(1), Arc::new(user_src.to_string()));
+        host.set_file_text(FileId(2), Arc::new(app_src.to_string()));
+        host.set_workspace_files(Arc::new(vec![FileId(1), FileId(2)]));
+        host.set_classpath_index(Arc::new(cp));
+
+        let snap = host.analysis();
+        let fid = FileId(2);
+
+        let check = |marker: &str, expected: &str| {
+            let h = snap.hover(fid, cursor(app_src, marker)).unwrap().unwrap();
+            assert_eq!(h.content, expected, "at {marker}");
+        };
+
+        check(
+            "/*p_users*/",
+            "```java\nList<User?>! users\n```\nparameter",
+        );
+        check("/*p_nn*/", "```java\nList<User!>! nnUsers\n```\nparameter");
+        check("/*u_nn*/", "```java\nUser! u\n```\nlocal variable");
+        check("/*u_q*/", "```java\nUser? maybe\n```\nlocal variable");
+        check("/*bin_q*/", "```java\nUser? b1\n```\nlocal variable");
+        check("/*bin_nn*/", "```java\nUser! b2\n```\nlocal variable");
+        check("/*part*/", "```java\nUser? p\n```\nlocal variable");
+        check("/*lub*/", "```java\nUser? m\n```\nlocal variable");
+        check(
+            "/*call_part*/",
+            "```java\nUser? com.example.User.findPartner(String! id)\n```",
+        );
+        check(
+            "/*bin_find*/",
+            "```java\nUser? com.example.BinaryApi.findUser(String! id)\n```\n*from `lib/null-api.jar`*",
+        );
+        check(
+            "/*bin_req*/",
+            "```java\nUser! com.example.BinaryApi.requireUser(String! id)\n```\n*from `lib/null-api.jar`*",
+        );
     }
 }

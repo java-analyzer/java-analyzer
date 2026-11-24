@@ -1,6 +1,6 @@
 # Spec 0020: Diagnostic Message & UX Conformance Testing
 
-Status: Proposed (Deferred)
+Status: Accepted
 
 ## Motivation
 
@@ -147,11 +147,11 @@ Rather than brittle exact-text diffing against `javac`, Tier 2 computes four ort
 
 ---
 
-## Open Questions for Sign-Off
+## Resolved Design Decisions
 
-1. **Tier 1 snapshot format:** Are you happy with `rustc`-style rendered ASCII caret snapshots (`.snap` files with `UPDATE_EXPECT=1`), or would you prefer structured inline comment annotations (`// ^ error[code]: message`) inside the `.java` files? *(Recommendation: `rustc`-style `.snap` files — they render multi-line spans, secondary `note:` locations across files, and `help:` footers far more clearly than inline comments.)*
-2. **Message parity vs. improved wording:** For syntax and typechecker errors, should `diag_mapping.toml` enforce close `javac` primary wording by default while allowing explicit, documented overrides for notoriously cryptic `javac` messages (e.g., `illegal start of expression` → a more specific hint)? *(Recommendation: Yes — keep the familiar `javac` headline where clear, and document any deliberate phrasing improvements in `diag_mapping.toml`.)*
-3. **Timing / Deferral:** Should this spec stay `Deferred` until **Spec 0012 (Semantic Diagnostics)** begins, or would you like **Phase A** (syntax diagnostic UX snapshots + `xtask diag-conformance --phase syntax`) scheduled sooner (e.g. right after Spec 0008)?
+1. **Tier 1 snapshot format:** `rustc`-style rendered ASCII caret snapshots (`.snap` files with `UPDATE_EXPECT=1`).
+2. **Message parity vs. improved wording:** Keep familiar `javac` primary wording by default for syntax and typechecker errors, while allowing explicit, documented overrides in `xtask/conformance/diag_mapping.toml` where we deliberately improve notoriously cryptic `javac` messages (e.g. `illegal start of expression`).
+3. **Timing / Phasing:** Schedule **Phase A** (syntax diagnostic UX snapshots + `cargo xtask diag-conformance --phase syntax`) ahead of **Spec 0012 (Semantic Diagnostics)** so diagnostic UX infrastructure is ready when semantic diagnostics begin; **Phase B** lands alongside Spec 0012.
 
 ---
 
