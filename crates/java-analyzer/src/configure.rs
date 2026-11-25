@@ -280,24 +280,17 @@ pub(crate) fn render_module_tree<W: Write>(
             preview_suffix
         )?;
         for src in &m.sources {
+            let tags = format_source_root_tags(src.scope, src.release_override);
             if include_file_counts {
                 let count = src.files.len();
                 let unit = if count == 1 { "file" } else { "files" };
                 writeln!(
                     out,
                     "│       source:   {} [{}] ({} .java {})",
-                    src.rel_path,
-                    scope_label(src.scope),
-                    count,
-                    unit
+                    src.rel_path, tags, count, unit
                 )?;
             } else {
-                writeln!(
-                    out,
-                    "│       source:   {} [{}]",
-                    src.rel_path,
-                    scope_label(src.scope)
-                )?;
+                writeln!(out, "│       source:   {} [{}]", src.rel_path, tags)?;
             }
         }
         for res in &m.resources {
@@ -404,6 +397,13 @@ pub(crate) fn scope_label(scope: RootScope) -> &'static str {
     match scope {
         RootScope::Main => "main",
         RootScope::Test => "test",
+    }
+}
+
+fn format_source_root_tags(scope: RootScope, release_override: Option<Release>) -> String {
+    match release_override {
+        Some(rel) => format!("{}, Java {} overlay", scope_label(scope), rel.number()),
+        None => scope_label(scope).to_string(),
     }
 }
 

@@ -22,12 +22,14 @@ pub use diagnostics::{
 pub use document_symbols::{StructureNode, SymbolKind, document_symbols};
 pub use hir::{
     BinaryMemberSymbol, BinaryModuleInfo, BinaryOrigin, BinaryTarget, BinaryTypeSymbol,
-    Cancellable, Cancelled, ClassfileError, ClasspathIndex, DeltaSet, FileId, LanguageLevel,
-    MemberKind, ModuleData, ModuleDelta, ModuleDependency, ModuleId, ModuleTarget, Nullability,
-    NullabilitySource, NullnessScope, ParamSummary, ParsedClassfile, Release, ResourceRoot,
-    RootScope, SmolStr, SourceRoot, TypeKind, WorkspaceDelta, WorkspaceLayout,
-    infer_workspace_layout_from_sources, is_path_within, normalize_rel_path, parse_class_bytes,
-    parse_manifest_multi_release, parse_shebang_level, select_mrjar_entries,
+    Cancellable, Cancelled, ClassfileError, ClasspathIndex, DeltaSet, FileId, FileOrigin,
+    JpmsExports, JpmsModuleSummary, JpmsRequires, LanguageLevel, MemberKind, ModuleData,
+    ModuleDelta, ModuleDependency, ModuleGraphData, ModuleId, ModuleScopeConfig, ModuleTarget,
+    Nullability, NullabilitySource, NullnessScope, ParamSummary, ParsedClassfile, Release,
+    ResourceRoot, RootScope, SmolStr, SourceRoot, TypeKind, WorkspaceDelta, WorkspaceLayout,
+    infer_workspace_layout_from_sources, is_path_within, mrjar_release_from_path,
+    normalize_rel_path, parse_class_bytes, parse_manifest_multi_release, parse_shebang_level,
+    select_mrjar_entries,
 };
 pub use hover::{HoverResult, hover};
 pub use navigation::{
@@ -67,6 +69,10 @@ impl AnalysisHost {
 
     pub fn set_workspace_modules(&mut self, modules: Vec<(ModuleId, Arc<Vec<FileId>>)>) {
         self.db.set_workspace_modules(modules);
+    }
+
+    pub fn set_workspace_module_graph(&mut self, graph: Arc<ModuleGraphData>) {
+        self.db.set_workspace_module_graph(graph);
     }
 
     pub fn set_classpath_index(&mut self, index: Arc<ClasspathIndex>) {

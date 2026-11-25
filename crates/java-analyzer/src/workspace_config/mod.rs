@@ -620,6 +620,9 @@ impl WorkspaceProbe {
             let norm = normalize_rel_path(&rel.to_string_lossy());
 
             if let Some((module, src)) = self.layout.enclosing_source_root(&norm) {
+                if let Some(rel) = src.release_override {
+                    return LanguageLevel::new(rel, module.language_level.preview);
+                }
                 if src.scope == RootScope::Test
                     && let Some(test_lvl) = module.test_language_level
                 {

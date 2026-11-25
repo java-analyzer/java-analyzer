@@ -5,15 +5,16 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use smol_str::SmolStr;
 use syntax::{
-    SyntaxElement, SyntaxNode, TextRange,
+    Release, SyntaxElement, SyntaxNode, TextRange,
     ext::{collapsed_text, has_direct_token, is_type_node, name_child, path_segments, path_text, type_child},
     syntax_kind::SyntaxKind::{self, *},
 };
 
 use crate::{
     FileId,
-    item_tree::{FileItemTree, TypeId},
+    item_tree::{FileItemTree, JpmsModuleSummary, TypeId},
     ty::Nullability,
+    workspace::{ModuleDependency, ModuleId, RootScope},
 };
 
 /// Where a nullability constraint or defaulting scope originated.
@@ -314,9 +315,88 @@ pub struct FileSymbols {
     pub top_level_members: Vec<MemberSymbol>,
 }
 
-/// Position-independent symbol lookup index for a single module.
+/// Origin of a workspace source file within its enclosing module, scope, and optional
+/// JEP 238 Multi-Release overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FileOrigin {
+    pub module_id: ModuleId,
+    pub scope: RootScope,
+    /// `None` for base root, `Some(Release(N))` for JEP 238 overlay root.
+    pub release_override: Option<Release>,
+}
+
+/// Compile-time configuration and dependency edges for a single workspace module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleScopeConfig {
+    pub id: ModuleId,
+    pub base_release: Release,
+    pub test_release: Release,
+    pub dependencies: Vec<ModuleDependency>,
+}
+
+/// Position-independent workspace module dependency graph and per-file origin table.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ModuleGraphData {
+    pub modules: BTreeMap<ModuleId, ModuleScopeConfig>,
+    pub file_origins: BTreeMap<FileId, FileOrigin>,
+}
+
+/// Position-independent symbol lookup slice for a single `(RootScope, Option<Release>)` layer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SymbolSlice {
+    /// Canonical FQN (`"com.example.Outer.Inner"`, or `"Foo"` in unnamed package) -> `(FileId, TypeId)`.
+    pub(crate) types_by_fqn: BTreeMap<String, (FileId, TypeId)>,
+    /// Canonical FQN -> declaring package (`""` for unnamed package).
+    pub(crate) type_packages: BTreeMap<String, String>,
+    /// Package name (`""` for unnamed package, `"com.example"` otherwise) -> top-level type FQNs.
+    pub(crate) types_by_package: BTreeMap<String, Vec<String>>,
+    /// Package name -> simple name -> top-level type FQN for fast same-package & wildcard lookup.
+    pub(crate) package_type_map: BTreeMap<String, BTreeMap<SmolStr, String>>,
+    /// Package name -> lexical nullness scope from `package-info.java`.
+    pub package_nullness: BTreeMap<String, NullnessScope>,
+    /// JPMS module descriptor from `module-info.java` in this layer, if any.
+    pub jpms_module: Option<JpmsModuleSummary>,
+    /// Lexical nullness scope from `module-info.java` in this layer, if any.
+    pub module_nullness: NullnessScope,
+}
+
+impl SymbolSlice {
+    /// Returns the indexed `(FileId, TypeId)` for `fqn`, if present in this slice.
+    pub fn get_type(&self, fqn: &str) -> Option<(FileId, TypeId)> {
+        self.types_by_fqn.get(fqn).copied()
+    }
+
+    /// Returns `true` if `fqn` is present in this slice.
+    pub fn contains_type(&self, fqn: &str) -> bool {
+        self.types_by_fqn.contains_key(fqn)
+    }
+
+    /// Returns the package name for `fqn` (`""` for unnamed package), if present in this slice.
+    pub fn package_of_type(&self, fqn: &str) -> Option<&str> {
+        self.type_packages.get(fqn).map(String::as_str)
+    }
+
+    /// Looks up a top-level type in `pkg` by simple `name`.
+    pub fn get_package_type(&self, pkg: &str, name: &str) -> Option<(FileId, TypeId)> {
+        let fqn = self.package_type_map.get(pkg)?.get(name)?;
+        self.types_by_fqn.get(fqn).copied()
+    }
+
+    /// Returns `true` if `prefix` is a known package or ancestor prefix in this slice.
+    pub fn has_package_prefix(&self, prefix: &str) -> bool {
+        has_package_prefix_in(&self.types_by_package, prefix)
+    }
+}
+
+/// Position-independent symbol lookup index for a single module, partitioned by
+/// `Main`/`Test` scope and JEP 238 Multi-Release overlays.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModuleIndex {
+    pub main_base: SymbolSlice,
+    pub main_overlays: BTreeMap<Release, SymbolSlice>,
+    pub test_base: SymbolSlice,
+    pub test_overlays: BTreeMap<Release, SymbolSlice>,
+
     /// Canonical FQN (`"com.example.Outer.Inner"`, or `"Foo"` in unnamed package) -> `(FileId, TypeId)`.
     pub(crate) types_by_fqn: BTreeMap<String, (FileId, TypeId)>,
     /// Package name (`""` for unnamed package, `"com.example"` otherwise) -> top-level type FQNs.
@@ -332,6 +412,55 @@ pub struct ModuleIndex {
 }
 
 impl ModuleIndex {
+    /// Returns the effective `Main` JPMS descriptor for `view_release`, checking overlays
+    /// `<= view_release` in descending release order before `main_base`.
+    pub fn effective_main_jpms(&self, view_release: Release) -> Option<&JpmsModuleSummary> {
+        self.main_overlays
+            .range(..=view_release)
+            .rev()
+            .find_map(|(_, slice)| slice.jpms_module.as_ref())
+            .or(self.main_base.jpms_module.as_ref())
+    }
+
+    /// Returns the effective `Test` JPMS descriptor for `view_release`, checking `test_overlays`
+    /// `<= view_release` in descending release order before `test_base`.
+    pub fn effective_test_jpms(&self, view_release: Release) -> Option<&JpmsModuleSummary> {
+        self.test_overlays
+            .range(..=view_release)
+            .rev()
+            .find_map(|(_, slice)| slice.jpms_module.as_ref())
+            .or(self.test_base.jpms_module.as_ref())
+    }
+
+    /// Iterates `Main` slices visible at `view_release` from highest overlay down to `main_base`.
+    pub fn iter_main_slices(&self, view_release: Release) -> impl Iterator<Item = &SymbolSlice> {
+        self.main_overlays
+            .range(..=view_release)
+            .rev()
+            .map(|(_, s)| s)
+            .chain(std::iter::once(&self.main_base))
+    }
+
+    /// Iterates `Test` slices visible at `view_release` from highest overlay down to `test_base`.
+    pub fn iter_test_slices(&self, view_release: Release) -> impl Iterator<Item = &SymbolSlice> {
+        self.test_overlays
+            .range(..=view_release)
+            .rev()
+            .map(|(_, s)| s)
+            .chain(std::iter::once(&self.test_base))
+    }
+
+    /// Returns the effective `Main` module-level [`NullnessScope`] at `view_release`.
+    pub fn effective_main_module_nullness(&self, view_release: Release) -> NullnessScope {
+        self.main_overlays
+            .range(..=view_release)
+            .rev()
+            .find_map(|(_, s)| {
+                (s.module_nullness != NullnessScope::Inherited).then_some(s.module_nullness)
+            })
+            .unwrap_or(self.main_base.module_nullness)
+    }
+
     /// Returns the indexed `(FileId, TypeId)` for `fqn`, if present.
     pub fn get_type(&self, fqn: &str) -> Option<(FileId, TypeId)> {
         self.types_by_fqn.get(fqn).copied()
@@ -478,43 +607,151 @@ fn has_package_prefix_in(types_by_package: &BTreeMap<String, Vec<String>>, prefi
         .is_some_and(|(pkg, _)| pkg.starts_with(&prefix_dot))
 }
 
-/// Builds a deterministic, position-independent [`ModuleIndex`] across a module's [`FileItemTree`]s.
-pub(crate) fn build_module_index(files: &[Arc<FileItemTree>]) -> ModuleIndex {
+fn insert_file_into_slice(slice: &mut SymbolSlice, file: &FileItemTree) {
+    let pkg = file.package.as_deref().unwrap_or("");
+    if let Some(jpms) = &file.jpms_module
+        && slice.jpms_module.is_none()
+    {
+        slice.jpms_module = Some(jpms.clone());
+    }
+    if file.nullness_scope != NullnessScope::Inherited {
+        if file.jpms_module.is_some() || file.module_name.is_some() {
+            slice.module_nullness = file.nullness_scope;
+        } else {
+            slice
+                .package_nullness
+                .insert(pkg.to_string(), file.nullness_scope);
+        }
+    }
+    for (type_id, ty) in file.types.iter() {
+        slice
+            .types_by_fqn
+            .insert(ty.qualified_name.clone(), (file.file_id, type_id));
+        slice
+            .type_packages
+            .insert(ty.qualified_name.clone(), pkg.to_string());
+        if ty.enclosing_type.is_none() {
+            slice
+                .types_by_package
+                .entry(pkg.to_string())
+                .or_default()
+                .push(ty.qualified_name.clone());
+            slice
+                .package_type_map
+                .entry(pkg.to_string())
+                .or_default()
+                .insert(ty.name.clone(), ty.qualified_name.clone());
+        }
+    }
+}
+
+fn finalize_slice(slice: &mut SymbolSlice) {
+    for fqns in slice.types_by_package.values_mut() {
+        fqns.sort();
+        fqns.dedup();
+    }
+}
+
+fn fold_slice_into_module_index(index: &mut ModuleIndex, slice: &SymbolSlice) {
+    for (fqn, &loc) in &slice.types_by_fqn {
+        index.types_by_fqn.insert(fqn.clone(), loc);
+    }
+    for (pkg, fqns) in &slice.types_by_package {
+        index
+            .types_by_package
+            .entry(pkg.clone())
+            .or_default()
+            .extend(fqns.iter().cloned());
+    }
+    for (pkg, map) in &slice.package_type_map {
+        let entry = index.package_type_map.entry(pkg.clone()).or_default();
+        for (name, fqn) in map {
+            entry.insert(name.clone(), fqn.clone());
+        }
+    }
+    for (pkg, &scope) in &slice.package_nullness {
+        index.package_nullness.insert(pkg.clone(), scope);
+    }
+    if slice.module_nullness != NullnessScope::Inherited
+        && let Some(jpms) = &slice.jpms_module
+    {
+        index
+            .module_nullness
+            .insert(jpms.name.clone(), slice.module_nullness);
+    }
+}
+
+/// Builds a deterministic, position-independent [`ModuleIndex`] across a module's [`FileItemTree`]s,
+/// partitioned by `Main`/`Test` scope and JEP 238 Multi-Release overlays.
+pub(crate) fn build_module_index(
+    files: &[Arc<FileItemTree>],
+    origins: &BTreeMap<FileId, FileOrigin>,
+) -> ModuleIndex {
     let mut index = ModuleIndex::default();
-    let module_name = files.iter().find_map(|f| f.module_name.clone());
 
     for file in files {
-        let pkg = file.package.as_deref().unwrap_or("");
-        if let Some(mod_name) = &module_name {
-            index.file_modules.insert(file.file_id, mod_name.clone());
-        }
-        if file.nullness_scope != NullnessScope::Inherited {
-            if let Some(mod_name) = &file.module_name {
-                index
-                    .module_nullness
-                    .insert(mod_name.clone(), file.nullness_scope);
-            } else {
-                index
-                    .package_nullness
-                    .insert(pkg.to_string(), file.nullness_scope);
-            }
-        }
-        for (type_id, ty) in file.types.iter() {
+        let (scope, release_override) = origins
+            .get(&file.file_id)
+            .map_or((RootScope::Main, None), |o| (o.scope, o.release_override));
+        let slice = match (scope, release_override) {
+            (RootScope::Main, None) => &mut index.main_base,
+            (RootScope::Main, Some(rel)) => index.main_overlays.entry(rel).or_default(),
+            (RootScope::Test, None) => &mut index.test_base,
+            (RootScope::Test, Some(rel)) => index.test_overlays.entry(rel).or_default(),
+        };
+        insert_file_into_slice(slice, file);
+    }
+
+    finalize_slice(&mut index.main_base);
+    for slice in index.main_overlays.values_mut() {
+        finalize_slice(slice);
+    }
+    finalize_slice(&mut index.test_base);
+    for slice in index.test_overlays.values_mut() {
+        finalize_slice(slice);
+    }
+
+    let main_base = index.main_base.clone();
+    fold_slice_into_module_index(&mut index, &main_base);
+    let main_overlays: Vec<SymbolSlice> = index.main_overlays.values().cloned().collect();
+    for slice in &main_overlays {
+        fold_slice_into_module_index(&mut index, slice);
+    }
+    let test_base = index.test_base.clone();
+    fold_slice_into_module_index(&mut index, &test_base);
+    let test_overlays: Vec<SymbolSlice> = index.test_overlays.values().cloned().collect();
+    for slice in &test_overlays {
+        fold_slice_into_module_index(&mut index, slice);
+    }
+
+    // Legacy `module_nullness` fallback if a `module-info.java` lacked `jpms_module` (e.g. broken syntax).
+    for file in files {
+        if file.nullness_scope != NullnessScope::Inherited
+            && let Some(mod_name) = &file.module_name
+        {
             index
-                .types_by_fqn
-                .insert(ty.qualified_name.clone(), (file.file_id, type_id));
-            if ty.enclosing_type.is_none() {
-                index
-                    .types_by_package
-                    .entry(pkg.to_string())
-                    .or_default()
-                    .push(ty.qualified_name.clone());
-                index
-                    .package_type_map
-                    .entry(pkg.to_string())
-                    .or_default()
-                    .insert(ty.name.clone(), ty.qualified_name.clone());
-            }
+                .module_nullness
+                .entry(mod_name.clone())
+                .or_insert(file.nullness_scope);
+        }
+    }
+
+    let module_name = index
+        .main_base
+        .jpms_module
+        .as_ref()
+        .map(|m| m.name.clone())
+        .or_else(|| {
+            index
+                .main_overlays
+                .values()
+                .find_map(|s| s.jpms_module.as_ref().map(|m| m.name.clone()))
+        })
+        .or_else(|| files.iter().find_map(|f| f.module_name.clone()));
+
+    if let Some(mod_name) = module_name {
+        for file in files {
+            index.file_modules.insert(file.file_id, mod_name.clone());
         }
     }
 

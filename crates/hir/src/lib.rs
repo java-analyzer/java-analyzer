@@ -4,13 +4,14 @@ pub(crate) mod hierarchy;
 pub(crate) mod infer;
 pub(crate) mod item_tree;
 pub(crate) mod resolve;
+pub(crate) mod scope;
 pub(crate) mod symbols;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_fixture;
 pub(crate) mod ty;
 pub(crate) mod workspace;
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use rustc_hash::FxHashMap;
 use salsa::Setter as _;
@@ -28,19 +29,20 @@ pub use infer::{
     SamSignature, find_functional_interface_sam, infer_expr_ty, infer_local_ty,
 };
 pub use item_tree::{
-    AstId, AstIdMap, AstRange, FileItemTree, ImportId, ImportTree, MemberId, MemberItem, TypeId,
-    TypeItem,
+    AstId, AstIdMap, AstRange, FileItemTree, ImportId, ImportTree, JpmsExports, JpmsModuleSummary,
+    JpmsRequires, MemberId, MemberItem, TypeId, TypeItem,
 };
 pub use resolve::{
     LocalKind, ResolvedSymbol, ResolvedSymbolKind, SymbolDetail, resolve_at_offset,
     resolve_type_of_symbol_at_offset,
 };
+pub use scope::VisibleScope;
 pub use smol_str::SmolStr;
 pub use symbols::{
-    FileSymbols, ImportDecl, ImportKind, MemberKind, MemberSymbol, ModuleIndex, NullabilitySource,
-    NullnessScope, ParamSummary, TypeIdentity, TypeKind, TypeSymbol, WorkspaceIndex,
-    classify_nullability_annotation, classify_nullness_scope_annotation,
-    is_type_use_nullability_annotation,
+    FileOrigin, FileSymbols, ImportDecl, ImportKind, MemberKind, MemberSymbol, ModuleGraphData,
+    ModuleIndex, ModuleScopeConfig, NullabilitySource, NullnessScope, ParamSummary, SymbolSlice,
+    TypeIdentity, TypeKind, TypeSymbol, WorkspaceIndex, classify_nullability_annotation,
+    classify_nullness_scope_annotation, is_type_use_nullability_annotation,
 };
 pub use syntax::{
     LanguageLevel, Parse, Release, SyntaxError, SyntaxNode, TextRange, TextSize,
@@ -55,7 +57,8 @@ pub use workspace::{
     DeltaSet, FileHeader, ModuleData, ModuleDelta, ModuleDependency, ModuleHeader, ModuleId,
     ModuleTarget, PackageMismatch, ResourceRoot, ResourceRootId, RootScope, SourceRoot,
     SourceRootId, WorkspaceDelta, WorkspaceLayout, extract_file_header, infer_workspace_layout,
-    infer_workspace_layout_from_sources, is_path_within, normalize_rel_path,
+    infer_workspace_layout_from_sources, is_path_within, mrjar_release_from_path,
+    normalize_rel_path,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -82,6 +85,11 @@ pub(crate) struct WorkspaceModules {
 #[salsa::input]
 pub(crate) struct ClasspathInput {
     pub(crate) index: Arc<ClasspathIndex>,
+}
+
+#[salsa::input]
+pub(crate) struct WorkspaceModuleGraph {
+    pub(crate) data: Arc<ModuleGraphData>,
 }
 
 #[salsa::tracked]
@@ -116,24 +124,55 @@ fn extract_symbols(db: &dyn salsa::Database, file: SourceFile) -> Arc<FileSymbol
 }
 
 #[salsa::tracked]
-fn build_module_index_query(db: &dyn salsa::Database, module: ModuleFiles) -> Arc<ModuleIndex> {
+fn module_file_origins(
+    db: &dyn salsa::Database,
+    module: ModuleFiles,
+    graph: WorkspaceModuleGraph,
+) -> Arc<BTreeMap<FileId, FileOrigin>> {
+    let data = graph.data(db);
+    let mut out = BTreeMap::new();
+    for &file in module.files(db).iter() {
+        let fid = *file.file_id(db);
+        if let Some(&origin) = data.file_origins.get(&fid) {
+            out.insert(fid, origin);
+        }
+    }
+    Arc::new(out)
+}
+
+#[salsa::tracked]
+fn build_module_index_query(
+    db: &dyn salsa::Database,
+    module: ModuleFiles,
+    graph: Option<WorkspaceModuleGraph>,
+) -> Arc<ModuleIndex> {
     let files = module.files(db);
     let per_file: Vec<Arc<FileItemTree>> = files
         .iter()
         .map(|&f| file_item_tree(db, f).clone())
         .collect();
-    Arc::new(symbols::build_module_index(&per_file))
+    let empty_origins = BTreeMap::new();
+    let origins_arc;
+    let origins = match graph {
+        Some(g) => {
+            origins_arc = module_file_origins(db, module, g);
+            origins_arc.as_ref()
+        }
+        None => &empty_origins,
+    };
+    Arc::new(symbols::build_module_index(&per_file, origins))
 }
 
 #[salsa::tracked]
 fn build_workspace_index_query(
     db: &dyn salsa::Database,
     workspace: WorkspaceModules,
+    graph: Option<WorkspaceModuleGraph>,
 ) -> Arc<WorkspaceIndex> {
     let modules = workspace.modules(db);
     let per_module: Vec<Arc<ModuleIndex>> = modules
         .iter()
-        .map(|&m| build_module_index_query(db, m).clone())
+        .map(|&m| build_module_index_query(db, m, graph).clone())
         .collect();
     Arc::new(symbols::merge_module_indexes(&per_module))
 }
@@ -143,8 +182,9 @@ fn build_workspace_hierarchy_query(
     db: &dyn salsa::Database,
     workspace: WorkspaceModules,
     classpath: Option<ClasspathInput>,
+    graph: Option<WorkspaceModuleGraph>,
 ) -> Arc<WorkspaceHierarchyIndex> {
-    let workspace_index = build_workspace_index_query(db, workspace);
+    let workspace_index = build_workspace_index_query(db, workspace, graph);
     let modules = workspace.modules(db);
     let mut per_file = Vec::new();
     for &module in modules.iter() {
@@ -204,6 +244,9 @@ pub trait DefDatabase: SourceDatabase {
 
     /// Indexed JDK and external JAR binary symbols.
     fn classpath_index(&self) -> Arc<ClasspathIndex>;
+
+    /// Workspace module dependency graph, per-file scopes, and MR-JAR release origins.
+    fn workspace_module_graph(&self) -> Arc<ModuleGraphData>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,6 +277,7 @@ pub struct RootDatabase {
     module_files: FxHashMap<ModuleId, ModuleFiles>,
     workspace_modules: Option<WorkspaceModules>,
     classpath_input: Option<ClasspathInput>,
+    workspace_module_graph: Option<WorkspaceModuleGraph>,
 }
 
 #[salsa::db]
@@ -330,6 +374,18 @@ impl RootDatabase {
         }
     }
 
+    /// Replaces the workspace module dependency graph and per-file origins, preserving Salsa
+    /// early-cutoff when the new [`ModuleGraphData`] equals the existing one.
+    pub fn set_workspace_module_graph(&mut self, graph: Arc<ModuleGraphData>) {
+        if let Some(existing) = self.workspace_module_graph {
+            if existing.data(self).as_ref() != graph.as_ref() {
+                existing.set_data(self).to(graph);
+            }
+        } else {
+            self.workspace_module_graph = Some(WorkspaceModuleGraph::new(self, graph));
+        }
+    }
+
     /// Removes `file_id` from the tracked file map and prunes it from any module file lists.
     /// Does nothing if `file_id` is absent.
     pub fn remove_file(&mut self, file_id: FileId) {
@@ -400,21 +456,29 @@ impl DefDatabase for RootDatabase {
 
     fn module_index(&self, module_id: ModuleId) -> Arc<ModuleIndex> {
         match self.module_files.get(&module_id) {
-            Some(&module) => build_module_index_query(self, module).clone(),
+            Some(&module) => {
+                build_module_index_query(self, module, self.workspace_module_graph).clone()
+            }
             None => Arc::new(ModuleIndex::default()),
         }
     }
 
     fn workspace_index(&self) -> Arc<WorkspaceIndex> {
         match self.workspace_modules {
-            Some(ws) => build_workspace_index_query(self, ws).clone(),
+            Some(ws) => build_workspace_index_query(self, ws, self.workspace_module_graph).clone(),
             None => Arc::new(WorkspaceIndex::default()),
         }
     }
 
     fn workspace_hierarchy_index(&self) -> Arc<WorkspaceHierarchyIndex> {
         match self.workspace_modules {
-            Some(ws) => build_workspace_hierarchy_query(self, ws, self.classpath_input).clone(),
+            Some(ws) => build_workspace_hierarchy_query(
+                self,
+                ws,
+                self.classpath_input,
+                self.workspace_module_graph,
+            )
+            .clone(),
             None => Arc::new(WorkspaceHierarchyIndex::default()),
         }
     }
@@ -423,6 +487,13 @@ impl DefDatabase for RootDatabase {
         match self.classpath_input {
             Some(input) => input.index(self).clone(),
             None => Arc::new(ClasspathIndex::default()),
+        }
+    }
+
+    fn workspace_module_graph(&self) -> Arc<ModuleGraphData> {
+        match self.workspace_module_graph {
+            Some(input) => input.data(self).clone(),
+            None => Arc::new(ModuleGraphData::default()),
         }
     }
 }
@@ -2282,5 +2353,716 @@ public class Sub extends Base implements List<String> {
             )
             .is_none()
         );
+    }
+
+    struct ScopedFixtureBuilder {
+        db: RootDatabase,
+        modules: BTreeMap<ModuleId, (ModuleScopeConfig, Vec<FileId>)>,
+        file_origins: BTreeMap<FileId, FileOrigin>,
+    }
+
+    impl ScopedFixtureBuilder {
+        fn new() -> Self {
+            Self {
+                db: RootDatabase::default(),
+                modules: BTreeMap::new(),
+                file_origins: BTreeMap::new(),
+            }
+        }
+
+        fn add_module(
+            &mut self,
+            id: ModuleId,
+            base_release: Release,
+            test_release: Release,
+            dependencies: Vec<ModuleDependency>,
+        ) {
+            self.modules.insert(
+                id,
+                (
+                    ModuleScopeConfig {
+                        id,
+                        base_release,
+                        test_release,
+                        dependencies,
+                    },
+                    Vec::new(),
+                ),
+            );
+        }
+
+        fn add_file(
+            &mut self,
+            file_id: u32,
+            module_id: ModuleId,
+            scope: RootScope,
+            release_override: Option<Release>,
+            text: &str,
+        ) -> FileId {
+            let fid = FileId(file_id);
+            let cfg = &self.modules[&module_id].0;
+            let rel = release_override.unwrap_or(if scope == RootScope::Test {
+                cfg.test_release
+            } else {
+                cfg.base_release
+            });
+            self.db.set_file_text(fid, Arc::new(text.to_string()));
+            self.db
+                .set_file_language_level(fid, LanguageLevel::new(rel, false));
+            self.modules
+                .get_mut(&module_id)
+                .unwrap()
+                .1
+                .push(fid);
+            self.file_origins.insert(
+                fid,
+                FileOrigin {
+                    module_id,
+                    scope,
+                    release_override,
+                },
+            );
+            fid
+        }
+
+        fn build(mut self) -> RootDatabase {
+            let mut graph_modules = BTreeMap::new();
+            let mut ws_modules = Vec::new();
+            for (id, (cfg, files)) in self.modules {
+                graph_modules.insert(id, cfg);
+                ws_modules.push((id, Arc::new(files)));
+            }
+            self.db.set_workspace_modules(ws_modules);
+            self.db.set_workspace_module_graph(Arc::new(ModuleGraphData {
+                modules: graph_modules,
+                file_origins: self.file_origins,
+            }));
+            self.db
+        }
+    }
+
+    #[test]
+    fn spec_0009_ac1_main_vs_test_isolation_same_and_cross_module() {
+        let mut fx = ScopedFixtureBuilder::new();
+        let mod_a = ModuleId(0);
+        let mod_b = ModuleId(1);
+        fx.add_module(
+            mod_a,
+            Release::JAVA_17,
+            Release::JAVA_17,
+            vec![ModuleDependency::Module {
+                target: ModuleTarget::Workspace(mod_b),
+                scope: RootScope::Main,
+                exported: false,
+            }],
+        );
+        fx.add_module(mod_b, Release::JAVA_17, Release::JAVA_17, vec![]);
+
+        let a_main_src = "\
+package com.a;
+import com.b.BMain;
+import com.b.BTest;
+public class AMain {
+    /*own_test_in_main*/ATest t1;
+    /*b_main_in_main*/BMain b1;
+    /*b_test_in_main*/BTest b2;
+    public void call() {
+        /*infer_own_test*/new ATest().onlyTest();
+    }
+}
+";
+        let a_test_src = "\
+package com.a;
+import com.b.BMain;
+import com.b.BTest;
+public class ATest {
+    public void onlyTest() {}
+    /*own_main_in_test*/AMain m1;
+    /*b_main_in_test*/BMain b1;
+    /*b_test_in_test*/BTest b2;
+}
+";
+        let b_main_src = "package com.b; public class BMain {}";
+        let b_test_src = "package com.b; public class BTest {}";
+
+        let f_a_main = fx.add_file(1, mod_a, RootScope::Main, None, a_main_src);
+        let f_a_test = fx.add_file(2, mod_a, RootScope::Test, None, a_test_src);
+        let f_b_main = fx.add_file(3, mod_b, RootScope::Main, None, b_main_src);
+        fx.add_file(4, mod_b, RootScope::Test, None, b_test_src);
+        let db = fx.build();
+
+        // Main cannot see own Test or dep Test, but sees dep Main.
+        assert!(resolve_at_offset(&db, f_a_main, cursor(a_main_src, "/*own_test_in_main*/")).is_none());
+        let b1 = resolve_at_offset(&db, f_a_main, cursor(a_main_src, "/*b_main_in_main*/")).unwrap();
+        assert_eq!(b1.file_id, Some(f_b_main));
+        assert!(resolve_at_offset(&db, f_a_main, cursor(a_main_src, "/*b_test_in_main*/")).is_none());
+        assert!(resolve_at_offset(&db, f_a_main, cursor(a_main_src, "/*infer_own_test*/new ATest().")).is_none());
+
+        // Test sees own Main and dep Main, but never dep Test.
+        let own_m = resolve_at_offset(&db, f_a_test, cursor(a_test_src, "/*own_main_in_test*/")).unwrap();
+        assert_eq!(own_m.file_id, Some(f_a_main));
+        let b1_t = resolve_at_offset(&db, f_a_test, cursor(a_test_src, "/*b_main_in_test*/")).unwrap();
+        assert_eq!(b1_t.file_id, Some(f_b_main));
+        assert!(resolve_at_offset(&db, f_a_test, cursor(a_test_src, "/*b_test_in_test*/")).is_none());
+    }
+
+    #[test]
+    fn spec_0009_ac2_transitive_exported_and_duplicate_fqn_isolation() {
+        // 1. a -> b (exported: false) -> c: c is hidden from a until b -> c has exported: true.
+        let a_src = "\
+package com.a;
+import com.b.B;
+import com.c.C;
+public class A {
+    /*ref_b*/B b;
+    /*ref_c*/C c;
+}
+";
+        let b_src = "package com.b; public class B {}";
+        let c_src = "package com.c; public class C {}";
+
+        let build_chain = |exported_bc: bool| {
+            let mut fx = ScopedFixtureBuilder::new();
+            fx.add_module(
+                ModuleId(0),
+                Release::JAVA_17,
+                Release::JAVA_17,
+                vec![ModuleDependency::Module {
+                    target: ModuleTarget::Workspace(ModuleId(1)),
+                    scope: RootScope::Main,
+                    exported: false,
+                }],
+            );
+            fx.add_module(
+                ModuleId(1),
+                Release::JAVA_17,
+                Release::JAVA_17,
+                vec![ModuleDependency::Module {
+                    target: ModuleTarget::Workspace(ModuleId(2)),
+                    scope: RootScope::Main,
+                    exported: exported_bc,
+                }],
+            );
+            fx.add_module(ModuleId(2), Release::JAVA_17, Release::JAVA_17, vec![]);
+            let fa = fx.add_file(1, ModuleId(0), RootScope::Main, None, a_src);
+            let fb = fx.add_file(2, ModuleId(1), RootScope::Main, None, b_src);
+            let fc = fx.add_file(3, ModuleId(2), RootScope::Main, None, c_src);
+            (fx.build(), fa, fb, fc)
+        };
+
+        let (db_non_exp, fa, fb, _fc) = build_chain(false);
+        assert_eq!(
+            resolve_at_offset(&db_non_exp, fa, cursor(a_src, "/*ref_b*/"))
+                .unwrap()
+                .file_id,
+            Some(fb)
+        );
+        assert!(resolve_at_offset(&db_non_exp, fa, cursor(a_src, "/*ref_c*/")).is_none());
+
+        let (db_exp, fa, fb, fc) = build_chain(true);
+        assert_eq!(
+            resolve_at_offset(&db_exp, fa, cursor(a_src, "/*ref_b*/"))
+                .unwrap()
+                .file_id,
+            Some(fb)
+        );
+        assert_eq!(
+            resolve_at_offset(&db_exp, fa, cursor(a_src, "/*ref_c*/"))
+                .unwrap()
+                .file_id,
+            Some(fc)
+        );
+
+        // 2. Duplicate FQNs across unrelated sibling modules X and Y resolve locally without clobbering.
+        let mut fx_dup = ScopedFixtureBuilder::new();
+        fx_dup.add_module(ModuleId(10), Release::JAVA_17, Release::JAVA_17, vec![]);
+        fx_dup.add_module(ModuleId(11), Release::JAVA_17, Release::JAVA_17, vec![]);
+        let cfg_x = "package com.example; public class Config { public static int fromX() { return 1; } }";
+        let cfg_y = "package com.example; public class Config { public static int fromY() { return 2; } }";
+        let use_x = "\
+package com.example;
+public class UseX {
+    /*x_cfg*/Config c;
+    int v = Config./*x_method*/fromX();
+    int bad = Config./*x_no_y*/fromY();
+}
+";
+        let use_y = "\
+package com.example;
+public class UseY {
+    /*y_cfg*/Config c;
+    int v = Config./*y_method*/fromY();
+    int bad = Config./*y_no_x*/fromX();
+}
+";
+        let f_cfg_x = fx_dup.add_file(10, ModuleId(10), RootScope::Main, None, cfg_x);
+        let f_use_x = fx_dup.add_file(11, ModuleId(10), RootScope::Main, None, use_x);
+        let f_cfg_y = fx_dup.add_file(12, ModuleId(11), RootScope::Main, None, cfg_y);
+        let f_use_y = fx_dup.add_file(13, ModuleId(11), RootScope::Main, None, use_y);
+        let db_dup = fx_dup.build();
+
+        assert_eq!(
+            resolve_at_offset(&db_dup, f_use_x, cursor(use_x, "/*x_cfg*/"))
+                .unwrap()
+                .file_id,
+            Some(f_cfg_x)
+        );
+        assert_eq!(
+            resolve_at_offset(&db_dup, f_use_x, cursor(use_x, "/*x_method*/"))
+                .unwrap()
+                .file_id,
+            Some(f_cfg_x)
+        );
+        assert!(resolve_at_offset(&db_dup, f_use_x, cursor(use_x, "/*x_no_y*/")).is_none());
+
+        assert_eq!(
+            resolve_at_offset(&db_dup, f_use_y, cursor(use_y, "/*y_cfg*/"))
+                .unwrap()
+                .file_id,
+            Some(f_cfg_y)
+        );
+        assert_eq!(
+            resolve_at_offset(&db_dup, f_use_y, cursor(use_y, "/*y_method*/"))
+                .unwrap()
+                .file_id,
+            Some(f_cfg_y)
+        );
+        assert!(resolve_at_offset(&db_dup, f_use_y, cursor(use_y, "/*y_no_x*/")).is_none());
+    }
+
+    #[test]
+    fn spec_0009_ac3_jpms_requires_exports_qualified_exports_and_jdk_modules() {
+        let mut fx = ScopedFixtureBuilder::new();
+        let mod_base = ModuleId(0);
+        let mod_lib = ModuleId(1);
+        let mod_app = ModuleId(2);
+        let mod_other = ModuleId(3);
+        let mod_unnamed = ModuleId(4);
+
+        fx.add_module(mod_base, Release::JAVA_17, Release::JAVA_17, vec![]);
+        fx.add_module(
+            mod_lib,
+            Release::JAVA_17,
+            Release::JAVA_17,
+            vec![ModuleDependency::Module {
+                target: ModuleTarget::Workspace(mod_base),
+                scope: RootScope::Main,
+                exported: true,
+            }],
+        );
+        fx.add_module(
+            mod_app,
+            Release::JAVA_17,
+            Release::JAVA_17,
+            vec![ModuleDependency::Module {
+                target: ModuleTarget::Workspace(mod_lib),
+                scope: RootScope::Main,
+                exported: false,
+            }],
+        );
+        fx.add_module(
+            mod_other,
+            Release::JAVA_17,
+            Release::JAVA_17,
+            vec![ModuleDependency::Module {
+                target: ModuleTarget::Workspace(mod_lib),
+                scope: RootScope::Main,
+                exported: false,
+            }],
+        );
+        fx.add_module(mod_unnamed, Release::JAVA_17, Release::JAVA_17, vec![]);
+
+        fx.add_file(
+            1,
+            mod_base,
+            RootScope::Main,
+            None,
+            "module com.base { exports com.base.api; }",
+        );
+        let f_base_api = fx.add_file(
+            2,
+            mod_base,
+            RootScope::Main,
+            None,
+            "package com.base.api; public class BaseType {}",
+        );
+
+        fx.add_file(
+            3,
+            mod_lib,
+            RootScope::Main,
+            None,
+            "module com.lib { requires transitive com.base; exports com.lib.api; exports com.lib.spi to com.app; }",
+        );
+        let f_pub = fx.add_file(
+            4,
+            mod_lib,
+            RootScope::Main,
+            None,
+            "package com.lib.api; public class PublicService {}",
+        );
+        fx.add_file(
+            5,
+            mod_lib,
+            RootScope::Main,
+            None,
+            "package com.lib.internal; public class Secret {}",
+        );
+        let f_spi = fx.add_file(
+            6,
+            mod_lib,
+            RootScope::Main,
+            None,
+            "package com.lib.spi; public class Plugin {}",
+        );
+
+        fx.add_file(
+            7,
+            mod_app,
+            RootScope::Main,
+            None,
+            "module com.app { requires com.lib; }",
+        );
+        let app_src = "\
+package com.app;
+import com.lib.api.PublicService;
+import com.lib.internal.Secret;
+import com.lib.spi.Plugin;
+import com.base.api.BaseType;
+import java.sql.Connection;
+import org.jar.JarHelper;
+public class App {
+    /*pub*/PublicService p;
+    /*secret*/Secret s;
+    /*spi*/Plugin pl;
+    /*trans_base*/BaseType bt;
+    /*str*/String st;
+    /*sql*/Connection conn;
+    /*jar*/JarHelper jh;
+    /*unexp_jdk*/sun.misc.Unsafe u;
+}
+";
+        let f_app = fx.add_file(8, mod_app, RootScope::Main, None, app_src);
+
+        fx.add_file(
+            9,
+            mod_other,
+            RootScope::Main,
+            None,
+            "module com.other { requires com.lib; }",
+        );
+        let other_src = "\
+package com.other;
+import com.lib.api.PublicService;
+import com.lib.spi.Plugin;
+public class Other {
+    /*other_pub*/PublicService p;
+    /*other_spi*/Plugin pl;
+}
+";
+        let f_other = fx.add_file(10, mod_other, RootScope::Main, None, other_src);
+
+        let unnamed_src = "\
+package com.unnamed;
+import java.sql.Connection;
+public class Unnamed {
+    /*u_str*/String s;
+    /*u_sql*/Connection c;
+}
+";
+        let f_unnamed = fx.add_file(11, mod_unnamed, RootScope::Main, None, unnamed_src);
+
+        let mut db = fx.build();
+        let mut cp = sample_binary_classpath();
+        cp.insert_type(BinaryTypeSymbol {
+            name: SmolStr::new("Unsafe"),
+            qualified_name: "sun.misc.Unsafe".to_string(),
+            internal_name: "sun/misc/Unsafe".to_string(),
+            package: "sun.misc".to_string(),
+            enclosing_type: None,
+            kind: TypeKind::Class,
+            identity: TypeIdentity::Identity,
+            is_public: true,
+            is_static: false,
+            is_final: true,
+            is_abstract: false,
+            nullness_scope: NullnessScope::Inherited,
+            type_params: vec![],
+            type_param_bounds: Default::default(),
+            super_class: Some("java.lang.Object".to_string()),
+            super_class_generic: None,
+            interfaces: vec![],
+            interfaces_generic: vec![],
+            permitted_subclasses: vec![],
+            members: vec![],
+            nested_types: vec![],
+            origin: BinaryOrigin::Jdk {
+                module_name: Some(SmolStr::new("java.base")),
+            },
+        });
+        cp.insert_type(BinaryTypeSymbol {
+            name: SmolStr::new("JarHelper"),
+            qualified_name: "org.jar.JarHelper".to_string(),
+            internal_name: "org/jar/JarHelper".to_string(),
+            package: "org.jar".to_string(),
+            enclosing_type: None,
+            kind: TypeKind::Class,
+            identity: TypeIdentity::Identity,
+            is_public: true,
+            is_static: false,
+            is_final: false,
+            is_abstract: false,
+            nullness_scope: NullnessScope::Inherited,
+            type_params: vec![],
+            type_param_bounds: Default::default(),
+            super_class: Some("java.lang.Object".to_string()),
+            super_class_generic: None,
+            interfaces: vec![],
+            interfaces_generic: vec![],
+            permitted_subclasses: vec![],
+            members: vec![],
+            nested_types: vec![],
+            origin: BinaryOrigin::Jar {
+                label: "libs/helper.jar".to_string(),
+            },
+        });
+        cp.finalize();
+        db.set_classpath_index(Arc::new(cp));
+
+        // Named `com.app`: exported, qualified exported to `com.app`, transitive `com.base`,
+        // `java.base` exported, and `BinaryOrigin::Jar` resolve; unexported/unrequired are hidden.
+        assert_eq!(
+            resolve_at_offset(&db, f_app, cursor(app_src, "/*pub*/"))
+                .unwrap()
+                .file_id,
+            Some(f_pub)
+        );
+        assert!(resolve_at_offset(&db, f_app, cursor(app_src, "/*secret*/")).is_none());
+        assert_eq!(
+            resolve_at_offset(&db, f_app, cursor(app_src, "/*spi*/"))
+                .unwrap()
+                .file_id,
+            Some(f_spi)
+        );
+        assert_eq!(
+            resolve_at_offset(&db, f_app, cursor(app_src, "/*trans_base*/"))
+                .unwrap()
+                .file_id,
+            Some(f_base_api)
+        );
+        assert_eq!(
+            resolve_at_offset(&db, f_app, cursor(app_src, "/*str*/"))
+                .unwrap()
+                .qualified_name,
+            "java.lang.String"
+        );
+        assert!(resolve_at_offset(&db, f_app, cursor(app_src, "/*sql*/")).is_none());
+        assert_eq!(
+            resolve_at_offset(&db, f_app, cursor(app_src, "/*jar*/"))
+                .unwrap()
+                .qualified_name,
+            "org.jar.JarHelper"
+        );
+        assert!(resolve_at_offset(&db, f_app, cursor(app_src, "/*unexp_jdk*/sun.misc.")).is_none());
+
+        // Named `com.other`: qualified export to `com.app` is NOT visible to `com.other`.
+        assert_eq!(
+            resolve_at_offset(&db, f_other, cursor(other_src, "/*other_pub*/"))
+                .unwrap()
+                .file_id,
+            Some(f_pub)
+        );
+        assert!(resolve_at_offset(&db, f_other, cursor(other_src, "/*other_spi*/")).is_none());
+
+        // Unnamed module: sees both `java.lang.String` and `java.sql.Connection`.
+        assert_eq!(
+            resolve_at_offset(&db, f_unnamed, cursor(unnamed_src, "/*u_str*/"))
+                .unwrap()
+                .qualified_name,
+            "java.lang.String"
+        );
+        assert_eq!(
+            resolve_at_offset(&db, f_unnamed, cursor(unnamed_src, "/*u_sql*/"))
+                .unwrap()
+                .qualified_name,
+            "java.sql.Connection"
+        );
+    }
+
+    #[test]
+    fn spec_0009_ac4_mrjar_source_roots_overlay_shadowing_and_syntax_levels() {
+        let mut fx = ScopedFixtureBuilder::new();
+        let mod_id = ModuleId(0);
+        fx.add_module(mod_id, Release::JAVA_8, Release::JAVA_21, vec![]);
+
+        let helper_8 = "\
+package com.example;
+public class PlatformHelper {
+    public static void legacyOnly() {}
+}
+";
+        let base_caller = "\
+package com.example;
+public class BaseCaller {
+    /*base_helper*/PlatformHelper h;
+    /*base_rec*/ModernRecord r;
+    void run() {
+        PlatformHelper./*call_legacy*/legacyOnly();
+        PlatformHelper./*call_modern_in_8*/modernOnly();
+    }
+}
+";
+        let helper_17 = "\
+package com.example;
+public class PlatformHelper {
+    public static void modernOnly() {}
+}
+";
+        let modern_rec = "\
+package com.example;
+public record ModernRecord(int x) {}
+";
+        let caller_17 = "\
+package com.example;
+public class Caller17 {
+    /*v17_helper*/PlatformHelper h;
+    /*v17_rec*/ModernRecord r;
+    void run() {
+        PlatformHelper./*call_modern*/modernOnly();
+        PlatformHelper./*call_legacy_in_17*/legacyOnly();
+    }
+}
+";
+        let test_21 = "\
+package com.example;
+public class PlatformTest {
+    /*test_helper*/PlatformHelper h;
+    /*test_rec*/ModernRecord r;
+    void run() {
+        PlatformHelper./*test_modern*/modernOnly();
+    }
+}
+";
+
+        let f_helper_8 = fx.add_file(1, mod_id, RootScope::Main, None, helper_8);
+        let f_caller_8 = fx.add_file(2, mod_id, RootScope::Main, None, base_caller);
+        let f_helper_17 =
+            fx.add_file(3, mod_id, RootScope::Main, Some(Release::JAVA_17), helper_17);
+        let f_rec_17 =
+            fx.add_file(4, mod_id, RootScope::Main, Some(Release::JAVA_17), modern_rec);
+        let f_caller_17 =
+            fx.add_file(5, mod_id, RootScope::Main, Some(Release::JAVA_17), caller_17);
+        let f_test_21 = fx.add_file(6, mod_id, RootScope::Test, None, test_21);
+        let db = fx.build();
+
+        // Java 17 `record` parses with zero syntax errors.
+        assert!(db.syntax_errors(f_rec_17).is_empty());
+
+        // Java 8 base sees base PlatformHelper and does not see Java 17 overlay or ModernRecord.
+        assert_eq!(
+            resolve_at_offset(&db, f_caller_8, cursor(base_caller, "/*base_helper*/"))
+                .unwrap()
+                .file_id,
+            Some(f_helper_8)
+        );
+        assert!(resolve_at_offset(&db, f_caller_8, cursor(base_caller, "/*base_rec*/")).is_none());
+        assert_eq!(
+            resolve_at_offset(&db, f_caller_8, cursor(base_caller, "/*call_legacy*/"))
+                .unwrap()
+                .file_id,
+            Some(f_helper_8)
+        );
+        assert!(resolve_at_offset(&db, f_caller_8, cursor(base_caller, "/*call_modern_in_8*/")).is_none());
+
+        // Java 17 overlay sees Java 17 PlatformHelper (shadowing base) and ModernRecord.
+        assert_eq!(
+            resolve_at_offset(&db, f_caller_17, cursor(caller_17, "/*v17_helper*/"))
+                .unwrap()
+                .file_id,
+            Some(f_helper_17)
+        );
+        assert_eq!(
+            resolve_at_offset(&db, f_caller_17, cursor(caller_17, "/*v17_rec*/"))
+                .unwrap()
+                .file_id,
+            Some(f_rec_17)
+        );
+        assert_eq!(
+            resolve_at_offset(&db, f_caller_17, cursor(caller_17, "/*call_modern*/"))
+                .unwrap()
+                .file_id,
+            Some(f_helper_17)
+        );
+        assert!(resolve_at_offset(&db, f_caller_17, cursor(caller_17, "/*call_legacy_in_17*/")).is_none());
+
+        // Java 21 Test sees Java 17 PlatformHelper and ModernRecord.
+        assert_eq!(
+            resolve_at_offset(&db, f_test_21, cursor(test_21, "/*test_helper*/"))
+                .unwrap()
+                .file_id,
+            Some(f_helper_17)
+        );
+        assert_eq!(
+            resolve_at_offset(&db, f_test_21, cursor(test_21, "/*test_rec*/"))
+                .unwrap()
+                .file_id,
+            Some(f_rec_17)
+        );
+        assert_eq!(
+            resolve_at_offset(&db, f_test_21, cursor(test_21, "/*test_modern*/"))
+                .unwrap()
+                .file_id,
+            Some(f_helper_17)
+        );
+    }
+
+    #[test]
+    fn spec_0009_ac5_salsa_early_cutoff_on_body_edit_in_scoped_module_graph() {
+        let mut fx = ScopedFixtureBuilder::new();
+        let mod_a = ModuleId(0);
+        let mod_b = ModuleId(1);
+        fx.add_module(
+            mod_a,
+            Release::JAVA_17,
+            Release::JAVA_17,
+            vec![ModuleDependency::Module {
+                target: ModuleTarget::Workspace(mod_b),
+                scope: RootScope::Main,
+                exported: false,
+            }],
+        );
+        fx.add_module(mod_b, Release::JAVA_17, Release::JAVA_17, vec![]);
+
+        let fa = fx.add_file(1, mod_a, RootScope::Main, None, "package a; public class A {}");
+        let fb = fx.add_file(
+            2,
+            mod_b,
+            RootScope::Main,
+            None,
+            "package b; public class B { int f() { return 1; } }",
+        );
+        let mut db = fx.build();
+
+        let tree_b_before = db.file_item_tree(fb);
+        let idx_a_before = db.module_index(mod_a);
+        let idx_b_before = db.module_index(mod_b);
+
+        // Edit method body of B with different text length.
+        db.set_file_text(
+            fb,
+            Arc::new(
+                "package b; public class B { int f() { int x = 40; int y = 2; return x + y; } }"
+                    .to_string(),
+            ),
+        );
+
+        let tree_b_after = db.file_item_tree(fb);
+        let idx_a_after = db.module_index(mod_a);
+        let idx_b_after = db.module_index(mod_b);
+
+        assert_eq!(tree_b_before, tree_b_after);
+        assert!(Arc::ptr_eq(&idx_b_before, &idx_b_after));
+        assert!(Arc::ptr_eq(&idx_a_before, &idx_a_after));
+        let _ = fa;
     }
 }

@@ -8,9 +8,10 @@ use smol_str::SmolStr;
 use crate::{
     DefDatabase, FileId,
     classpath::{BinaryOrigin, BinaryTypeSymbol, ClasspathIndex},
-    hierarchy::linearized_supertypes,
+    hierarchy::linearized_supertypes_in_scope,
     item_tree::{FileItemTree, TypeItem},
-    symbols::{ImportKind, NullnessScope, TypeKind, WorkspaceIndex},
+    scope::{ModuleImportTarget, VisibleScope},
+    symbols::{ImportKind, NullnessScope, TypeKind},
 };
 
 use super::{MAX_SUBST_DEPTH, Nullability, Ty, TypeArg, WildcardBound, parse::parse_type_ref};
@@ -18,8 +19,7 @@ use super::{MAX_SUBST_DEPTH, Nullability, Ty, TypeArg, WildcardBound, parse::par
 pub(super) struct TypeResolveEnv<'a> {
     pub(super) db: &'a dyn DefDatabase,
     pub(super) file_tree: &'a FileItemTree,
-    pub(super) workspace: &'a WorkspaceIndex,
-    pub(super) classpath: &'a ClasspathIndex,
+    pub(super) scope: &'a VisibleScope,
     pub(super) owner_ty: Option<&'a TypeItem>,
     pub(super) nullness_scope: NullnessScope,
     pub(super) type_params_in_scope: &'a BTreeMap<SmolStr, Vec<String>>,
@@ -30,29 +30,31 @@ pub(super) struct TypeResolveEnv<'a> {
 /// Resolves the effective lexical [`NullnessScope`] at file/package/module level for `file_id`.
 #[must_use]
 pub fn effective_nullness_scope_for_file(db: &dyn DefDatabase, file_id: FileId) -> NullnessScope {
+    let scope = VisibleScope::for_file(db, file_id);
+    effective_nullness_scope_for_file_in_scope(db, &scope, file_id)
+}
+
+pub(crate) fn effective_nullness_scope_for_file_in_scope(
+    db: &dyn DefDatabase,
+    scope: &VisibleScope,
+    file_id: FileId,
+) -> NullnessScope {
     let file_tree = db.file_item_tree(file_id);
     if file_tree.nullness_scope != NullnessScope::Inherited {
         return file_tree.nullness_scope;
     }
-    let workspace = db.workspace_index();
     let pkg = file_tree.package.as_deref().unwrap_or("");
-    let pkg_scope = workspace.package_nullness(pkg);
+    let pkg_scope = scope.package_nullness(pkg);
     if pkg_scope != NullnessScope::Inherited {
         return pkg_scope;
     }
-    if let Some(mod_name) = workspace.file_module(file_id) {
-        let mod_scope = workspace.module_nullness(mod_name);
-        if mod_scope != NullnessScope::Inherited {
-            return mod_scope;
-        }
-    }
-    NullnessScope::Inherited
+    scope.effective_module_nullness(file_id)
 }
 
 pub(super) fn effective_nullness_scope_in_file_tree(
     db: &dyn DefDatabase,
     file_tree: &FileItemTree,
-    workspace: &WorkspaceIndex,
+    scope: &VisibleScope,
     start_ty: &TypeItem,
 ) -> NullnessScope {
     let mut visited = FxHashSet::default();
@@ -69,13 +71,13 @@ pub(super) fn effective_nullness_scope_in_file_tree(
         }
         if let Some((_, enc_ty)) = file_tree.find_type_by_fqn(&enc_fqn) {
             cur = enc_ty.clone();
-        } else if let Some((enc_fid, enc_tid)) = workspace.get_type(&enc_fqn) {
+        } else if let Some((enc_fid, enc_tid)) = scope.get_workspace_type(&enc_fqn) {
             cur = db.file_item_tree(enc_fid).types[enc_tid].clone();
         } else {
             break;
         }
     }
-    effective_nullness_scope_for_file(db, file_tree.file_id)
+    effective_nullness_scope_for_file_in_scope(db, scope, file_tree.file_id)
 }
 
 pub(super) fn effective_nullness_scope_for_binary_type(
@@ -133,8 +135,16 @@ pub(super) fn effective_nullness_scope_for_binary_type(
 /// inner type -> enclosing outer types (cycle-guarded) -> package -> module.
 #[must_use]
 pub fn effective_nullness_scope_for_type(db: &dyn DefDatabase, owner_fqn: &str) -> NullnessScope {
-    let workspace = db.workspace_index();
-    if let Some((fid, tid)) = workspace.get_type(owner_fqn) {
+    let scope = VisibleScope::flat(db);
+    effective_nullness_scope_for_type_in_scope(db, &scope, owner_fqn)
+}
+
+pub(crate) fn effective_nullness_scope_for_type_in_scope(
+    db: &dyn DefDatabase,
+    scope: &VisibleScope,
+    owner_fqn: &str,
+) -> NullnessScope {
+    if let Some((fid, tid)) = scope.get_workspace_type(owner_fqn) {
         let mut visited = FxHashSet::default();
         visited.insert(owner_fqn.to_string());
         let mut cur_fid = fid;
@@ -153,7 +163,7 @@ pub fn effective_nullness_scope_for_type(db: &dyn DefDatabase, owner_fqn: &str) 
             }
             if let Some((enc_tid, _)) = tree.find_type_by_fqn(&enc_fqn) {
                 cur_tid = enc_tid;
-            } else if let Some((enc_fid, enc_tid)) = workspace.get_type(&enc_fqn) {
+            } else if let Some((enc_fid, enc_tid)) = scope.get_workspace_type(&enc_fqn) {
                 cur_fid = enc_fid;
                 cur_tid = enc_tid;
             } else {
@@ -163,9 +173,8 @@ pub fn effective_nullness_scope_for_type(db: &dyn DefDatabase, owner_fqn: &str) 
         return effective_nullness_scope_for_file(db, fid);
     }
 
-    let classpath = db.classpath_index();
-    if let Some(bin) = classpath.type_by_fqn(owner_fqn) {
-        return effective_nullness_scope_for_binary_type(&classpath, bin);
+    if let Some(bin) = scope.get_binary_type(owner_fqn) {
+        return effective_nullness_scope_for_binary_type(scope.classpath(), bin);
     }
 
     NullnessScope::Inherited
@@ -178,10 +187,20 @@ pub fn effective_nullness_scope_for_member(
     owner_fqn: &str,
     member_scope: NullnessScope,
 ) -> NullnessScope {
+    let scope = VisibleScope::flat(db);
+    effective_nullness_scope_for_member_in_scope(db, &scope, owner_fqn, member_scope)
+}
+
+pub(crate) fn effective_nullness_scope_for_member_in_scope(
+    db: &dyn DefDatabase,
+    scope: &VisibleScope,
+    owner_fqn: &str,
+    member_scope: NullnessScope,
+) -> NullnessScope {
     if member_scope != NullnessScope::Inherited {
         return member_scope;
     }
-    effective_nullness_scope_for_type(db, owner_fqn)
+    effective_nullness_scope_for_type_in_scope(db, scope, owner_fqn)
 }
 
 pub(crate) fn effective_nullness_scope_for_binary_member(
@@ -350,24 +369,25 @@ pub(crate) fn resolve_type_ref_in_file_for_member(
     type_params_in_scope: &BTreeMap<SmolStr, Vec<String>>,
 ) -> Ty {
     let file_tree = db.file_item_tree(file_id);
-    let workspace = db.workspace_index();
+    let visible = VisibleScope::for_file(db, file_id);
     let scope = if member_scope != NullnessScope::Inherited {
         member_scope
     } else if let Some(fqn) = owner_fqn {
-        let s = effective_nullness_scope_for_type(db, fqn);
+        let s = effective_nullness_scope_for_type_in_scope(db, &visible, fqn);
         if s != NullnessScope::Inherited {
             s
         } else if let Some((_, ty)) = file_tree.find_type_by_fqn(fqn) {
-            effective_nullness_scope_in_file_tree(db, &file_tree, &workspace, ty)
+            effective_nullness_scope_in_file_tree(db, &file_tree, &visible, ty)
         } else {
-            effective_nullness_scope_for_file(db, file_id)
+            effective_nullness_scope_for_file_in_scope(db, &visible, file_id)
         }
     } else {
-        effective_nullness_scope_for_file(db, file_id)
+        effective_nullness_scope_for_file_in_scope(db, &visible, file_id)
     };
-    resolve_type_ref_in_file_with_scope(
+    resolve_type_ref_in_file_with_scope_and_visible(
         db,
         file_id,
+        &visible,
         owner_fqn,
         scope,
         false,
@@ -377,6 +397,7 @@ pub(crate) fn resolve_type_ref_in_file_for_member(
 }
 
 /// Resolves a raw source type reference in `file_id` with an explicit [`NullnessScope`] and `is_local_root`.
+#[expect(dead_code, reason = "kept as convenience wrapper for direct callers")]
 pub(crate) fn resolve_type_ref_in_file_with_scope(
     db: &dyn DefDatabase,
     file_id: FileId,
@@ -386,16 +407,40 @@ pub(crate) fn resolve_type_ref_in_file_with_scope(
     raw: &str,
     type_params_in_scope: &BTreeMap<SmolStr, Vec<String>>,
 ) -> Ty {
+    let visible = VisibleScope::for_file(db, file_id);
+    resolve_type_ref_in_file_with_scope_and_visible(
+        db,
+        file_id,
+        &visible,
+        owner_fqn,
+        nullness_scope,
+        is_local_root,
+        raw,
+        type_params_in_scope,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "type resolution threads database, caller file, prebuilt VisibleScope, owner, nullness scope, and type params"
+)]
+pub(crate) fn resolve_type_ref_in_file_with_scope_and_visible(
+    db: &dyn DefDatabase,
+    file_id: FileId,
+    visible: &VisibleScope,
+    owner_fqn: Option<&str>,
+    nullness_scope: NullnessScope,
+    is_local_root: bool,
+    raw: &str,
+    type_params_in_scope: &BTreeMap<SmolStr, Vec<String>>,
+) -> Ty {
     let file_tree = db.file_item_tree(file_id);
-    let workspace = db.workspace_index();
-    let classpath = db.classpath_index();
     let owner_ty = owner_fqn.and_then(|fqn| file_tree.find_type_by_fqn(fqn).map(|(_, t)| t));
     let mut visited = FxHashSet::default();
     let env = TypeResolveEnv {
         db,
         file_tree: &file_tree,
-        workspace: &workspace,
-        classpath: &classpath,
+        scope: visible,
         owner_ty,
         nullness_scope,
         type_params_in_scope,
@@ -538,8 +583,7 @@ pub(super) fn resolve_type_ref_in_file_inner(
         let fqn = resolve_class_segments_in_file(
             env.db,
             env.file_tree,
-            env.workspace,
-            env.classpath,
+            env.scope,
             env.owner_ty,
             segs,
         )?;
@@ -617,41 +661,20 @@ pub(super) fn resolve_binary_type_ref_in_db(
     })
 }
 
-fn is_known_type_fqn(
-    file_tree: &FileItemTree,
-    workspace: &WorkspaceIndex,
-    classpath: &ClasspathIndex,
-    fqn: &str,
-) -> bool {
-    workspace.contains_type(fqn)
-        || file_tree.find_type_by_fqn(fqn).is_some()
-        || classpath.type_by_fqn(fqn).is_some()
-}
-
 fn resolve_pkg_type(
+    db: &dyn DefDatabase,
     file_tree: &FileItemTree,
-    workspace: &WorkspaceIndex,
-    classpath: &ClasspathIndex,
+    scope: &VisibleScope,
     pkg: &str,
     name: &str,
 ) -> Option<String> {
-    if let Some(fqn) = workspace
-        .package_type_map
-        .get(pkg)
-        .and_then(|m| m.get(name))
-        && workspace.contains_type(fqn)
-    {
-        return Some(fqn.clone());
+    if let Some((fid, tid)) = scope.lookup_package_type_in_workspace(file_tree, pkg, name) {
+        if fid == file_tree.file_id {
+            return Some(file_tree.types[tid].qualified_name.clone());
+        }
+        return Some(db.file_item_tree(fid).types[tid].qualified_name.clone());
     }
-    if file_tree.package.as_deref().unwrap_or("") == pkg
-        && let Some((_, ty)) = file_tree
-            .types
-            .iter()
-            .find(|(_, t)| t.enclosing_type.is_none() && t.name == name)
-    {
-        return Some(ty.qualified_name.clone());
-    }
-    if let Some(bin) = classpath.type_in_package(pkg, name) {
+    if let Some(bin) = scope.get_binary_type_in_package(pkg, name) {
         return Some(bin.qualified_name.clone());
     }
     None
@@ -690,9 +713,9 @@ fn core_java_lang_fallback(name: &str) -> Option<&'static str> {
 }
 
 fn resolve_single_segment_class(
+    db: &dyn DefDatabase,
     file_tree: &FileItemTree,
-    workspace: &WorkspaceIndex,
-    classpath: &ClasspathIndex,
+    scope: &VisibleScope,
     owner_ty: Option<&TypeItem>,
     name: &str,
 ) -> Option<String> {
@@ -702,7 +725,7 @@ fn resolve_single_segment_class(
         }
         if owner.nested_types.iter().any(|n| n == name) {
             let nested_fqn = format!("{}.{name}", owner.qualified_name);
-            if is_known_type_fqn(file_tree, workspace, classpath, &nested_fqn) {
+            if scope.is_known_type_fqn(file_tree, &nested_fqn) {
                 return Some(nested_fqn);
             }
         }
@@ -721,7 +744,7 @@ fn resolve_single_segment_class(
             }
             if enc_ty.nested_types.iter().any(|n| n == name) {
                 let nested_fqn = format!("{enc_fqn}.{name}");
-                if is_known_type_fqn(file_tree, workspace, classpath, &nested_fqn) {
+                if scope.is_known_type_fqn(file_tree, &nested_fqn) {
                     return Some(nested_fqn);
                 }
             }
@@ -733,7 +756,7 @@ fn resolve_single_segment_class(
     for (_, imp) in file_tree.imports.iter() {
         if imp.kind == ImportKind::SingleType && imp.path.last().map(String::as_str) == Some(name) {
             let fqn = imp.path.join(".");
-            if workspace.contains_type(&fqn) || file_tree.find_type_by_fqn(&fqn).is_some() {
+            if scope.contains_workspace_type(&fqn) || file_tree.find_type_by_fqn(&fqn).is_some() {
                 return Some(fqn);
             }
         }
@@ -741,7 +764,7 @@ fn resolve_single_segment_class(
     for (_, imp) in file_tree.imports.iter() {
         if imp.kind == ImportKind::SingleType && imp.path.last().map(String::as_str) == Some(name) {
             let fqn = imp.path.join(".");
-            if classpath.type_by_fqn(&fqn).is_some() {
+            if scope.contains_binary_type(&fqn) {
                 return Some(fqn);
             }
         }
@@ -753,7 +776,7 @@ fn resolve_single_segment_class(
             && imp.path.last().map(String::as_str) == Some(name)
         {
             let fqn = imp.path.join(".");
-            if workspace.contains_type(&fqn) || file_tree.find_type_by_fqn(&fqn).is_some() {
+            if scope.contains_workspace_type(&fqn) || file_tree.find_type_by_fqn(&fqn).is_some() {
                 return Some(fqn);
             }
         }
@@ -763,7 +786,7 @@ fn resolve_single_segment_class(
             && imp.path.last().map(String::as_str) == Some(name)
         {
             let fqn = imp.path.join(".");
-            if classpath.type_by_fqn(&fqn).is_some() {
+            if scope.contains_binary_type(&fqn) {
                 return Some(fqn);
             }
         }
@@ -771,12 +794,12 @@ fn resolve_single_segment_class(
 
     // Same-package top-level types.
     let pkg = file_tree.package.as_deref().unwrap_or("");
-    if let Some(found) = resolve_pkg_type(file_tree, workspace, classpath, pkg, name) {
+    if let Some(found) = resolve_pkg_type(db, file_tree, scope, pkg, name) {
         return Some(found);
     }
 
     // Implicit `java.lang.*`.
-    if let Some(found) = resolve_pkg_type(file_tree, workspace, classpath, "java.lang", name) {
+    if let Some(found) = resolve_pkg_type(db, file_tree, scope, "java.lang", name) {
         return Some(found);
     }
 
@@ -784,7 +807,7 @@ fn resolve_single_segment_class(
     for (_, imp) in file_tree.imports.iter() {
         if imp.kind == ImportKind::TypeOnDemand {
             let fqn = format!("{}.{name}", imp.path.join("."));
-            if workspace.contains_type(&fqn) || file_tree.find_type_by_fqn(&fqn).is_some() {
+            if scope.contains_workspace_type(&fqn) || file_tree.find_type_by_fqn(&fqn).is_some() {
                 return Some(fqn);
             }
         }
@@ -792,7 +815,7 @@ fn resolve_single_segment_class(
     for (_, imp) in file_tree.imports.iter() {
         if imp.kind == ImportKind::TypeOnDemand {
             let fqn = format!("{}.{name}", imp.path.join("."));
-            if classpath.type_by_fqn(&fqn).is_some() {
+            if scope.contains_binary_type(&fqn) {
                 return Some(fqn);
             }
         }
@@ -802,7 +825,7 @@ fn resolve_single_segment_class(
     for (_, imp) in file_tree.imports.iter() {
         if imp.kind == ImportKind::StaticOnDemand {
             let fqn = format!("{}.{name}", imp.path.join("."));
-            if workspace.contains_type(&fqn) || file_tree.find_type_by_fqn(&fqn).is_some() {
+            if scope.contains_workspace_type(&fqn) || file_tree.find_type_by_fqn(&fqn).is_some() {
                 return Some(fqn);
             }
         }
@@ -810,7 +833,7 @@ fn resolve_single_segment_class(
     for (_, imp) in file_tree.imports.iter() {
         if imp.kind == ImportKind::StaticOnDemand {
             let fqn = format!("{}.{name}", imp.path.join("."));
-            if classpath.type_by_fqn(&fqn).is_some() {
+            if scope.contains_binary_type(&fqn) {
                 return Some(fqn);
             }
         }
@@ -820,12 +843,17 @@ fn resolve_single_segment_class(
     for (_, imp) in file_tree.imports.iter() {
         if imp.kind == ImportKind::Module {
             let module_name = imp.path.join(".");
-            for exported_pkg in classpath.transitive_module_exports(&module_name) {
-                if let Some(found) =
-                    resolve_pkg_type(file_tree, workspace, classpath, exported_pkg, name)
-                {
-                    return Some(found);
-                }
+            if let Some(target) = scope.resolve_module_import_type(file_tree, &module_name, name) {
+                return match target {
+                    ModuleImportTarget::Workspace(fid, tid) => {
+                        if fid == file_tree.file_id {
+                            Some(file_tree.types[tid].qualified_name.clone())
+                        } else {
+                            Some(db.file_item_tree(fid).types[tid].qualified_name.clone())
+                        }
+                    }
+                    ModuleImportTarget::Binary(fqn) => Some(fqn),
+                };
             }
         }
     }
@@ -840,13 +868,20 @@ fn resolve_single_segment_class(
         return Some(ty.qualified_name.clone());
     }
 
-    // Best-effort fallback for unindexed single-type imports and core `java.lang.*` classes.
+    // Best-effort fallback for unindexed single-type imports and core `java.lang.*` classes,
+    // skipping any type that is known to exist in workspace/classpath but blocked by module scope.
     for (_, imp) in file_tree.imports.iter() {
         if imp.kind == ImportKind::SingleType && imp.path.last().map(String::as_str) == Some(name) {
-            return Some(imp.path.join("."));
+            let fqn = imp.path.join(".");
+            if !scope.is_blocked_known_type(db, &fqn) {
+                return Some(fqn);
+            }
+            return None;
         }
     }
-    if let Some(lang_fqn) = core_java_lang_fallback(name) {
+    if let Some(lang_fqn) = core_java_lang_fallback(name)
+        && !scope.is_blocked_known_type(db, lang_fqn)
+    {
         return Some(lang_fqn.to_string());
     }
 
@@ -856,37 +891,38 @@ fn resolve_single_segment_class(
 fn resolve_class_segments_in_file(
     db: &dyn DefDatabase,
     file_tree: &FileItemTree,
-    workspace: &WorkspaceIndex,
-    classpath: &ClasspathIndex,
+    scope: &VisibleScope,
     owner_ty: Option<&TypeItem>,
     segs: &[&str],
 ) -> Option<String> {
     if let [name] = segs {
-        return resolve_single_segment_class(file_tree, workspace, classpath, owner_ty, name);
+        return resolve_single_segment_class(db, file_tree, scope, owner_ty, name);
     }
 
     let joined = segs.join(".");
-    if is_known_type_fqn(file_tree, workspace, classpath, &joined) {
+    if scope.is_known_type_fqn(file_tree, &joined) {
         return Some(joined);
     }
 
     if let Some((first, rest)) = segs.split_first()
-        && let Some(first_fqn) =
-            resolve_single_segment_class(file_tree, workspace, classpath, owner_ty, first)
+        && let Some(first_fqn) = resolve_single_segment_class(db, file_tree, scope, owner_ty, first)
     {
         let mut current = first_fqn;
         let mut all_resolved = true;
         for seg in rest {
             let direct_next = format!("{current}.{seg}");
-            if is_known_type_fqn(file_tree, workspace, classpath, &direct_next) {
+            if scope.is_known_type_fqn(file_tree, &direct_next) {
                 current = direct_next;
                 continue;
             }
-            let inherited = linearized_supertypes(db, &current).into_iter().find_map(|sup| {
-                let candidate = format!("{sup}.{seg}");
-                is_known_type_fqn(file_tree, workspace, classpath, &candidate)
-                    .then_some(candidate)
-            });
+            let inherited = linearized_supertypes_in_scope(db, scope, &current)
+                .into_iter()
+                .find_map(|sup| {
+                    let candidate = format!("{sup}.{seg}");
+                    scope
+                        .is_known_type_fqn(file_tree, &candidate)
+                        .then_some(candidate)
+                });
             if let Some(next) = inherited {
                 current = next;
             } else {
@@ -899,18 +935,31 @@ fn resolve_class_segments_in_file(
         }
     }
 
-    Some(joined)
+    if scope.is_blocked_known_type(db, &joined) {
+        None
+    } else {
+        Some(joined)
+    }
 }
 
 /// Returns the declared type-parameter names of `fqn` from workspace sources or the classpath.
+#[cfg(test)]
 #[must_use]
 pub(crate) fn type_params_of_fqn(db: &dyn DefDatabase, fqn: &str) -> Vec<SmolStr> {
-    let workspace = db.workspace_index();
-    if let Some((fid, tid)) = workspace.get_type(fqn) {
+    let scope = VisibleScope::flat(db);
+    type_params_of_fqn_in_scope(db, &scope, fqn)
+}
+
+#[must_use]
+pub(crate) fn type_params_of_fqn_in_scope(
+    db: &dyn DefDatabase,
+    scope: &VisibleScope,
+    fqn: &str,
+) -> Vec<SmolStr> {
+    if let Some((fid, tid)) = scope.get_workspace_type(fqn) {
         return db.file_item_tree(fid).types[tid].type_params.clone();
     }
-    let classpath = db.classpath_index();
-    if let Some(bin) = classpath.type_by_fqn(fqn) {
+    if let Some(bin) = scope.get_binary_type(fqn) {
         return bin.type_params.clone();
     }
     Vec::new()
@@ -918,18 +967,27 @@ pub(crate) fn type_params_of_fqn(db: &dyn DefDatabase, fqn: &str) -> Vec<SmolStr
 
 /// Returns the type-parameter bounds map for `fqn` (including unbounded type parameters with an
 /// empty `Vec`, and non-static enclosing type parameters).
+#[cfg(test)]
 #[must_use]
 pub(crate) fn type_param_bounds_of_fqn(
     db: &dyn DefDatabase,
     fqn: &str,
 ) -> BTreeMap<SmolStr, Vec<String>> {
-    let workspace = db.workspace_index();
-    if let Some((fid, tid)) = workspace.get_type(fqn) {
+    let scope = VisibleScope::flat(db);
+    type_param_bounds_of_fqn_in_scope(db, &scope, fqn)
+}
+
+#[must_use]
+pub(crate) fn type_param_bounds_of_fqn_in_scope(
+    db: &dyn DefDatabase,
+    scope: &VisibleScope,
+    fqn: &str,
+) -> BTreeMap<SmolStr, Vec<String>> {
+    if let Some((fid, tid)) = scope.get_workspace_type(fqn) {
         let tree = db.file_item_tree(fid);
-        return type_param_bounds_for_workspace_item(db, &tree, &tree.types[tid]);
+        return type_param_bounds_for_workspace_item(db, scope, &tree, &tree.types[tid]);
     }
-    let classpath = db.classpath_index();
-    if let Some(bin) = classpath.type_by_fqn(fqn) {
+    if let Some(bin) = scope.get_binary_type(fqn) {
         return type_param_bounds_for_binary(db, bin);
     }
     BTreeMap::new()
@@ -937,6 +995,7 @@ pub(crate) fn type_param_bounds_of_fqn(
 
 pub(super) fn type_param_bounds_for_workspace_item(
     db: &dyn DefDatabase,
+    scope: &VisibleScope,
     tree: &FileItemTree,
     ty: &TypeItem,
 ) -> BTreeMap<SmolStr, Vec<String>> {
@@ -960,7 +1019,7 @@ pub(super) fn type_param_bounds_for_workspace_item(
         };
         if let Some((_, enc_item)) = tree.find_type_by_fqn(&enc_fqn) {
             cur = enc_item.clone();
-        } else if let Some((fid, tid)) = db.workspace_index().get_type(&enc_fqn) {
+        } else if let Some((fid, tid)) = scope.get_workspace_type(&enc_fqn) {
             cur = db.file_item_tree(fid).types[tid].clone();
         } else {
             break;

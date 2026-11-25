@@ -9,12 +9,13 @@ use syntax::{
 
 use crate::{
     DefDatabase, FileId,
-    classpath::{BinaryMemberSymbol, ClasspathIndex},
-    hierarchy::{direct_supertypes, linearized_supertypes, parse_type_ref_segments},
+    classpath::BinaryMemberSymbol,
+    hierarchy::{direct_supertypes_in_scope, linearized_supertypes_in_scope, parse_type_ref_segments},
     infer::infer_expr_ty,
     item_tree::{FileItemTree, MemberId, TypeId},
+    scope::VisibleScope,
     symbols::{
-        MemberKind, MemberSymbol, ParamSummary, TypeKind, TypeSymbol, WorkspaceIndex,
+        MemberKind, MemberSymbol, ParamSummary, TypeKind, TypeSymbol,
         extract_local_type_symbol, node_ident_text,
     },
     ty::Ty,
@@ -26,7 +27,7 @@ use super::{
         enclosing_type_targets, lookup_type_by_fqn, lookup_workspace_or_binary_type,
         resolve_type_segments,
     },
-    overload::{collect_constructor_candidates, select_best_callable_candidate},
+    overload::{collect_constructor_candidates, select_best_callable_candidate_in_scope},
     resolve_name_ref_expr,
 };
 
@@ -119,8 +120,8 @@ pub(super) fn target_is_interface(ctx: ResolveCtx<'_>, ty: &TypeRefTarget) -> bo
             matches!(local_ty.kind, TypeKind::Interface | TypeKind::Annotation)
         }
         TypeRefTarget::Binary(fqn) => ctx
-            .classpath
-            .type_by_fqn(fqn)
+            .scope
+            .get_binary_type(fqn)
             .is_some_and(|b| matches!(b.kind, TypeKind::Interface | TypeKind::Annotation)),
     }
 }
@@ -129,7 +130,7 @@ pub(super) fn supertypes_of_target(ctx: ResolveCtx<'_>, ty: &TypeRefTarget) -> V
     match ty {
         TypeRefTarget::Indexed(_, _) | TypeRefTarget::Binary(_) => {
             let fqn = ty.qualified_name(ctx.db, ctx.file_tree);
-            linearized_supertypes(ctx.db, &fqn)
+            linearized_supertypes_in_scope(ctx.db, ctx.scope, &fqn)
         }
         TypeRefTarget::Local(local_ty) => {
             let mut visited = FxHashSet::default();
@@ -162,7 +163,7 @@ pub(super) fn supertypes_of_target(ctx: ResolveCtx<'_>, ty: &TypeRefTarget) -> V
                 && visited.insert(sup_fqn.clone())
             {
                 out.push(sup_fqn.clone());
-                for s in linearized_supertypes(ctx.db, &sup_fqn) {
+                for s in linearized_supertypes_in_scope(ctx.db, ctx.scope, &sup_fqn) {
                     if s != "java.lang.Object" && visited.insert(s.clone()) {
                         out.push(s);
                     }
@@ -178,7 +179,7 @@ pub(super) fn supertypes_of_target(ctx: ResolveCtx<'_>, ty: &TypeRefTarget) -> V
                     continue;
                 }
                 out.push(iface.clone());
-                for s in linearized_supertypes(ctx.db, &iface) {
+                for s in linearized_supertypes_in_scope(ctx.db, ctx.scope, &iface) {
                     if s != "java.lang.Object" && visited.insert(s.clone()) {
                         out.push(s);
                     }
@@ -193,12 +194,12 @@ pub(super) fn supertypes_of_target(ctx: ResolveCtx<'_>, ty: &TypeRefTarget) -> V
 }
 
 pub(super) fn type_ref_from_fqn(ctx: ResolveCtx<'_>, fqn: &str) -> Option<TypeRefTarget> {
-    if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.index, fqn) {
+    if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.scope, fqn) {
         return Some(TypeRefTarget::Indexed(fid, tid));
     }
-    ctx.classpath
-        .type_by_fqn(fqn)
-        .map(|_| TypeRefTarget::Binary(fqn.to_string()))
+    ctx.scope
+        .contains_binary_type(fqn)
+        .then(|| TypeRefTarget::Binary(fqn.to_string()))
 }
 
 fn lookup_method_on_single_type(
@@ -246,7 +247,7 @@ fn lookup_method_on_single_type(
         )
         .map(|m| m.map(|mem| ResolvedTarget::LocalMember(mem.clone()))),
         TypeRefTarget::Binary(fqn) => {
-            let bin_ty = ctx.classpath.type_by_fqn(fqn)?;
+            let bin_ty = ctx.scope.get_binary_type(fqn)?;
             select_callable_from_binary(
                 &bin_ty.members,
                 CallableQuery {
@@ -365,7 +366,7 @@ fn lookup_non_method_member_or_nested(
             }
             if type_item.nested_types.iter().any(|n| n == name) {
                 let nested_fqn = format!("{}.{}", type_item.qualified_name, name);
-                if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.index, &nested_fqn)
+                if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.scope, &nested_fqn)
                 {
                     return Some(ResolvedTarget::IndexedType(fid, tid));
                 }
@@ -380,7 +381,7 @@ fn lookup_non_method_member_or_nested(
             }
             if local_ty.nested_types.iter().any(|n| n == name) {
                 let nested_fqn = format!("{}.{}", local_ty.qualified_name, name);
-                if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.index, &nested_fqn)
+                if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.scope, &nested_fqn)
                 {
                     return Some(ResolvedTarget::IndexedType(fid, tid));
                 }
@@ -388,7 +389,7 @@ fn lookup_non_method_member_or_nested(
             None
         }
         TypeRefTarget::Binary(fqn) => {
-            let bin_ty = ctx.classpath.type_by_fqn(fqn)?;
+            let bin_ty = ctx.scope.get_binary_type(fqn)?;
             if let Some(member_index) = bin_ty.members.iter().position(|m| {
                 m.kind != MemberKind::Method && m.kind != MemberKind::Constructor && m.name == name
             }) {
@@ -553,7 +554,7 @@ fn lookup_constructor_on_type(
         TypeRefTarget::Local(local_ty) => select_callable_from_slice(&local_ty.members, query)
             .map(|m| ResolvedTarget::LocalMember(m.into_inner().clone())),
         TypeRefTarget::Binary(fqn) => {
-            let bin_ty = ctx.classpath.type_by_fqn(fqn)?;
+            let bin_ty = ctx.scope.get_binary_type(fqn)?;
             select_callable_from_binary(&bin_ty.members, query).map(|m| {
                 ResolvedTarget::BinaryMember {
                     owner_fqn: fqn.clone(),
@@ -579,7 +580,7 @@ fn resolve_super_target_type(ctx: ResolveCtx<'_>, super_expr: &SyntaxNode) -> Op
             return Some(qual_target);
         }
         let qual_fqn = qual_target.qualified_name(ctx.db, ctx.file_tree);
-        let sup_fqn = direct_supertypes(ctx.db, &qual_fqn).super_class?;
+        let sup_fqn = direct_supertypes_in_scope(ctx.db, ctx.scope, &qual_fqn).super_class?;
         return type_ref_from_fqn(ctx, &sup_fqn);
     }
 
@@ -604,7 +605,8 @@ fn resolve_super_target_type(ctx: ResolveCtx<'_>, super_expr: &SyntaxNode) -> Op
                 .find_by_full(range)
                 .and_then(|ast_id| ctx.file_tree.find_type_by_ast_id(ast_id))
             {
-                let sup_fqn = direct_supertypes(ctx.db, &ty.qualified_name).super_class?;
+                let sup_fqn =
+                    direct_supertypes_in_scope(ctx.db, ctx.scope, &ty.qualified_name).super_class?;
                 return type_ref_from_fqn(ctx, &sup_fqn);
             }
             if let Some(local_ty) = extract_local_type_symbol(ctx.file_id, &ancestor) {
@@ -661,9 +663,13 @@ pub(super) fn resolve_super_expr_target(
             })
             .collect();
         let ctors = collect_constructor_candidates(ctx, &super_fqn, arg_nodes.len());
-        if let Some(best) =
-            select_best_callable_candidate(ctx.db, ctors, &arg_tys, Some(&arg_nodes))
-        {
+        if let Some(best) = select_best_callable_candidate_in_scope(
+            ctx.db,
+            ctx.scope,
+            ctors,
+            &arg_tys,
+            Some(&arg_nodes),
+        ) {
             return Some(best.target);
         }
         return lookup_constructor_on_type(ctx, &super_ty, Some(arg_nodes.len()))
@@ -704,10 +710,10 @@ pub(super) fn resolve_expr_type(
         FIELD_ACCESS_EXPR => {
             if let Some(chain) = extract_dotted_name_chain(expr) {
                 let fqn = chain.join(".");
-                if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.index, &fqn) {
+                if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.scope, &fqn) {
                     return Some(TypeRefTarget::Indexed(fid, tid));
                 }
-                if ctx.classpath.type_by_fqn(&fqn).is_some() {
+                if ctx.scope.contains_binary_type(&fqn) {
                     return Some(TypeRefTarget::Binary(fqn));
                 }
             }
@@ -803,8 +809,7 @@ pub(super) fn target_to_type_ref(
             let ty_str = l.type_ref.as_deref()?;
             resolve_type_ref_in_file(
                 ctx.db,
-                ctx.index,
-                ctx.classpath,
+                ctx.scope,
                 l.file_id,
                 l.selection_range.start(),
                 ty_str,
@@ -824,8 +829,7 @@ pub(super) fn target_to_type_ref(
                         .start();
                     resolve_type_ref_in_file(
                         ctx.db,
-                        ctx.index,
-                        ctx.classpath,
+                        ctx.scope,
                         m_file,
                         decl_offset,
                         ty_str,
@@ -833,7 +837,7 @@ pub(super) fn target_to_type_ref(
                 }
                 MemberKind::EnumConstant => {
                     let owner_fqn = m.owner_type.as_deref()?;
-                    lookup_type_by_fqn(&decl_tree, ctx.index, owner_fqn)
+                    lookup_type_by_fqn(&decl_tree, ctx.scope, owner_fqn)
                         .map(|(fid, tid)| TypeRefTarget::Indexed(fid, tid))
                 }
                 MemberKind::Constructor => None,
@@ -844,8 +848,7 @@ pub(super) fn target_to_type_ref(
                 let ty_str = m.type_ref.as_deref()?;
                 resolve_type_ref_in_file(
                     ctx.db,
-                    ctx.index,
-                    ctx.classpath,
+                    ctx.scope,
                     m.file_id,
                     m.selection_range.start(),
                     ty_str,
@@ -854,7 +857,7 @@ pub(super) fn target_to_type_ref(
             MemberKind::EnumConstant => {
                 let owner_fqn = m.owner_type.as_deref()?;
                 let decl_tree = ctx.db.file_item_tree(m.file_id);
-                lookup_type_by_fqn(&decl_tree, ctx.index, owner_fqn)
+                lookup_type_by_fqn(&decl_tree, ctx.scope, owner_fqn)
                     .map(|(fid, tid)| TypeRefTarget::Indexed(fid, tid))
             }
             MemberKind::Constructor => None,
@@ -863,12 +866,12 @@ pub(super) fn target_to_type_ref(
             owner_fqn,
             member_index,
         } => {
-            let owner_ty = ctx.classpath.type_by_fqn(&owner_fqn)?;
+            let owner_ty = ctx.scope.get_binary_type(&owner_fqn)?;
             let m = owner_ty.members.get(member_index)?;
             match m.kind {
                 MemberKind::Field | MemberKind::RecordComponent | MemberKind::Method => {
                     let ty_str = m.type_ref.as_deref()?;
-                    resolve_binary_type_ref(ctx.index, ctx.classpath, &owner_fqn, ty_str)
+                    resolve_binary_type_ref(ctx.scope, &owner_fqn, ty_str)
                 }
                 MemberKind::EnumConstant => Some(TypeRefTarget::Binary(owner_fqn)),
                 MemberKind::Constructor => None,
@@ -880,35 +883,34 @@ pub(super) fn target_to_type_ref(
 }
 
 fn resolve_binary_type_ref(
-    index: &WorkspaceIndex,
-    classpath: &ClasspathIndex,
+    scope: &VisibleScope,
     owner_fqn: &str,
     type_ref: &str,
 ) -> Option<TypeRefTarget> {
     let segs = parse_type_ref_segments(type_ref)?;
     let joined = segs.join(".");
-    if let Some(&(fid, tid)) = index.types_by_fqn.get(&joined) {
+    if let Some((fid, tid)) = scope.get_workspace_type(&joined) {
         return Some(TypeRefTarget::Indexed(fid, tid));
     }
-    if classpath.type_by_fqn(&joined).is_some() {
+    if scope.contains_binary_type(&joined) {
         return Some(TypeRefTarget::Binary(joined));
     }
-    if let Some(pkg) = classpath.type_by_fqn(owner_fqn).map(|t| t.package.as_str())
+    if let Some(pkg) = scope.get_binary_type(owner_fqn).map(|t| t.package.as_str())
         && !pkg.is_empty()
     {
         let same_pkg_fqn = format!("{pkg}.{joined}");
-        if let Some(&(fid, tid)) = index.types_by_fqn.get(&same_pkg_fqn) {
+        if let Some((fid, tid)) = scope.get_workspace_type(&same_pkg_fqn) {
             return Some(TypeRefTarget::Indexed(fid, tid));
         }
-        if classpath.type_by_fqn(&same_pkg_fqn).is_some() {
+        if scope.contains_binary_type(&same_pkg_fqn) {
             return Some(TypeRefTarget::Binary(same_pkg_fqn));
         }
     }
     let java_lang_fqn = format!("java.lang.{joined}");
-    if let Some(&(fid, tid)) = index.types_by_fqn.get(&java_lang_fqn) {
+    if let Some((fid, tid)) = scope.get_workspace_type(&java_lang_fqn) {
         return Some(TypeRefTarget::Indexed(fid, tid));
     }
-    if classpath.type_by_fqn(&java_lang_fqn).is_some() {
+    if scope.contains_binary_type(&java_lang_fqn) {
         return Some(TypeRefTarget::Binary(java_lang_fqn));
     }
     None
@@ -916,8 +918,7 @@ fn resolve_binary_type_ref(
 
 fn resolve_type_ref_in_file(
     db: &dyn DefDatabase,
-    index: &WorkspaceIndex,
-    classpath: &ClasspathIndex,
+    caller_scope: &VisibleScope,
     decl_file_id: FileId,
     decl_offset: TextSize,
     type_ref: &str,
@@ -934,14 +935,20 @@ fn resolve_type_ref_in_file(
         .unwrap_or(root);
     let decl_tree = db.file_item_tree(decl_file_id);
     let decl_map = db.ast_id_map(decl_file_id);
+    let owned_scope;
+    let decl_scope = if !caller_scope.is_scoped() || caller_scope.caller_file() == Some(decl_file_id) {
+        caller_scope
+    } else {
+        owned_scope = VisibleScope::for_file(db, decl_file_id);
+        &owned_scope
+    };
     let seg_refs: Vec<&str> = segs.iter().map(String::as_str).collect();
     let decl_ctx = ResolveCtx {
         db,
         file_id: decl_file_id,
         file_tree: &decl_tree,
         ast_id_map: &decl_map,
-        index,
-        classpath,
+        scope: decl_scope,
     };
     match resolve_type_segments(decl_ctx, &site_node, &seg_refs)? {
         ResolvedTarget::IndexedType(fid, tid) => Some(TypeRefTarget::Indexed(fid, tid)),

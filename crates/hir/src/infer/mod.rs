@@ -19,27 +19,29 @@ use syntax::{
 
 use crate::{
     DefDatabase, FileId,
-    classpath::{BinaryMemberSymbol, ClasspathIndex},
+    classpath::BinaryMemberSymbol,
     item_tree::{AstIdMap, FileItemTree, MemberItem},
     resolve::{self, ResolveCtx},
+    scope::VisibleScope,
     symbols::{
-        ImportResolver, MemberKind, NullnessScope, TypeKind, WorkspaceIndex,
-        extract_modifier_nullability, node_ident_text, render_type_with_dims_and_nullability,
+        ImportResolver, MemberKind, NullnessScope, TypeKind, extract_modifier_nullability,
+        node_ident_text, render_type_with_dims_and_nullability,
     },
     ty::{
         Nullability, PrimitiveType, Substitution, Ty, binary_numeric_promotion,
-        least_upper_bound, resolve_binary_type_ref_for_member,
-        resolve_type_ref_in_file_for_member, supertype_substitution_for_ty,
-        type_param_bounds_of_fqn, type_params_of_fqn, unary_numeric_promotion,
+        least_upper_bound_in_scope, resolve_binary_type_ref_for_member,
+        resolve_type_ref_in_file_for_member, supertype_substitution_for_ty_in_scope,
+        type_param_bounds_of_fqn_in_scope, type_params_of_fqn_in_scope, unary_numeric_promotion,
     },
 };
 
 pub use sam::{SamSignature, find_functional_interface_sam};
+pub(crate) use sam::find_functional_interface_sam_in_scope;
 
 pub(crate) use call::parameter_for_arg;
 pub(crate) use sam::erase_type_vars_to_bound;
 pub(crate) use scope::{
-    effective_nullness_scope_at, format_member_detail, is_raw_class_ty,
+    effective_nullness_scope_at, format_member_detail_in_scope, is_raw_class_ty_in_scope,
     resolve_field_access_target, resolve_method_call_target,
     resolve_method_ref_target_with_context, resolve_params_in_binary_for_member,
     resolve_params_in_file_for_member, resolve_unqualified_call_target,
@@ -81,8 +83,7 @@ pub(super) struct InferCtx<'a> {
     pub(super) file_id: FileId,
     pub(super) file_tree: Arc<FileItemTree>,
     pub(super) ast_id_map: Arc<AstIdMap>,
-    pub(super) index: Arc<WorkspaceIndex>,
-    pub(super) classpath: Arc<ClasspathIndex>,
+    pub(super) scope: VisibleScope,
     pub(super) import_resolver: ImportResolver,
     depth: usize,
     visiting_nodes: FxHashSet<TextRange>,
@@ -104,8 +105,7 @@ impl<'a> InferCtx<'a> {
             file_id,
             file_tree,
             ast_id_map: db.ast_id_map(file_id),
-            index: db.workspace_index(),
-            classpath: db.classpath_index(),
+            scope: VisibleScope::for_file(db, file_id),
             import_resolver,
             depth: 0,
             visiting_nodes: FxHashSet::default(),
@@ -117,6 +117,7 @@ impl<'a> InferCtx<'a> {
         scope::effective_nullness_scope_at_inner(
             self.db,
             self.file_id,
+            &self.scope,
             &self.file_tree,
             &self.ast_id_map,
             &self.import_resolver,
@@ -130,8 +131,7 @@ impl<'a> InferCtx<'a> {
             file_id: self.file_id,
             file_tree: &self.file_tree,
             ast_id_map: &self.ast_id_map,
-            index: &self.index,
-            classpath: &self.classpath,
+            scope: &self.scope,
         }
     }
 
@@ -334,7 +334,12 @@ impl<'a> InferCtx<'a> {
                 let self_ty = self.parameterized_self_ty(fqn);
                 if self.is_interface_fqn(fqn) {
                     return mark(
-                        supertype_substitution_for_ty(self.db, &self.infer_enclosing_self_ty(expr), fqn)
+                        supertype_substitution_for_ty_in_scope(
+                            self.db,
+                            &self.scope,
+                            &self.infer_enclosing_self_ty(expr),
+                            fqn,
+                        )
                             .map_or(self_ty, |subst| subst.apply_covariant(&self.parameterized_self_ty(fqn))),
                     );
                 }
@@ -589,7 +594,7 @@ impl<'a> InferCtx<'a> {
         match (&a, &b) {
             (Ty::Unknown, _) => b,
             (_, Ty::Unknown) => a,
-            _ => least_upper_bound(self.db, &a, &b),
+            _ => least_upper_bound_in_scope(self.db, &self.scope, &a, &b),
         }
     }
 
@@ -628,7 +633,7 @@ impl<'a> InferCtx<'a> {
             }
             acc = Some(match acc {
                 None => ty,
-                Some(prev) => least_upper_bound(self.db, &prev, &ty),
+                Some(prev) => least_upper_bound_in_scope(self.db, &self.scope, &prev, &ty),
             });
         }
         acc.unwrap_or(Ty::Unknown)
@@ -690,12 +695,15 @@ impl<'a> InferCtx<'a> {
                 match iter_ty {
                     Ty::Array { elem, .. } => *elem,
                     other => {
-                        let Some(subst) =
-                            supertype_substitution_for_ty(self.db, &other, ITERABLE_FQN)
-                        else {
+                        let Some(subst) = supertype_substitution_for_ty_in_scope(
+                            self.db,
+                            &self.scope,
+                            &other,
+                            ITERABLE_FQN,
+                        ) else {
                             return Ty::Unknown;
                         };
-                        let tv_name = type_params_of_fqn(self.db, ITERABLE_FQN)
+                        let tv_name = type_params_of_fqn_in_scope(self.db, &self.scope, ITERABLE_FQN)
                             .into_iter()
                             .next()
                             .unwrap_or_else(|| SmolStr::new("T"));
@@ -776,7 +784,7 @@ impl<'a> InferCtx<'a> {
                 let Some(target_ty) = self.expected_target_type(&lambda_expr) else {
                     return Ty::Unknown;
                 };
-                let Some(sam) = find_functional_interface_sam(self.db, &target_ty) else {
+                let Some(sam) = find_functional_interface_sam_in_scope(self.db, &self.scope, &target_ty) else {
                     return Ty::Unknown;
                 };
                 sam.param_types.get(idx).cloned().unwrap_or(Ty::Unknown)
@@ -792,7 +800,7 @@ impl<'a> InferCtx<'a> {
                 for t in types {
                     acc = Some(match acc {
                         None => t,
-                        Some(prev) => least_upper_bound(self.db, &prev, &t),
+                        Some(prev) => least_upper_bound_in_scope(self.db, &self.scope, &prev, &t),
                     });
                 }
                 acc.unwrap_or(Ty::Unknown)
@@ -833,9 +841,11 @@ impl<'a> InferCtx<'a> {
         let Some(rec_fqn) = rec_ty.erased_fqn() else {
             return Ty::Unknown;
         };
-        let subst = supertype_substitution_for_ty(self.db, &rec_ty, rec_fqn).unwrap_or_default();
+        let subst =
+            supertype_substitution_for_ty_in_scope(self.db, &self.scope, &rec_ty, rec_fqn)
+                .unwrap_or_default();
 
-        if let Some((fid, tid)) = self.index.get_type(rec_fqn) {
+        if let Some((fid, tid)) = self.scope.get_workspace_type(rec_fqn) {
             let tree = self.db.file_item_tree(fid);
             let comps: Vec<&MemberItem> = tree.types[tid]
                 .members
@@ -846,7 +856,7 @@ impl<'a> InferCtx<'a> {
             if let Some(comp) = comps.get(comp_idx)
                 && let Some(raw) = comp.type_ref.as_deref()
             {
-                let scope = type_param_bounds_of_fqn(self.db, rec_fqn);
+                let scope = type_param_bounds_of_fqn_in_scope(self.db, &self.scope, rec_fqn);
                 let ty = resolve_type_ref_in_file_for_member(
                     self.db,
                     fid,
@@ -857,7 +867,7 @@ impl<'a> InferCtx<'a> {
                 );
                 return subst.apply_covariant(&ty);
             }
-        } else if let Some(bin) = self.classpath.type_by_fqn(rec_fqn) {
+        } else if let Some(bin) = self.scope.get_binary_type(rec_fqn) {
             let comps: Vec<&BinaryMemberSymbol> = bin
                 .members
                 .iter()
@@ -866,9 +876,9 @@ impl<'a> InferCtx<'a> {
             if let Some(comp) = comps.get(comp_idx)
                 && let Some(raw) = comp.type_ref.as_deref()
             {
-                let scope = type_param_bounds_of_fqn(self.db, rec_fqn);
+                let scope = type_param_bounds_of_fqn_in_scope(self.db, &self.scope, rec_fqn);
                 let ty = resolve_binary_type_ref_for_member(
-                    &self.classpath,
+                    self.scope.classpath(),
                     bin,
                     comp.nullness_scope,
                     raw,

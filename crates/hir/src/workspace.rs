@@ -10,7 +10,10 @@ use syntax::{
     LanguageLevel, Release, SyntaxNode, TextRange, ext::path_text, syntax_kind::SyntaxKind::*,
 };
 
-use crate::FileId;
+use crate::{
+    FileId,
+    symbols::{FileOrigin, ModuleGraphData, ModuleScopeConfig},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ModuleId(pub u32);
@@ -53,7 +56,42 @@ pub struct SourceRoot {
     /// Normalized workspace-relative directory path (`"."`, `"src/main/java"`, `"services/core/src"`).
     pub rel_path: String,
     pub scope: RootScope,
+    /// Optional JEP 238 target release override (`Some(Release::JAVA_17)` for `src/main/java17`,
+    /// `None` for the base source root).
+    pub release_override: Option<Release>,
     pub files: Vec<FileId>,
+}
+
+/// Recognizes JEP 238 Multi-Release JAR source-root directory conventions and returns the target
+/// [`Release`] when `9 <= N <= Release::LATEST.number()`.
+///
+/// Supported conventions:
+/// - `.../java<N>` and `.../java-<N>` (e.g. `src/main/java17`, `src/main/java-21`, `src/test/java17`)
+/// - `.../versions/<N>/java` and `.../versions/<N>` (e.g. `src/main/versions/17/java`, `src/versions/21`)
+pub fn mrjar_release_from_path(rel_path: &str) -> Option<Release> {
+    let norm = normalize_rel_path(rel_path);
+    let segs: Vec<&str> = norm.split('/').collect();
+    let parse_valid = |s: &str| -> Option<Release> {
+        if s.is_empty() || s.starts_with('0') || !s.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let n = s.parse::<u16>().ok()?;
+        (9..=Release::LATEST.number())
+            .contains(&n)
+            .then(|| Release::new(n))
+    };
+
+    if segs.len() >= 3 && segs[segs.len() - 1] == "java" && segs[segs.len() - 3] == "versions" {
+        return parse_valid(segs[segs.len() - 2]);
+    }
+    if segs.len() >= 2 && segs[segs.len() - 2] == "versions" {
+        return parse_valid(segs[segs.len() - 1]);
+    }
+    let last = segs.last().copied()?;
+    let suffix = last
+        .strip_prefix("java-")
+        .or_else(|| last.strip_prefix("java"))?;
+    parse_valid(suffix)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -408,6 +446,43 @@ impl WorkspaceLayout {
 
         None
     }
+
+    /// Converts this layout into a position-independent [`ModuleGraphData`] for
+    /// `RootDatabase::set_workspace_module_graph`.
+    pub fn to_module_graph_data(&self) -> ModuleGraphData {
+        let mut modules = BTreeMap::new();
+        let mut file_origins = BTreeMap::new();
+
+        for module in &self.modules {
+            modules.insert(
+                module.id,
+                ModuleScopeConfig {
+                    id: module.id,
+                    base_release: module.language_level.release,
+                    test_release: module
+                        .test_language_level
+                        .unwrap_or(module.language_level)
+                        .release,
+                    dependencies: module.dependencies.clone(),
+                },
+            );
+            for src in &module.sources {
+                let origin = FileOrigin {
+                    module_id: module.id,
+                    scope: src.scope,
+                    release_override: src.release_override,
+                };
+                for &file_id in &src.files {
+                    file_origins.insert(file_id, origin);
+                }
+            }
+        }
+
+        ModuleGraphData {
+            modules,
+            file_origins,
+        }
+    }
 }
 
 // ---- Header extraction from a parsed CST ----
@@ -608,10 +683,12 @@ fn module_dir_for_root(root_dir: &str) -> String {
     let norm = normalize_rel_path(root_dir);
     if norm.starts_with("src/main/")
         || norm.starts_with("src/test/")
+        || norm.starts_with("src/versions/")
         || matches!(
             norm.as_str(),
             "src/main"
                 | "src/test"
+                | "src/versions"
                 | "src/java"
                 | "test/java"
                 | "src"
@@ -625,10 +702,11 @@ fn module_dir_for_root(root_dir: &str) -> String {
     if let Some((prefix, _)) = norm
         .split_once("/src/main/")
         .or_else(|| norm.split_once("/src/test/"))
+        .or_else(|| norm.split_once("/src/versions/"))
     {
         return normalize_rel_path(prefix);
     }
-    for suffix in ["/src/main", "/src/test", "/src/java", "/test/java"] {
+    for suffix in ["/src/main", "/src/test", "/src/versions", "/src/java", "/test/java"] {
         if let Some(stripped) = norm.strip_suffix(suffix) {
             return normalize_rel_path(stripped);
         }
@@ -657,6 +735,38 @@ fn is_excluded(rel_path: &str, excludes: &[String]) -> bool {
         let ex_norm = normalize_rel_path(ex);
         norm == ex_norm || norm.starts_with(&format!("{ex_norm}/"))
     })
+}
+
+/// Detects a JEP 238 multi-release source-root prefix inside a directory path (such as
+/// `src/main/java17`, `core/src/test/java-21`, `src/main/versions/17/java`, `src/versions/21`).
+fn detect_mrjar_root_prefix(dir: &str) -> Option<String> {
+    let segs: Vec<&str> = dir.split('/').collect();
+    for i in 0..segs.len() {
+        let seg = segs[i];
+        // `.../src/main/java<N>`, `.../src/test/java<N>`, `.../src/main/java-<N>`, `.../src/test/java-<N>`
+        if i >= 2 && segs[i - 2] == "src" && matches!(segs[i - 1], "main" | "test") {
+            let candidate = segs[..=i].join("/");
+            if mrjar_release_from_path(&candidate).is_some() {
+                return Some(candidate);
+            }
+        }
+        // `.../versions/<N>/java` or `.../versions/<N>` (under `src` or `src/main` or `src/test`)
+        if i >= 2 && segs[i - 1] == "versions" && segs[..i - 1].contains(&"src") {
+            if segs.get(i + 1) == Some(&"java") {
+                let candidate = segs[..=i + 1].join("/");
+                if mrjar_release_from_path(&candidate).is_some() {
+                    return Some(candidate);
+                }
+            } else {
+                let candidate = segs[..=i].join("/");
+                if mrjar_release_from_path(&candidate).is_some() {
+                    return Some(candidate);
+                }
+            }
+        }
+        let _ = seg;
+    }
+    None
 }
 
 /// Parses raw `(FileId, rel_path, source_text)` entries at `default_level` and delegates to
@@ -699,6 +809,7 @@ pub fn infer_workspace_layout(
     }
 
     let mut parsed_files = Vec::new();
+    let mut shebang_levels = BTreeMap::new();
     let mut file_levels = BTreeMap::new();
 
     for &(id, raw_path, root) in files {
@@ -709,6 +820,9 @@ pub fn infer_workspace_layout(
         let dir = parent_dir(&path);
         let name = file_name(&path).to_string();
         let header = extract_file_header(root);
+        if let Some(shebang) = header.shebang_level {
+            shebang_levels.insert(id, shebang);
+        }
         let level = header.shebang_level.unwrap_or(default_level);
         file_levels.insert(id, level);
         parsed_files.push(ParsedFile {
@@ -720,26 +834,36 @@ pub fn infer_workspace_layout(
         });
     }
 
-    // 1. Collect `module-info.java` roots and `package-info.java` authoritative directory packages.
-    let mut module_headers_by_mod_dir: BTreeMap<String, (RootScope, ModuleHeader)> =
+    // 1. Collect `module-info.java` roots, MR-JAR roots, and `package-info.java` authoritative directory packages.
+    let mut module_headers_by_mod_dir: BTreeMap<String, (RootScope, Option<Release>, ModuleHeader)> =
         BTreeMap::new();
     let mut known_source_roots: BTreeSet<String> = BTreeSet::new();
     let mut authoritative_dir_pkg: BTreeMap<String, String> = BTreeMap::new();
 
     for pf in &parsed_files {
+        if let Some(mrjar_root) = detect_mrjar_root_prefix(&pf.dir) {
+            known_source_roots.insert(mrjar_root);
+        }
         if pf.name == "module-info.java" {
             known_source_roots.insert(pf.dir.clone());
             let mod_dir = module_dir_for_root(&pf.dir);
             let scope = RootScope::from_path(&pf.dir);
+            let release_override = mrjar_release_from_path(&pf.dir);
             if let Some(mh) = &pf.header.module {
                 let should_insert = match module_headers_by_mod_dir.get(&mod_dir) {
                     None => true,
-                    Some((existing_scope, _)) => {
-                        *existing_scope == RootScope::Test && scope == RootScope::Main
+                    Some((existing_scope, existing_rel, _)) => {
+                        (*existing_scope == RootScope::Test && scope == RootScope::Main)
+                            || (*existing_scope == scope
+                                && existing_rel.is_some()
+                                && release_override.is_none())
                     }
                 };
                 if should_insert {
-                    module_headers_by_mod_dir.insert(mod_dir, (scope, mh.clone()));
+                    module_headers_by_mod_dir.insert(
+                        mod_dir,
+                        (scope, release_override, mh.clone()),
+                    );
                 }
             }
         } else if pf.name == "package-info.java"
@@ -923,7 +1047,7 @@ pub fn infer_workspace_layout(
 
     for (idx, (mod_dir, mut src_map)) in mod_source_roots.into_iter().enumerate() {
         let id = ModuleId(idx as u32);
-        let mh = module_headers_by_mod_dir.get(&mod_dir).map(|(_, h)| h);
+        let mh = module_headers_by_mod_dir.get(&mod_dir).map(|(_, _, h)| h);
         let module_name = mh.map(|h| h.name.clone());
 
         let mod_delta = delta
@@ -941,10 +1065,12 @@ pub fn infer_workspace_layout(
 
         let mut sources = Vec::new();
         for (src_path, file_ids) in src_map {
+            let release_override = mrjar_release_from_path(&src_path);
             sources.push(SourceRoot {
                 id: SourceRootId(next_src_id),
                 scope: RootScope::from_path(&src_path),
                 rel_path: src_path,
+                release_override,
                 files: file_ids,
             });
             next_src_id += 1;
@@ -1006,7 +1132,7 @@ pub fn infer_workspace_layout(
         let mod_name = modules[i].module_name.clone();
         let mut deps = Vec::new();
 
-        if let Some((_, mh)) = module_headers_by_mod_dir.get(&mod_dir) {
+        if let Some((_, _, mh)) = module_headers_by_mod_dir.get(&mod_dir) {
             for req in &mh.requires {
                 let target = lookup_slice
                     .iter()
@@ -1052,6 +1178,24 @@ pub fn infer_workspace_layout(
         }
 
         modules[i].dependencies = deps;
+    }
+
+    // 7. Assign effective per-file LanguageLevels:
+    //    (1) shebang > (2) SourceRoot.release_override > (3) test_language_level > (4) language_level.
+    for module in &modules {
+        for src in &module.sources {
+            let root_level = if let Some(rel) = src.release_override {
+                LanguageLevel::new(rel, module.language_level.preview)
+            } else if src.scope == RootScope::Test {
+                module.test_language_level.unwrap_or(module.language_level)
+            } else {
+                module.language_level
+            };
+            for &fid in &src.files {
+                let eff = shebang_levels.get(&fid).copied().unwrap_or(root_level);
+                file_levels.insert(fid, eff);
+            }
+        }
     }
 
     WorkspaceLayout {
@@ -1508,5 +1652,126 @@ mod tests {
             RootScope::from_path("src/functionalTest/resources"),
             RootScope::Test
         );
+    }
+
+    #[test]
+    fn mrjar_release_from_path_recognizes_standard_conventions_and_validates_bounds() {
+        assert_eq!(mrjar_release_from_path("src/main/java9"), Some(Release::JAVA_9));
+        assert_eq!(mrjar_release_from_path("src/main/java17"), Some(Release::JAVA_17));
+        assert_eq!(
+            mrjar_release_from_path("core/src/main/java-21"),
+            Some(Release::JAVA_21)
+        );
+        assert_eq!(
+            mrjar_release_from_path("src/test/java17"),
+            Some(Release::JAVA_17)
+        );
+        assert_eq!(
+            mrjar_release_from_path("src/main/versions/17/java"),
+            Some(Release::JAVA_17)
+        );
+        assert_eq!(
+            mrjar_release_from_path("src/main/versions/17"),
+            Some(Release::JAVA_17)
+        );
+        assert_eq!(
+            mrjar_release_from_path("src/versions/21"),
+            Some(Release::JAVA_21)
+        );
+        assert_eq!(
+            mrjar_release_from_path("core/src/versions/21/java"),
+            Some(Release::JAVA_21)
+        );
+
+        assert_eq!(mrjar_release_from_path("src/main/java"), None);
+        assert_eq!(mrjar_release_from_path("src/main/java8"), None);
+        assert_eq!(mrjar_release_from_path("src/main/java-templates"), None);
+        assert_eq!(mrjar_release_from_path("src/main/java999"), None);
+        assert_eq!(mrjar_release_from_path("src/main/versions/8/java"), None);
+        assert_eq!(mrjar_release_from_path("src/main/versions/09"), None);
+    }
+
+    #[test]
+    fn infer_workspace_layout_discovers_mrjar_roots_levels_and_packages() {
+        let base_src = "package com.foo;\npublic class PlatformHelper {}\n";
+        let java17_rec = "package com.foo;\npublic record Bar(int x) {}\n";
+        let java21_ver = "package com.foo;\npublic class V21 {}\n";
+        let shebang_src = "#!/usr/bin/env java --source 25\npackage com.foo;\npublic class Script {}\n";
+        let test_src = "package com.foo;\npublic class HelperTest {}\n";
+
+        let files = [
+            (FileId(1), "src/main/java/com/foo/PlatformHelper.java", base_src),
+            (FileId(2), "src/main/java17/com/foo/Bar.java", java17_rec),
+            (FileId(3), "src/versions/21/com/foo/V21.java", java21_ver),
+            (FileId(4), "src/main/java17/com/foo/Script.java", shebang_src),
+            (FileId(5), "src/test/java/com/foo/HelperTest.java", test_src),
+        ];
+
+        let mut delta = WorkspaceDelta::default();
+        let layout = infer_workspace_layout_from_sources(
+            &files,
+            &[],
+            LanguageLevel::new(Release::JAVA_8, false),
+            &delta,
+        );
+        assert_eq!(layout.modules.len(), 1);
+        assert!(
+            layout.package_mismatches.is_empty(),
+            "unexpected package mismatches: {:?}",
+            layout.package_mismatches
+        );
+
+        let m = &layout.modules[0];
+        let r_base = m.sources.iter().find(|r| r.rel_path == "src/main/java").unwrap();
+        assert_eq!(r_base.scope, RootScope::Main);
+        assert_eq!(r_base.release_override, None);
+
+        let r_17 = m.sources.iter().find(|r| r.rel_path == "src/main/java17").unwrap();
+        assert_eq!(r_17.scope, RootScope::Main);
+        assert_eq!(r_17.release_override, Some(Release::JAVA_17));
+
+        let r_21 = m.sources.iter().find(|r| r.rel_path == "src/versions/21").unwrap();
+        assert_eq!(r_21.scope, RootScope::Main);
+        assert_eq!(r_21.release_override, Some(Release::JAVA_21));
+
+        assert_eq!(
+            layout.file_levels.get(&FileId(1)),
+            Some(&LanguageLevel::new(Release::JAVA_8, false))
+        );
+        assert_eq!(
+            layout.file_levels.get(&FileId(2)),
+            Some(&LanguageLevel::new(Release::JAVA_17, false))
+        );
+        assert_eq!(
+            layout.file_levels.get(&FileId(3)),
+            Some(&LanguageLevel::new(Release::JAVA_21, false))
+        );
+        assert_eq!(
+            layout.file_levels.get(&FileId(4)),
+            Some(&LanguageLevel::new(Release::JAVA_25, false))
+        );
+        assert_eq!(
+            layout.file_levels.get(&FileId(5)),
+            Some(&LanguageLevel::new(Release::JAVA_8, false))
+        );
+
+        let (_, enc_17) = layout
+            .enclosing_source_root("src/main/java17/com/foo/Bar.java")
+            .unwrap();
+        assert_eq!(enc_17.rel_path, "src/main/java17");
+        assert_eq!(enc_17.release_override, Some(Release::JAVA_17));
+
+        let parse_17 = syntax::parse_with_level(java17_rec, layout.file_levels[&FileId(2)]);
+        assert!(parse_17.errors().is_empty());
+        assert!(
+            layout
+                .check_file_package(
+                    FileId(2),
+                    "src/main/java17/com/foo/Bar.java",
+                    &parse_17.syntax_node(),
+                )
+                .is_none()
+        );
+        delta.include.clear();
     }
 }

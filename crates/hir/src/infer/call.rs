@@ -13,14 +13,15 @@ use crate::{
     symbols::{NullnessScope, TypeKind, node_ident_text},
     ty::{
         Nullability, Substitution, Ty, TypeArg, WildcardBound, effective_nullness_scope_for_file,
-        effective_nullness_scope_for_member, is_subtype, least_upper_bound,
-        supertype_substitution_for_ty, type_params_of_fqn,
+        effective_nullness_scope_for_member_in_scope, is_subtype_in_scope,
+        least_upper_bound_in_scope, supertype_substitution_for_ty_in_scope,
+        supertype_substitution_in_scope, type_params_of_fqn_in_scope,
     },
 };
 
 use super::{
     InferCtx, MAX_INFER_DEPTH, is_var_type_node,
-    sam::{SamSignature, erase_type_vars_to_bound, find_functional_interface_sam},
+    sam::{SamSignature, erase_type_vars_to_bound, find_functional_interface_sam_in_scope},
 };
 
 /// Details of a resolved call expression, used by both type inference and hover/resolution.
@@ -211,7 +212,9 @@ impl<'a> InferCtx<'a> {
                 } else {
                     subst.apply(&param_ty)
                 };
-                let Some(sam) = find_functional_interface_sam(self.db, &target_iface) else {
+                let Some(sam) =
+                    find_functional_interface_sam_in_scope(self.db, &self.scope, &target_iface)
+                else {
                     continue;
                 };
                 if matches!(sam.return_type, Ty::Void | Ty::Unknown) {
@@ -255,8 +258,9 @@ impl<'a> InferCtx<'a> {
                     effective_nullness_scope_for_file(self.db, self.file_id)
                 }
             } else {
-                effective_nullness_scope_for_member(
+                effective_nullness_scope_for_member_in_scope(
                     self.db,
+                    &self.scope,
                     &cand.owner_fqn,
                     cand.member_nullness_scope,
                 )
@@ -370,7 +374,7 @@ impl<'a> InferCtx<'a> {
             && type_args.is_empty()
             && is_diamond_new_expr(&type_node)
         {
-            let tp_names = type_params_of_fqn(self.db, fqn);
+            let tp_names = type_params_of_fqn_in_scope(self.db, &self.scope, fqn);
             if !tp_names.is_empty() {
                 let tv_set: FxHashSet<SmolStr> = tp_names.iter().cloned().collect();
                 let pattern_args: Vec<TypeArg> = tp_names
@@ -489,7 +493,11 @@ impl<'a> InferCtx<'a> {
                     match ancestor.kind() {
                         LAMBDA_EXPR => {
                             let lambda_target = self.expected_target_type(&ancestor)?;
-                            let sam = find_functional_interface_sam(self.db, &lambda_target)?;
+                            let sam = find_functional_interface_sam_in_scope(
+                                self.db,
+                                &self.scope,
+                                &lambda_target,
+                            )?;
                             return (!matches!(sam.return_type, Ty::Unknown | Ty::Void))
                                 .then_some(sam.return_type);
                         }
@@ -559,8 +567,13 @@ impl<'a> InferCtx<'a> {
                             self.resolve_type_node(&type_node, &call_node)
                         };
                         let fqn = constructed_ty.erased_fqn()?.to_string();
-                        let subst = supertype_substitution_for_ty(self.db, &constructed_ty, &fqn)
-                            .unwrap_or_default();
+                        let subst = supertype_substitution_for_ty_in_scope(
+                            self.db,
+                            &self.scope,
+                            &constructed_ty,
+                            &fqn,
+                        )
+                        .unwrap_or_default();
                         let arg_nodes = collect_arg_nodes(&call_node);
                         let pre_arg_tys = self.infer_non_functional_args(&arg_nodes);
                         let ctors = resolve::collect_constructor_candidates(
@@ -600,7 +613,7 @@ impl<'a> InferCtx<'a> {
                     }
                     acc = Some(match acc {
                         None => t,
-                        Some(prev) => least_upper_bound(ctx.db, &prev, &t),
+                        Some(prev) => least_upper_bound_in_scope(ctx.db, &ctx.scope, &prev, &t),
                     });
                 }
                 acc.unwrap_or(Ty::Unknown)
@@ -679,7 +692,9 @@ impl<'a> InferCtx<'a> {
                 sam.param_types.len(),
             );
             let best = self.select_best_candidate_from_tys(cands, &sam.param_types)?;
-            let subst = supertype_substitution_for_ty(self.db, &qual_ty, &fqn).unwrap_or_default();
+            let subst =
+                supertype_substitution_for_ty_in_scope(self.db, &self.scope, &qual_ty, &fqn)
+                    .unwrap_or_default();
             return Some((best.target, subst));
         }
 
@@ -691,14 +706,14 @@ impl<'a> InferCtx<'a> {
             // remaining args are `sam.param_types[1..]`).
             let mut candidates = Vec::new();
             if let Some(first_param) = sam.param_types.first()
-                && (is_subtype(self.db, first_param, &qual_ty)
+                && (is_subtype_in_scope(self.db, &self.scope, first_param, &qual_ty)
                     || matches!(qual_ty, Ty::Class { .. })
-                        && is_subtype(self.db, &qual_ty, first_param))
+                        && is_subtype_in_scope(self.db, &self.scope, &qual_ty, first_param))
             {
                 let rest_args = &sam.param_types[1..];
                 let recv_for_lookup = if matches!(qual_ty, Ty::Class { ref type_args, .. } if type_args.is_empty())
                     && !matches!(first_param, Ty::Unknown)
-                    && is_subtype(self.db, first_param, &qual_ty)
+                    && is_subtype_in_scope(self.db, &self.scope, first_param, &qual_ty)
                 {
                     first_param
                 } else {
@@ -825,7 +840,13 @@ impl<'a> InferCtx<'a> {
         arg_tys: &[Ty],
         arg_nodes: &[SyntaxNode],
     ) -> Option<resolve::CallableCandidate> {
-        resolve::select_best_callable_candidate(self.db, candidates, arg_tys, Some(arg_nodes))
+        resolve::select_best_callable_candidate_in_scope(
+            self.db,
+            &self.scope,
+            candidates,
+            arg_tys,
+            Some(arg_nodes),
+        )
     }
 
     fn select_best_candidate_from_tys(
@@ -833,7 +854,13 @@ impl<'a> InferCtx<'a> {
         candidates: Vec<resolve::CallableCandidate>,
         arg_tys: &[Ty],
     ) -> Option<resolve::CallableCandidate> {
-        resolve::select_best_callable_candidate(self.db, candidates, arg_tys, None)
+        resolve::select_best_callable_candidate_in_scope(
+            self.db,
+            &self.scope,
+            candidates,
+            arg_tys,
+            None,
+        )
     }
 
     fn select_best_method_ref_candidate(
@@ -851,14 +878,16 @@ impl<'a> InferCtx<'a> {
             } else {
                 sam_params.get(1..).unwrap_or(&[])
             };
-            let phase = resolve::score_candidate_phase(self.db, &cand, args, None);
+            let phase =
+                resolve::score_candidate_phase_in_scope(self.db, &self.scope, &cand, args, None);
             match &best {
                 None => best = Some((phase, cand, is_static)),
                 Some((best_phase, best_cand, _)) => {
                     if phase < *best_phase
                         || (phase == *best_phase
-                            && resolve::is_candidate_strictly_more_specific(
+                            && resolve::is_candidate_strictly_more_specific_in_scope(
                                 self.db,
+                                &self.scope,
                                 &cand,
                                 best_cand,
                                 args.len(),
@@ -897,7 +926,8 @@ impl<'a> InferCtx<'a> {
                     other => other.clone(),
                 };
                 if let Some(TypeArg::Type(prev)) = out.map.get(name) {
-                    let combined = least_upper_bound(self.db, prev, &boxed_actual);
+                    let combined =
+                        least_upper_bound_in_scope(self.db, &self.scope, prev, &boxed_actual);
                     if !matches!(combined, Ty::Unknown) {
                         out.insert_ty(name.clone(), combined);
                     }
@@ -926,9 +956,14 @@ impl<'a> InferCtx<'a> {
                 else {
                     return;
                 };
-                if let Some(proj) = crate::ty::supertype_substitution(self.db, a_fqn, a_args, p_fqn)
-                {
-                    let p_params = type_params_of_fqn(self.db, p_fqn);
+                if let Some(proj) = supertype_substitution_in_scope(
+                    self.db,
+                    &self.scope,
+                    a_fqn,
+                    a_args,
+                    p_fqn,
+                ) {
+                    let p_params = type_params_of_fqn_in_scope(self.db, &self.scope, p_fqn);
                     for (p_arg, p_param) in p_args.iter().zip(p_params.iter()) {
                         let Some(a_arg) = proj.map.get(p_param) else {
                             continue;
@@ -936,10 +971,15 @@ impl<'a> InferCtx<'a> {
                         self.unify_type_arg(p_arg, a_arg, vars_to_bind, out, depth + 1);
                     }
                 } else if !a_args.is_empty()
-                    && let Some(proj) =
-                        crate::ty::supertype_substitution(self.db, p_fqn, p_args, a_fqn)
+                    && let Some(proj) = supertype_substitution_in_scope(
+                        self.db,
+                        &self.scope,
+                        p_fqn,
+                        p_args,
+                        a_fqn,
+                    )
                 {
-                    let a_params = type_params_of_fqn(self.db, a_fqn);
+                    let a_params = type_params_of_fqn_in_scope(self.db, &self.scope, a_fqn);
                     for (a_arg, a_param) in a_args.iter().zip(a_params.iter()) {
                         let Some(p_arg) = proj.map.get(a_param) else {
                             continue;

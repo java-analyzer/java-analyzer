@@ -12,6 +12,7 @@ use crate::{
     DefDatabase, FileId,
     classpath::{BinaryTypeSymbol, ClasspathIndex},
     item_tree::{FileItemTree, MemberId, TypeItem},
+    scope::{ModuleImportTarget, VisibleScope},
     symbols::{
         ImportKind, MemberKind, TypeKind, WorkspaceIndex, format_params_types_signature,
     },
@@ -128,15 +129,132 @@ fn push_unique(out: &mut Vec<String>, value: String) {
     }
 }
 
+trait HierarchyLookup {
+    fn contains_ws_type(&self, fqn: &str) -> bool;
+    fn contains_bin_type(&self, fqn: &str) -> bool;
+    fn pkg_ws_type(&self, file_tree: &FileItemTree, pkg: &str, name: &str) -> Option<String>;
+    fn pkg_bin_type(&self, pkg: &str, name: &str) -> Option<String>;
+    fn module_import_pkg_type(
+        &self,
+        file_tree: &FileItemTree,
+        module_name: &str,
+        name: &str,
+    ) -> Option<String>;
+}
+
+struct FlatHierarchyLookup<'a> {
+    workspace: &'a WorkspaceIndex,
+    classpath: &'a ClasspathIndex,
+}
+
+impl HierarchyLookup for FlatHierarchyLookup<'_> {
+    fn contains_ws_type(&self, fqn: &str) -> bool {
+        self.workspace.contains_type(fqn)
+    }
+
+    fn contains_bin_type(&self, fqn: &str) -> bool {
+        self.classpath.type_by_fqn(fqn).is_some()
+    }
+
+    fn pkg_ws_type(&self, file_tree: &FileItemTree, pkg: &str, name: &str) -> Option<String> {
+        if let Some(fqn) = self
+            .workspace
+            .package_type_map
+            .get(pkg)
+            .and_then(|m| m.get(name))
+            && self.workspace.contains_type(fqn)
+        {
+            return Some(fqn.clone());
+        }
+        if file_tree.package.as_deref().unwrap_or("") == pkg
+            && let Some((_, ty)) = file_tree
+                .types
+                .iter()
+                .find(|(_, t)| t.enclosing_type.is_none() && t.name == name)
+        {
+            return Some(ty.qualified_name.clone());
+        }
+        None
+    }
+
+    fn pkg_bin_type(&self, pkg: &str, name: &str) -> Option<String> {
+        self.classpath
+            .type_in_package(pkg, name)
+            .map(|bin| bin.qualified_name.clone())
+    }
+
+    fn module_import_pkg_type(
+        &self,
+        file_tree: &FileItemTree,
+        module_name: &str,
+        name: &str,
+    ) -> Option<String> {
+        for exported_pkg in self.classpath.transitive_module_exports(module_name) {
+            if let Some(found) = self
+                .pkg_ws_type(file_tree, exported_pkg, name)
+                .or_else(|| self.pkg_bin_type(exported_pkg, name))
+            {
+                return Some(found);
+            }
+        }
+        None
+    }
+}
+
+impl HierarchyLookup for VisibleScope {
+    fn contains_ws_type(&self, fqn: &str) -> bool {
+        self.contains_workspace_type(fqn)
+    }
+
+    fn contains_bin_type(&self, fqn: &str) -> bool {
+        self.contains_binary_type(fqn)
+    }
+
+    fn pkg_ws_type(&self, file_tree: &FileItemTree, pkg: &str, name: &str) -> Option<String> {
+        let (fid, tid) = self.lookup_package_type_in_workspace(file_tree, pkg, name)?;
+        if fid == file_tree.file_id {
+            Some(file_tree.types[tid].qualified_name.clone())
+        } else if !pkg.is_empty() {
+            Some(format!("{pkg}.{name}"))
+        } else {
+            Some(name.to_string())
+        }
+    }
+
+    fn pkg_bin_type(&self, pkg: &str, name: &str) -> Option<String> {
+        self.get_binary_type_in_package(pkg, name)
+            .map(|bin| bin.qualified_name.clone())
+    }
+
+    fn module_import_pkg_type(
+        &self,
+        file_tree: &FileItemTree,
+        module_name: &str,
+        name: &str,
+    ) -> Option<String> {
+        match self.resolve_module_import_type(file_tree, module_name, name)? {
+            ModuleImportTarget::Workspace(_, _) => {
+                // `resolve_module_import_type` only returns top-level types from exported packages.
+                for exported_pkg in self.classpath().transitive_module_exports(module_name) {
+                    if let Some(fqn) = self.pkg_ws_type(file_tree, exported_pkg, name) {
+                        return Some(fqn);
+                    }
+                }
+                None
+            }
+            ModuleImportTarget::Binary(fqn) => Some(fqn),
+        }
+    }
+}
+
 fn resolve_known_fqn(
     file_tree: &FileItemTree,
-    workspace: &WorkspaceIndex,
-    classpath: &ClasspathIndex,
+    lookup: &dyn HierarchyLookup,
     fqn: &str,
 ) -> Option<String> {
-    if workspace.contains_type(fqn)
+    if lookup.contains_ws_type(fqn)
         || file_tree.find_type_by_fqn(fqn).is_some()
-        || classpath.type_by_fqn(fqn).is_some()
+        || lookup.contains_bin_type(fqn)
     {
         Some(fqn.to_string())
     } else {
@@ -146,45 +264,26 @@ fn resolve_known_fqn(
 
 fn resolve_package_type(
     file_tree: &FileItemTree,
-    workspace: &WorkspaceIndex,
-    classpath: &ClasspathIndex,
+    lookup: &dyn HierarchyLookup,
     pkg: &str,
     name: &str,
 ) -> Option<String> {
-    if let Some(fqn) = workspace
-        .package_type_map
-        .get(pkg)
-        .and_then(|m| m.get(name))
-        && workspace.contains_type(fqn)
-    {
-        return Some(fqn.clone());
-    }
-    if file_tree.package.as_deref().unwrap_or("") == pkg
-        && let Some((_, ty)) = file_tree
-            .types
-            .iter()
-            .find(|(_, t)| t.enclosing_type.is_none() && t.name == name)
-    {
-        return Some(ty.qualified_name.clone());
-    }
-    if let Some(bin) = classpath.type_in_package(pkg, name) {
-        return Some(bin.qualified_name.clone());
-    }
-    None
+    lookup
+        .pkg_ws_type(file_tree, pkg, name)
+        .or_else(|| lookup.pkg_bin_type(pkg, name))
 }
 
 fn resolve_single_segment_known(
     name: &str,
     owner_ty: &TypeItem,
     file_tree: &FileItemTree,
-    workspace: &WorkspaceIndex,
-    classpath: &ClasspathIndex,
+    lookup: &dyn HierarchyLookup,
 ) -> Option<String> {
     // 1. Direct nested types of `owner_ty` (needed e.g. for `sealed ... permits Nested`) and
     //    enclosing type scopes innermost-to-outermost.
     if owner_ty.nested_types.iter().any(|n| n == name) {
         let nested_fqn = format!("{}.{name}", owner_ty.qualified_name);
-        if let Some(found) = resolve_known_fqn(file_tree, workspace, classpath, &nested_fqn) {
+        if let Some(found) = resolve_known_fqn(file_tree, lookup, &nested_fqn) {
             return Some(found);
         }
     }
@@ -199,7 +298,7 @@ fn resolve_single_segment_known(
         }
         if enc_ty.nested_types.iter().any(|n| n == name) {
             let nested_fqn = format!("{enc_fqn}.{name}");
-            if let Some(found) = resolve_known_fqn(file_tree, workspace, classpath, &nested_fqn) {
+            if let Some(found) = resolve_known_fqn(file_tree, lookup, &nested_fqn) {
                 return Some(found);
             }
         }
@@ -210,7 +309,7 @@ fn resolve_single_segment_known(
     for (_, imp) in file_tree.imports.iter() {
         if imp.kind == ImportKind::SingleType && imp.path.last().map(String::as_str) == Some(name) {
             let fqn = imp.path.join(".");
-            if workspace.contains_type(&fqn) || file_tree.find_type_by_fqn(&fqn).is_some() {
+            if lookup.contains_ws_type(&fqn) || file_tree.find_type_by_fqn(&fqn).is_some() {
                 return Some(fqn);
             }
         }
@@ -218,7 +317,7 @@ fn resolve_single_segment_known(
     for (_, imp) in file_tree.imports.iter() {
         if imp.kind == ImportKind::SingleType && imp.path.last().map(String::as_str) == Some(name) {
             let fqn = imp.path.join(".");
-            if classpath.type_by_fqn(&fqn).is_some() {
+            if lookup.contains_bin_type(&fqn) {
                 return Some(fqn);
             }
         }
@@ -230,7 +329,7 @@ fn resolve_single_segment_known(
             && imp.path.last().map(String::as_str) == Some(name)
         {
             let fqn = imp.path.join(".");
-            if workspace.contains_type(&fqn) || file_tree.find_type_by_fqn(&fqn).is_some() {
+            if lookup.contains_ws_type(&fqn) || file_tree.find_type_by_fqn(&fqn).is_some() {
                 return Some(fqn);
             }
         }
@@ -240,7 +339,7 @@ fn resolve_single_segment_known(
             && imp.path.last().map(String::as_str) == Some(name)
         {
             let fqn = imp.path.join(".");
-            if classpath.type_by_fqn(&fqn).is_some() {
+            if lookup.contains_bin_type(&fqn) {
                 return Some(fqn);
             }
         }
@@ -248,12 +347,12 @@ fn resolve_single_segment_known(
 
     // 4. Same-package top-level types.
     let pkg = file_tree.package.as_deref().unwrap_or("");
-    if let Some(found) = resolve_package_type(file_tree, workspace, classpath, pkg, name) {
+    if let Some(found) = resolve_package_type(file_tree, lookup, pkg, name) {
         return Some(found);
     }
 
     // 5. Implicit `java.lang.*`.
-    if let Some(found) = resolve_package_type(file_tree, workspace, classpath, "java.lang", name) {
+    if let Some(found) = resolve_package_type(file_tree, lookup, "java.lang", name) {
         return Some(found);
     }
 
@@ -261,7 +360,7 @@ fn resolve_single_segment_known(
     for (_, imp) in file_tree.imports.iter() {
         if imp.kind == ImportKind::TypeOnDemand {
             let fqn = format!("{}.{name}", imp.path.join("."));
-            if workspace.contains_type(&fqn) || file_tree.find_type_by_fqn(&fqn).is_some() {
+            if lookup.contains_ws_type(&fqn) || file_tree.find_type_by_fqn(&fqn).is_some() {
                 return Some(fqn);
             }
         }
@@ -269,7 +368,7 @@ fn resolve_single_segment_known(
     for (_, imp) in file_tree.imports.iter() {
         if imp.kind == ImportKind::TypeOnDemand {
             let fqn = format!("{}.{name}", imp.path.join("."));
-            if classpath.type_by_fqn(&fqn).is_some() {
+            if lookup.contains_bin_type(&fqn) {
                 return Some(fqn);
             }
         }
@@ -279,7 +378,7 @@ fn resolve_single_segment_known(
     for (_, imp) in file_tree.imports.iter() {
         if imp.kind == ImportKind::StaticOnDemand {
             let fqn = format!("{}.{name}", imp.path.join("."));
-            if workspace.contains_type(&fqn) || file_tree.find_type_by_fqn(&fqn).is_some() {
+            if lookup.contains_ws_type(&fqn) || file_tree.find_type_by_fqn(&fqn).is_some() {
                 return Some(fqn);
             }
         }
@@ -287,7 +386,7 @@ fn resolve_single_segment_known(
     for (_, imp) in file_tree.imports.iter() {
         if imp.kind == ImportKind::StaticOnDemand {
             let fqn = format!("{}.{name}", imp.path.join("."));
-            if classpath.type_by_fqn(&fqn).is_some() {
+            if lookup.contains_bin_type(&fqn) {
                 return Some(fqn);
             }
         }
@@ -297,12 +396,8 @@ fn resolve_single_segment_known(
     for (_, imp) in file_tree.imports.iter() {
         if imp.kind == ImportKind::Module {
             let module_name = imp.path.join(".");
-            for exported_pkg in classpath.transitive_module_exports(&module_name) {
-                if let Some(found) =
-                    resolve_package_type(file_tree, workspace, classpath, exported_pkg, name)
-                {
-                    return Some(found);
-                }
+            if let Some(found) = lookup.module_import_pkg_type(file_tree, &module_name, name) {
+                return Some(found);
             }
         }
     }
@@ -313,6 +408,8 @@ fn resolve_single_segment_known(
 /// Resolves a raw type reference (`"Base"`, `"com.foo.Iface<T>"`) in `owner_ty`'s declaring file
 /// scope using only position-independent [`FileItemTree`], [`WorkspaceIndex`], and
 /// [`ClasspathIndex`].
+#[cfg(test)]
+#[expect(dead_code, reason = "kept for hierarchy unit tests")]
 pub(crate) fn resolve_type_ref_in_item_tree(
     raw_ref: &str,
     owner_ty: &TypeItem,
@@ -320,12 +417,23 @@ pub(crate) fn resolve_type_ref_in_item_tree(
     workspace: &WorkspaceIndex,
     classpath: &ClasspathIndex,
 ) -> Option<String> {
+    let lookup = FlatHierarchyLookup {
+        workspace,
+        classpath,
+    };
+    resolve_type_ref_in_item_tree_with(raw_ref, owner_ty, file_tree, &lookup)
+}
+
+fn resolve_type_ref_in_item_tree_with(
+    raw_ref: &str,
+    owner_ty: &TypeItem,
+    file_tree: &FileItemTree,
+    lookup: &dyn HierarchyLookup,
+) -> Option<String> {
     let segs = parse_type_ref_segments(raw_ref)?;
 
     if let [name] = segs.as_slice() {
-        if let Some(found) =
-            resolve_single_segment_known(name, owner_ty, file_tree, workspace, classpath)
-        {
+        if let Some(found) = resolve_single_segment_known(name, owner_ty, file_tree, lookup) {
             return Some(found);
         }
         // Best-effort fallback for unindexed external types (e.g. `SingleType` import or `Object`).
@@ -344,18 +452,17 @@ pub(crate) fn resolve_type_ref_in_item_tree(
 
     // Multi-segment path: direct FQN first, then resolve `segs[0]` and walk nested segments.
     let joined = segs.join(".");
-    if let Some(found) = resolve_known_fqn(file_tree, workspace, classpath, &joined) {
+    if let Some(found) = resolve_known_fqn(file_tree, lookup, &joined) {
         return Some(found);
     }
 
     if let [first, rest @ ..] = segs.as_slice()
-        && let Some(first_fqn) =
-            resolve_single_segment_known(first, owner_ty, file_tree, workspace, classpath)
+        && let Some(first_fqn) = resolve_single_segment_known(first, owner_ty, file_tree, lookup)
     {
         let mut current = first_fqn;
         for seg in rest {
             let next = format!("{current}.{seg}");
-            current = resolve_known_fqn(file_tree, workspace, classpath, &next)?;
+            current = resolve_known_fqn(file_tree, lookup, &next)?;
         }
         return Some(current);
     }
@@ -366,16 +473,13 @@ pub(crate) fn resolve_type_ref_in_item_tree(
 fn direct_supertypes_for_workspace_type(
     ty: &TypeItem,
     file_tree: &FileItemTree,
-    workspace: &WorkspaceIndex,
-    classpath: &ClasspathIndex,
+    lookup: &dyn HierarchyLookup,
 ) -> DirectSupertypes {
     let mut interfaces = Vec::new();
     let mut permits = Vec::new();
 
     for raw in &ty.permits {
-        if let Some(resolved) =
-            resolve_type_ref_in_item_tree(raw, ty, file_tree, workspace, classpath)
-        {
+        if let Some(resolved) = resolve_type_ref_in_item_tree_with(raw, ty, file_tree, lookup) {
             push_unique(&mut permits, resolved);
         }
     }
@@ -385,13 +489,11 @@ fn direct_supertypes_for_workspace_type(
             let super_class = ty
                 .extends
                 .first()
-                .and_then(|raw| {
-                    resolve_type_ref_in_item_tree(raw, ty, file_tree, workspace, classpath)
-                })
+                .and_then(|raw| resolve_type_ref_in_item_tree_with(raw, ty, file_tree, lookup))
                 .or_else(|| (ty.qualified_name != OBJECT_FQN).then(|| OBJECT_FQN.to_string()));
             for raw in &ty.implements {
                 if let Some(resolved) =
-                    resolve_type_ref_in_item_tree(raw, ty, file_tree, workspace, classpath)
+                    resolve_type_ref_in_item_tree_with(raw, ty, file_tree, lookup)
                 {
                     push_unique(&mut interfaces, resolved);
                 }
@@ -405,7 +507,7 @@ fn direct_supertypes_for_workspace_type(
         TypeKind::Interface => {
             for raw in &ty.extends {
                 if let Some(resolved) =
-                    resolve_type_ref_in_item_tree(raw, ty, file_tree, workspace, classpath)
+                    resolve_type_ref_in_item_tree_with(raw, ty, file_tree, lookup)
                 {
                     push_unique(&mut interfaces, resolved);
                 }
@@ -419,7 +521,7 @@ fn direct_supertypes_for_workspace_type(
         TypeKind::Enum => {
             for raw in &ty.implements {
                 if let Some(resolved) =
-                    resolve_type_ref_in_item_tree(raw, ty, file_tree, workspace, classpath)
+                    resolve_type_ref_in_item_tree_with(raw, ty, file_tree, lookup)
                 {
                     push_unique(&mut interfaces, resolved);
                 }
@@ -433,7 +535,7 @@ fn direct_supertypes_for_workspace_type(
         TypeKind::Record => {
             for raw in &ty.implements {
                 if let Some(resolved) =
-                    resolve_type_ref_in_item_tree(raw, ty, file_tree, workspace, classpath)
+                    resolve_type_ref_in_item_tree_with(raw, ty, file_tree, lookup)
                 {
                     push_unique(&mut interfaces, resolved);
                 }
@@ -513,9 +615,13 @@ pub(crate) fn build_workspace_hierarchy_index(
     let mut visited_binary = FxHashSet::default();
     let mut binary_queue = VecDeque::new();
 
+    let lookup = FlatHierarchyLookup {
+        workspace,
+        classpath,
+    };
     for file_tree in per_file {
         for (_, ty) in file_tree.types.iter() {
-            let direct = direct_supertypes_for_workspace_type(ty, file_tree, workspace, classpath);
+            let direct = direct_supertypes_for_workspace_type(ty, file_tree, &lookup);
             if let Some(sup) = &direct.super_class {
                 direct_subtypes
                     .entry(sup.clone())
@@ -616,18 +722,69 @@ pub fn direct_supertypes(db: &dyn DefDatabase, fqn: &str) -> DirectSupertypes {
     DirectSupertypes::default()
 }
 
+/// Returns the direct supertypes of `fqn` within `scope`, resolving workspace types via
+/// `scope` (handling module boundaries, JPMS, and MR-JAR overlays) when scoped.
+pub(crate) fn direct_supertypes_in_scope(
+    db: &dyn DefDatabase,
+    scope: &VisibleScope,
+    fqn: &str,
+) -> DirectSupertypes {
+    if !scope.is_scoped() {
+        return direct_supertypes(db, fqn);
+    }
+    if let Some((fid, tid)) = scope.get_workspace_type(fqn) {
+        let tree = db.file_item_tree(fid);
+        let ty = &tree.types[tid];
+        if scope.caller_file() == Some(fid) {
+            return direct_supertypes_for_workspace_type(ty, &tree, scope);
+        }
+        let target_scope = VisibleScope::for_file(db, fid);
+        return direct_supertypes_for_workspace_type(ty, &tree, &target_scope);
+    }
+    if let Some(bin) = scope.get_binary_type(fqn) {
+        return direct_supertypes_for_binary_type(bin);
+    }
+    if fqn == ENUM_FQN || fqn == RECORD_FQN {
+        return DirectSupertypes {
+            super_class: Some(OBJECT_FQN.to_string()),
+            interfaces: Vec::new(),
+            permits: Vec::new(),
+        };
+    }
+    DirectSupertypes::default()
+}
+
+/// Returns all supertypes of `fqn` within `scope` in deterministic, cycle-safe lookup order.
+pub(crate) fn linearized_supertypes_in_scope(
+    db: &dyn DefDatabase,
+    scope: &VisibleScope,
+    fqn: &str,
+) -> Vec<String> {
+    if !scope.is_scoped() {
+        return linearized_supertypes(db, fqn);
+    }
+    linearized_supertypes_with(|cur| direct_supertypes_in_scope(db, scope, cur), fqn)
+}
+
 /// Returns all supertypes of `fqn` in deterministic, cycle-safe lookup order:
 /// superclass chain first, then superinterfaces in BFS order, and `java.lang.Object` last
 /// (excluding `fqn` itself).
 #[must_use]
 pub fn linearized_supertypes(db: &dyn DefDatabase, fqn: &str) -> Vec<String> {
+    linearized_supertypes_with(|cur| direct_supertypes(db, cur), fqn)
+}
+
+fn linearized_supertypes_with(
+    mut get_direct: impl FnMut(&str) -> DirectSupertypes,
+    fqn: &str,
+) -> Vec<String> {
     let mut visited = FxHashSet::default();
     visited.insert(fqn.to_string());
 
     let mut result = Vec::new();
     let mut iface_queue = VecDeque::new();
 
-    let first = direct_supertypes(db, fqn);
+    let first = get_direct(fqn);
     for iface in first.interfaces {
         iface_queue.push_back(iface);
     }
@@ -638,7 +795,7 @@ pub fn linearized_supertypes(db: &dyn DefDatabase, fqn: &str) -> Vec<String> {
             break;
         }
         result.push(sup.clone());
-        let sup_direct = direct_supertypes(db, &sup);
+        let sup_direct = get_direct(&sup);
         for iface in sup_direct.interfaces {
             iface_queue.push_back(iface);
         }
@@ -650,7 +807,7 @@ pub fn linearized_supertypes(db: &dyn DefDatabase, fqn: &str) -> Vec<String> {
             continue;
         }
         result.push(iface.clone());
-        let iface_direct = direct_supertypes(db, &iface);
+        let iface_direct = get_direct(&iface);
         for parent_iface in iface_direct.interfaces {
             iface_queue.push_back(parent_iface);
         }
@@ -731,11 +888,21 @@ pub fn find_overridden_method(
     method_name: &str,
     param_count: usize,
 ) -> Option<String> {
-    let workspace = db.workspace_index();
-    let classpath = db.classpath_index();
+    let scope = VisibleScope::flat(db);
+    find_overridden_method_in_scope(db, &scope, owner_fqn, method_name, param_count)
+}
 
-    for sup_fqn in linearized_supertypes(db, owner_fqn) {
-        if let Some((fid, tid)) = workspace.get_type(&sup_fqn) {
+/// Finds the nearest supertype method overridden by `(owner_fqn, method_name, param_count)`
+/// within `scope`.
+pub(crate) fn find_overridden_method_in_scope(
+    db: &dyn DefDatabase,
+    scope: &VisibleScope,
+    owner_fqn: &str,
+    method_name: &str,
+    param_count: usize,
+) -> Option<String> {
+    for sup_fqn in linearized_supertypes_in_scope(db, scope, owner_fqn) {
+        if let Some((fid, tid)) = scope.get_workspace_type(&sup_fqn) {
             let tree = db.file_item_tree(fid);
             if let Some(m) = tree.types[tid].members.iter().find_map(|&mid| {
                 let m = &tree.members[mid];
@@ -750,7 +917,7 @@ pub fn find_overridden_method(
                     format_params_types_signature(&m.params)
                 ));
             }
-        } else if let Some(bin) = classpath.type_by_fqn(&sup_fqn)
+        } else if let Some(bin) = scope.get_binary_type(&sup_fqn)
             && let Some(m) = bin.members.iter().find(|m| {
                 m.kind == MemberKind::Method
                     && !m.is_static

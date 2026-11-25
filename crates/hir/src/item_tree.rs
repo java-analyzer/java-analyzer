@@ -134,12 +134,38 @@ pub type TypeId = Idx<TypeItem>;
 pub type MemberId = Idx<MemberItem>;
 pub type ImportId = Idx<ImportTree>;
 
+/// Position-independent representation of a JPMS `requires` directive in `module-info.java`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JpmsRequires {
+    pub module_name: SmolStr,
+    pub is_transitive: bool,
+    pub is_static: bool,
+}
+
+/// Position-independent representation of a JPMS `exports` directive in `module-info.java`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JpmsExports {
+    pub package: String,
+    /// Empty for unqualified `exports pkg;`, or target module names for `exports pkg to m1, m2;`.
+    pub targets: Vec<SmolStr>,
+}
+
+/// Position-independent summary of a JPMS `module-info.java` declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JpmsModuleSummary {
+    pub name: SmolStr,
+    pub is_open: bool,
+    pub requires: Vec<JpmsRequires>,
+    pub exports: Vec<JpmsExports>,
+}
+
 /// Position-independent structural item tree for a single Java source file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileItemTree {
     pub file_id: FileId,
     pub package: Option<String>,
     pub module_name: Option<SmolStr>,
+    pub jpms_module: Option<JpmsModuleSummary>,
     pub nullness_scope: NullnessScope,
     pub imports: Arena<ImportTree>,
     pub types: Arena<TypeItem>,
@@ -170,6 +196,7 @@ pub(crate) fn lower_file_item_tree(file_id: FileId, root: &SyntaxNode) -> (FileI
     let mut package = None;
     let mut package_node: Option<SyntaxNode> = None;
     let mut module_name = None;
+    let mut jpms_module = None;
     let mut module_node: Option<SyntaxNode> = None;
     let mut imports = Arena::new();
     let mut raw_imports: Vec<(ImportKind, Vec<String>)> = Vec::new();
@@ -192,11 +219,9 @@ pub(crate) fn lower_file_item_tree(file_id: FileId, root: &SyntaxNode) -> (FileI
                     package = Some(segs.join("."));
                 }
             }
-            MODULE_DECL if module_name.is_none() => {
-                module_name = child
-                    .children()
-                    .find(|n| n.kind() == PATH)
-                    .map(|p| SmolStr::new(path_text(&p)));
+            MODULE_DECL if jpms_module.is_none() => {
+                jpms_module = lower_jpms_module_decl(&child);
+                module_name = jpms_module.as_ref().map(|m| m.name.clone());
                 module_node = Some(child);
             }
             IMPORT_DECL => {
@@ -280,6 +305,7 @@ pub(crate) fn lower_file_item_tree(file_id: FileId, root: &SyntaxNode) -> (FileI
             file_id,
             package,
             module_name,
+            jpms_module,
             nullness_scope,
             imports,
             types,
@@ -288,6 +314,69 @@ pub(crate) fn lower_file_item_tree(file_id: FileId, root: &SyntaxNode) -> (FileI
         },
         map,
     )
+}
+
+fn lower_jpms_module_decl(node: &SyntaxNode) -> Option<JpmsModuleSummary> {
+    let name = node
+        .children()
+        .find(|n| n.kind() == PATH)
+        .map(|p| SmolStr::new(path_text(&p)))?;
+    let is_open = node
+        .children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .any(|t| t.kind() == IDENT && t.text() == "open");
+    let mut requires = Vec::new();
+    let mut exports = Vec::new();
+
+    if let Some(body) = node.children().find(|n| n.kind() == MODULE_BODY) {
+        for directive in body.children().filter(|n| n.kind() == MODULE_DIRECTIVE) {
+            let mut kw: Option<SmolStr> = None;
+            let mut is_transitive = false;
+            let mut is_static = false;
+            for tok in directive
+                .children_with_tokens()
+                .filter_map(|e| e.into_token())
+            {
+                match tok.kind() {
+                    STATIC_KW => is_static = true,
+                    IDENT if kw.is_none() => kw = Some(SmolStr::new(tok.text())),
+                    IDENT if tok.text() == "transitive" => is_transitive = true,
+                    _ => {}
+                }
+            }
+            match kw.as_deref() {
+                Some("requires") => {
+                    if let Some(target) = directive
+                        .children()
+                        .find(|n| n.kind() == PATH)
+                        .map(|p| SmolStr::new(path_text(&p)))
+                    {
+                        requires.push(JpmsRequires {
+                            module_name: target,
+                            is_transitive,
+                            is_static,
+                        });
+                    }
+                }
+                Some("exports") => {
+                    let mut paths = directive.children().filter(|n| n.kind() == PATH);
+                    if let Some(pkg_node) = paths.next() {
+                        let package = path_text(&pkg_node);
+                        let targets = paths.map(|p| SmolStr::new(path_text(&p))).collect();
+                        exports.push(JpmsExports { package, targets });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Some(JpmsModuleSummary {
+        name,
+        is_open,
+        requires,
+        exports,
+    })
 }
 
 /// Materializes a legacy [`FileSymbols`] snapshot from a [`FileItemTree`] and [`AstIdMap`].
@@ -1150,5 +1239,66 @@ record Rec(@Nullable String name, @Nullable String[] tags) {}
             Some("String?[]")
         );
         assert_eq!(tree.members[rec.members[1]].decl_nullability, None);
+    }
+
+    #[test]
+    fn lowers_jpms_module_info_requires_and_exports() {
+        let src = "\
+open module com.example.app {
+    requires java.sql;
+    requires static java.compiler;
+    requires transitive com.example.core;
+    requires static transitive com.example.shared;
+    exports com.example.api;
+    exports com.example.spi to com.example.plugin, com.example.tools;
+}
+";
+        let root = parse(src).syntax_node();
+        let (tree, _) = lower_file_item_tree(FileId(1), &root);
+        assert_eq!(tree.module_name, Some(SmolStr::new("com.example.app")));
+        let jpms = tree.jpms_module.as_ref().expect("jpms_module should be lowered");
+        assert_eq!(jpms.name, "com.example.app");
+        assert!(jpms.is_open);
+        assert_eq!(
+            jpms.requires,
+            vec![
+                JpmsRequires {
+                    module_name: SmolStr::new("java.sql"),
+                    is_transitive: false,
+                    is_static: false,
+                },
+                JpmsRequires {
+                    module_name: SmolStr::new("java.compiler"),
+                    is_transitive: false,
+                    is_static: true,
+                },
+                JpmsRequires {
+                    module_name: SmolStr::new("com.example.core"),
+                    is_transitive: true,
+                    is_static: false,
+                },
+                JpmsRequires {
+                    module_name: SmolStr::new("com.example.shared"),
+                    is_transitive: true,
+                    is_static: true,
+                },
+            ]
+        );
+        assert_eq!(
+            jpms.exports,
+            vec![
+                JpmsExports {
+                    package: "com.example.api".to_string(),
+                    targets: vec![],
+                },
+                JpmsExports {
+                    package: "com.example.spi".to_string(),
+                    targets: vec![
+                        SmolStr::new("com.example.plugin"),
+                        SmolStr::new("com.example.tools"),
+                    ],
+                },
+            ]
+        );
     }
 }

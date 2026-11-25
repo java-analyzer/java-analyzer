@@ -1,12 +1,13 @@
 //! `java-analyzer inspect` command execution and human/JSON workspace reporting.
 
 use std::{
+    collections::BTreeSet,
     env, fs,
     io::{self, Write},
     sync::Arc,
 };
 
-use ide::{AnalysisHost, FileId, ModuleDependency, ModuleTarget};
+use ide::{AnalysisHost, FileId, ModuleDependency, ModuleId, ModuleTarget, Release};
 
 use crate::{
     cli::InspectArgs,
@@ -40,7 +41,35 @@ pub fn run_with_io<W: Write>(args: InspectArgs, out: &mut W) -> io::Result<()> {
         host.set_file_text(file_id, text);
         file_ids.push(file_id);
     }
-    host.set_workspace_files(Arc::new(file_ids));
+    if probe.layout.modules.is_empty() {
+        host.set_workspace_files(Arc::new(file_ids));
+    } else {
+        let mut assigned = BTreeSet::new();
+        let mut modules: Vec<(ModuleId, Arc<Vec<FileId>>)> =
+            Vec::with_capacity(probe.layout.modules.len());
+        for m in &probe.layout.modules {
+            let mut m_files = Vec::new();
+            for s in &m.sources {
+                for &fid in &s.files {
+                    if assigned.insert(fid) {
+                        m_files.push(fid);
+                    }
+                }
+            }
+            modules.push((m.id, Arc::new(m_files)));
+        }
+        let unassigned: Vec<FileId> = file_ids
+            .into_iter()
+            .filter(|id| !assigned.contains(id))
+            .collect();
+        if !unassigned.is_empty()
+            && let Some((_, first_files)) = modules.first_mut()
+        {
+            Arc::make_mut(first_files).extend(unassigned);
+        }
+        host.set_workspace_modules(modules);
+        host.set_workspace_module_graph(Arc::new(probe.layout.to_module_graph_data()));
+    }
 
     let analysis = host.analysis();
     let mut files_with_errors = 0usize;
@@ -239,6 +268,7 @@ fn render_inspect_json<W: Write>(
             "sources": m.sources.iter().map(|s| serde_json::json!({
                 "rel_path": s.rel_path,
                 "scope": scope_label(s.scope),
+                "release_override": s.release_override.map(Release::number),
                 "file_count": s.files.len(),
             })).collect::<Vec<_>>(),
             "resources": m.resources.iter().map(|r| serde_json::json!({

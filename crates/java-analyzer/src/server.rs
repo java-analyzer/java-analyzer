@@ -10,8 +10,9 @@ use std::{
 };
 
 use ide::{
-    Analysis, AnalysisHost, Cancellable, Cancelled, ClasspathIndex, FileId, LanguageLevel,
-    ModuleId, NavigationTarget, TypeHierarchyNode, is_path_within, normalize_rel_path,
+    Analysis, AnalysisHost, Cancellable, Cancelled, ClasspathIndex, FileId, FileOrigin,
+    LanguageLevel, ModuleGraphData, ModuleId, NavigationTarget, RootScope, TypeHierarchyNode,
+    is_path_within, normalize_rel_path,
 };
 use line_index::LineIndex;
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
@@ -184,11 +185,15 @@ impl GlobalState {
 
         let Some(probe) = &self.workspace_probe else {
             self.host.set_workspace_files(Arc::new(ids));
+            self.host
+                .set_workspace_module_graph(Arc::new(ModuleGraphData::default()));
             return;
         };
 
         if probe.layout.modules.is_empty() {
             self.host.set_workspace_files(Arc::new(ids));
+            self.host
+                .set_workspace_module_graph(Arc::new(ModuleGraphData::default()));
             return;
         }
 
@@ -207,18 +212,27 @@ impl GlobalState {
             .map(|m| (m.id, Vec::new()))
             .collect();
 
+        let mut graph = probe.layout.to_module_graph_data();
+        // Rebuild `file_origins` keyed by `GlobalState`'s live `FileId`s so newly opened
+        // buffers, closed/deleted files, and pre-probe files stay synchronized.
+        graph.file_origins.clear();
+
         for file_id in ids {
-            let mod_id = self
+            let origin = self
                 .file_urls
                 .get(&file_id)
                 .and_then(uri_to_path)
                 .and_then(|file_path| {
                     let rel = file_path.strip_prefix(&probe.workspace_dir).ok()?;
                     let norm = normalize_rel_path(&rel.to_string_lossy());
-                    if let Some((module, _)) = probe.layout.enclosing_source_root(&norm) {
-                        return Some(module.id);
+                    if let Some((module, src)) = probe.layout.enclosing_source_root(&norm) {
+                        return Some(FileOrigin {
+                            module_id: module.id,
+                            scope: src.scope,
+                            release_override: src.release_override,
+                        });
                     }
-                    probe
+                    let mod_id = probe
                         .layout
                         .modules
                         .iter()
@@ -231,10 +245,21 @@ impl GlobalState {
                             }
                         })
                         .map(|module| module.id)
+                        .unwrap_or(fallback_module);
+                    Some(FileOrigin {
+                        module_id: mod_id,
+                        scope: RootScope::from_path(&norm),
+                        release_override: None,
+                    })
                 })
-                .unwrap_or(fallback_module);
+                .unwrap_or(FileOrigin {
+                    module_id: fallback_module,
+                    scope: RootScope::Main,
+                    release_override: None,
+                });
 
-            by_module.entry(mod_id).or_default().push(file_id);
+            by_module.entry(origin.module_id).or_default().push(file_id);
+            graph.file_origins.insert(file_id, origin);
         }
 
         let modules = by_module
@@ -242,6 +267,7 @@ impl GlobalState {
             .map(|(id, file_ids)| (id, Arc::new(file_ids)))
             .collect();
         self.host.set_workspace_modules(modules);
+        self.host.set_workspace_module_graph(Arc::new(graph));
     }
 
     fn language_level_for(&self, uri: &Uri, text: &str) -> LanguageLevel {

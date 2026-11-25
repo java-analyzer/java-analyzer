@@ -6,16 +6,17 @@ use syntax::{SyntaxNode, syntax_kind::SyntaxKind::*};
 
 use crate::{
     DefDatabase,
-    hierarchy::linearized_supertypes,
+    hierarchy::linearized_supertypes_in_scope,
     infer::{
-        erase_type_vars_to_bound, find_functional_interface_sam, is_raw_class_ty,
+        erase_type_vars_to_bound, find_functional_interface_sam_in_scope, is_raw_class_ty_in_scope,
         parameter_for_arg, resolve_params_in_binary_for_member, resolve_params_in_file_for_member,
     },
+    scope::VisibleScope,
     symbols::{ImportKind, MemberKind, NullnessScope, ParamSummary, TypeKind},
     ty::{
-        Substitution, Ty, is_assignable, is_subtype, resolve_binary_type_ref_for_member,
-        resolve_type_ref_in_file_for_member, supertype_substitution_for_ty,
-        type_param_bounds_of_fqn,
+        Substitution, Ty, is_assignable_in_scope, is_subtype_in_scope,
+        resolve_binary_type_ref_for_member, resolve_type_ref_in_file_for_member,
+        supertype_substitution_for_ty_in_scope, type_param_bounds_of_fqn_in_scope,
     },
 };
 
@@ -104,18 +105,19 @@ pub(crate) fn collect_method_candidates_on_ty(
         if visited.insert(root.clone()) {
             ordered_owners.push((root.clone(), false));
         }
-        for sup in linearized_supertypes(ctx.db, &root) {
+        for sup in linearized_supertypes_in_scope(ctx.db, ctx.scope, &root) {
             if visited.insert(sup.clone()) {
                 ordered_owners.push((sup, true));
             }
         }
     }
 
-    let is_raw = is_raw_class_ty(ctx.db, recv_ty);
+    let is_raw = is_raw_class_ty_in_scope(ctx.db, ctx.scope, recv_ty);
     let mut out = Vec::new();
     for (owner_fqn, is_super) in ordered_owners {
         let owner_subst =
-            supertype_substitution_for_ty(ctx.db, recv_ty, &owner_fqn).unwrap_or_default();
+            supertype_substitution_for_ty_in_scope(ctx.db, ctx.scope, recv_ty, &owner_fqn)
+                .unwrap_or_default();
         collect_owner_methods(
             ctx,
             &OwnerMethodLookup {
@@ -243,9 +245,9 @@ pub(crate) fn collect_constructor_candidates(
     arity: usize,
 ) -> Vec<CallableCandidate> {
     let mut out = Vec::new();
-    let owner_scope = type_param_bounds_of_fqn(ctx.db, owner_fqn);
+    let owner_scope = type_param_bounds_of_fqn_in_scope(ctx.db, ctx.scope, owner_fqn);
 
-    if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.index, owner_fqn) {
+    if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.scope, owner_fqn) {
         let tree = ctx.db.file_item_tree(fid);
         let ty_item = &tree.types[tid];
         for &mid in &ty_item.members {
@@ -284,7 +286,7 @@ pub(crate) fn collect_constructor_candidates(
         return out;
     }
 
-    if let Some(bin) = ctx.classpath.type_by_fqn(owner_fqn) {
+    if let Some(bin) = ctx.scope.get_binary_type(owner_fqn) {
         for (member_index, m) in bin.members.iter().enumerate() {
             if m.kind != MemberKind::Constructor || !arity_compatible(&m.params, arity) {
                 continue;
@@ -297,7 +299,7 @@ pub(crate) fn collect_constructor_candidates(
                 );
             }
             let param_tys = resolve_params_in_binary_for_member(
-                ctx.classpath,
+                ctx.scope.classpath(),
                 bin,
                 m.nullness_scope,
                 &m.params,
@@ -330,9 +332,9 @@ fn collect_owner_methods(
     out: &mut Vec<CallableCandidate>,
 ) {
     let owner_fqn = lookup.owner_fqn;
-    let owner_scope = type_param_bounds_of_fqn(ctx.db, owner_fqn);
+    let owner_scope = type_param_bounds_of_fqn_in_scope(ctx.db, ctx.scope, owner_fqn);
 
-    if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.index, owner_fqn) {
+    if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.scope, owner_fqn) {
         let tree = ctx.db.file_item_tree(fid);
         let ty_item = &tree.types[tid];
         let exclude_static =
@@ -418,7 +420,7 @@ fn collect_owner_methods(
         return;
     }
 
-    if let Some(bin) = ctx.classpath.type_by_fqn(owner_fqn) {
+    if let Some(bin) = ctx.scope.get_binary_type(owner_fqn) {
         let exclude_static =
             lookup.is_super && matches!(bin.kind, TypeKind::Interface | TypeKind::Annotation);
         let is_record = bin.kind == TypeKind::Record;
@@ -429,7 +431,7 @@ fn collect_owner_methods(
                 {
                     let return_ty = m.type_ref.as_deref().map_or(Ty::Unknown, |raw| {
                         resolve_binary_type_ref_for_member(
-                            ctx.classpath,
+                            ctx.scope.classpath(),
                             bin,
                             m.nullness_scope,
                             raw,
@@ -470,7 +472,7 @@ fn collect_owner_methods(
                 );
             }
             let param_tys = resolve_params_in_binary_for_member(
-                ctx.classpath,
+                ctx.scope.classpath(),
                 bin,
                 m.nullness_scope,
                 &m.params,
@@ -478,7 +480,7 @@ fn collect_owner_methods(
             );
             let return_ty = m.type_ref.as_deref().map_or(Ty::Unknown, |raw| {
                 resolve_binary_type_ref_for_member(
-                    ctx.classpath,
+                    ctx.scope.classpath(),
                     bin,
                     m.nullness_scope,
                     raw,
@@ -504,8 +506,9 @@ fn collect_owner_methods(
     }
 }
 
-pub(crate) fn select_best_callable_candidate(
+pub(crate) fn select_best_callable_candidate_in_scope(
     db: &dyn DefDatabase,
+    scope: &VisibleScope,
     candidates: Vec<CallableCandidate>,
     arg_tys: &[Ty],
     arg_nodes: Option<&[SyntaxNode]>,
@@ -517,7 +520,7 @@ pub(crate) fn select_best_callable_candidate(
     let scored: Vec<(OverloadPhase, CallableCandidate)> = candidates
         .into_iter()
         .map(|cand| {
-            let phase = score_candidate_phase(db, &cand, arg_tys, arg_nodes);
+            let phase = score_candidate_phase_in_scope(db, scope, &cand, arg_tys, arg_nodes);
             (phase, cand)
         })
         .collect();
@@ -531,7 +534,7 @@ pub(crate) fn select_best_callable_candidate(
 
     let mut best = in_phase.drain(..1).next()?;
     for cand in in_phase {
-        if is_candidate_strictly_more_specific(db, &cand, &best, arg_tys.len()) {
+        if is_candidate_strictly_more_specific_in_scope(db, scope, &cand, &best, arg_tys.len()) {
             best = cand;
         }
     }
@@ -568,8 +571,9 @@ fn candidate_param_ty(
     }
 }
 
-pub(crate) fn score_candidate_phase(
+pub(crate) fn score_candidate_phase_in_scope(
     db: &dyn DefDatabase,
+    scope: &VisibleScope,
     cand: &CallableCandidate,
     arg_tys: &[Ty],
     arg_nodes: Option<&[SyntaxNode]>,
@@ -590,7 +594,7 @@ pub(crate) fn score_candidate_phase(
                 break;
             };
             let arg_node = arg_nodes.and_then(|ns| ns.get(idx));
-            match classify_arg_compatibility(db, arg_ty, arg_node, &p_ty, &m_tvars) {
+            match classify_arg_compatibility(db, scope, arg_ty, arg_node, &p_ty, &m_tvars) {
                 ArgCompat::Strict => {}
                 ArgCompat::Loose => all_strict = false,
                 ArgCompat::IncompatibleOrUnknown => {
@@ -625,7 +629,7 @@ pub(crate) fn score_candidate_phase(
             };
             let arg_node = arg_nodes.and_then(|ns| ns.get(idx));
             if matches!(
-                classify_arg_compatibility(db, arg_ty, arg_node, &p_ty, &m_tvars),
+                classify_arg_compatibility(db, scope, arg_ty, arg_node, &p_ty, &m_tvars),
                 ArgCompat::IncompatibleOrUnknown
             ) {
                 all_varargs_ok = false;
@@ -649,6 +653,7 @@ enum ArgCompat {
 
 fn classify_arg_compatibility(
     db: &dyn DefDatabase,
+    scope: &VisibleScope,
     arg_ty: &Ty,
     arg_node: Option<&SyntaxNode>,
     param_ty: &Ty,
@@ -657,7 +662,7 @@ fn classify_arg_compatibility(
     if let Some(node) = arg_node {
         match node.kind() {
             LAMBDA_EXPR => {
-                let Some(sam) = find_functional_interface_sam(db, param_ty) else {
+                let Some(sam) = find_functional_interface_sam_in_scope(db, scope, param_ty) else {
                     return ArgCompat::IncompatibleOrUnknown;
                 };
                 let lambda_arity = node
@@ -671,7 +676,7 @@ fn classify_arg_compatibility(
                 };
             }
             METHOD_REF_EXPR => {
-                return if find_functional_interface_sam(db, param_ty).is_some() {
+                return if find_functional_interface_sam_in_scope(db, scope, param_ty).is_some() {
                     ArgCompat::Strict
                 } else {
                     ArgCompat::IncompatibleOrUnknown
@@ -686,12 +691,12 @@ fn classify_arg_compatibility(
     }
 
     if contains_any_tvar(param_ty, method_tvars) {
-        return classify_generic_param_compat(db, arg_ty, param_ty, method_tvars);
+        return classify_generic_param_compat(db, scope, arg_ty, param_ty, method_tvars);
     }
 
-    if is_subtype(db, arg_ty, param_ty) {
+    if is_subtype_in_scope(db, scope, arg_ty, param_ty) {
         ArgCompat::Strict
-    } else if is_assignable(db, arg_ty, param_ty) {
+    } else if is_assignable_in_scope(db, scope, arg_ty, param_ty) {
         ArgCompat::Loose
     } else {
         ArgCompat::IncompatibleOrUnknown
@@ -700,6 +705,7 @@ fn classify_arg_compatibility(
 
 fn classify_generic_param_compat(
     db: &dyn DefDatabase,
+    scope: &VisibleScope,
     arg_ty: &Ty,
     param_ty: &Ty,
     method_tvars: &FxHashSet<SmolStr>,
@@ -708,7 +714,8 @@ fn classify_generic_param_compat(
         Ty::TypeVar { name, bounds, .. } if method_tvars.contains(name) => {
             let satisfies_bounds = |ref_ty: &Ty| -> bool {
                 bounds.iter().all(|b| {
-                    contains_any_tvar(b, method_tvars) || is_subtype(db, ref_ty, b)
+                    contains_any_tvar(b, method_tvars)
+                        || is_subtype_in_scope(db, scope, ref_ty, b)
                 })
             };
             match arg_ty {
@@ -733,13 +740,13 @@ fn classify_generic_param_compat(
         Ty::Array { elem: p_elem, .. } => match arg_ty {
             Ty::Null => ArgCompat::Strict,
             Ty::Array { elem: a_elem, .. } => {
-                classify_generic_param_compat(db, a_elem, p_elem, method_tvars)
+                classify_generic_param_compat(db, scope, a_elem, p_elem, method_tvars)
             }
             _ => ArgCompat::IncompatibleOrUnknown,
         },
         Ty::Class { fqn, .. } => {
             let raw_target = Ty::raw_class(fqn);
-            if is_subtype(db, arg_ty, &raw_target) {
+            if is_subtype_in_scope(db, scope, arg_ty, &raw_target) {
                 ArgCompat::Strict
             } else {
                 ArgCompat::IncompatibleOrUnknown
@@ -777,17 +784,19 @@ fn contains_any_tvar_inner(ty: &Ty, tvars: &FxHashSet<SmolStr>, depth: usize) ->
     }
 }
 
-pub(crate) fn is_candidate_strictly_more_specific(
+pub(crate) fn is_candidate_strictly_more_specific_in_scope(
     db: &dyn DefDatabase,
+    scope: &VisibleScope,
     a: &CallableCandidate,
     b: &CallableCandidate,
     arity: usize,
 ) -> bool {
-    more_specific_or_eq(db, a, b, arity) && !more_specific_or_eq(db, b, a, arity)
+    more_specific_or_eq(db, scope, a, b, arity) && !more_specific_or_eq(db, scope, b, a, arity)
 }
 
 fn more_specific_or_eq(
     db: &dyn DefDatabase,
+    scope: &VisibleScope,
     a: &CallableCandidate,
     b: &CallableCandidate,
     arity: usize,
@@ -805,7 +814,7 @@ fn more_specific_or_eq(
         let Some(pb) = candidate_param_ty(b, &subst_b, idx, for_elem) else {
             return false;
         };
-        if pa != pb && !is_subtype(db, &pa, &pb) {
+        if pa != pb && !is_subtype_in_scope(db, scope, &pa, &pb) {
             return false;
         }
     }

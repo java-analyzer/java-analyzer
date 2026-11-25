@@ -7,9 +7,9 @@ use smol_str::SmolStr;
 
 use crate::{
     DefDatabase,
-    classpath::ClasspathIndex,
-    hierarchy::linearized_supertypes,
-    symbols::{TypeKind, WorkspaceIndex},
+    hierarchy::linearized_supertypes_in_scope,
+    scope::VisibleScope,
+    symbols::TypeKind,
 };
 
 use super::{
@@ -19,7 +19,7 @@ use super::{
         TypeResolveEnv, apply_nullness_scope, effective_nullness_scope_for_binary_type,
         effective_nullness_scope_in_file_tree, resolve_binary_type_ref_in_db,
         resolve_type_ref_in_file_inner, type_param_bounds_for_binary,
-        type_param_bounds_for_workspace_item, type_params_of_fqn,
+        type_param_bounds_for_workspace_item, type_params_of_fqn_in_scope,
     },
 };
 
@@ -68,16 +68,29 @@ pub(crate) fn binary_numeric_promotion(a: &Ty, b: &Ty) -> Option<PrimitiveType> 
 
 /// Computes the [`Substitution`] from any [`Ty`] (`Class`, `TypeVar`, `Intersection`, `Array`)
 /// to `target_fqn`.
+#[cfg(test)]
+#[expect(dead_code, reason = "kept as convenience wrapper for unit tests")]
 pub(crate) fn supertype_substitution_for_ty(
     db: &dyn DefDatabase,
     ty: &Ty,
     target_fqn: &str,
 ) -> Option<Substitution> {
-    supertype_substitution_for_ty_inner(db, ty, target_fqn, 0)
+    let scope = VisibleScope::flat(db);
+    supertype_substitution_for_ty_in_scope(db, &scope, ty, target_fqn)
+}
+
+pub(crate) fn supertype_substitution_for_ty_in_scope(
+    db: &dyn DefDatabase,
+    scope: &VisibleScope,
+    ty: &Ty,
+    target_fqn: &str,
+) -> Option<Substitution> {
+    supertype_substitution_for_ty_inner(db, scope, ty, target_fqn, 0)
 }
 
 fn supertype_substitution_for_ty_inner(
     db: &dyn DefDatabase,
+    scope: &VisibleScope,
     ty: &Ty,
     target_fqn: &str,
     depth: usize,
@@ -86,19 +99,21 @@ fn supertype_substitution_for_ty_inner(
         return None;
     }
     match ty {
-        Ty::Class { fqn, type_args, .. } => supertype_substitution(db, fqn, type_args, target_fqn),
+        Ty::Class { fqn, type_args, .. } => {
+            supertype_substitution_in_scope(db, scope, fqn, type_args, target_fqn)
+        }
         Ty::TypeVar { bounds, .. } => {
             if bounds.is_empty() {
                 (target_fqn == OBJECT_FQN).then(Substitution::default)
             } else {
-                bounds
-                    .iter()
-                    .find_map(|b| supertype_substitution_for_ty_inner(db, b, target_fqn, depth + 1))
+                bounds.iter().find_map(|b| {
+                    supertype_substitution_for_ty_inner(db, scope, b, target_fqn, depth + 1)
+                })
             }
         }
-        Ty::Intersection(members) => members
-            .iter()
-            .find_map(|m| supertype_substitution_for_ty_inner(db, m, target_fqn, depth + 1)),
+        Ty::Intersection(members) => members.iter().find_map(|m| {
+            supertype_substitution_for_ty_inner(db, scope, m, target_fqn, depth + 1)
+        }),
         Ty::Array { .. } => matches!(
             target_fqn,
             OBJECT_FQN | CLONEABLE_FQN | SERIALIZABLE_FQN
@@ -110,6 +125,7 @@ fn supertype_substitution_for_ty_inner(
 
 /// Walks the inheritance graph from `sub_fqn<sub_args>` to `target_fqn` and computes the
 /// instantiated [`Substitution`] mapping `target_fqn`'s type parameters to their substituted [`TypeArg`]s.
+#[cfg(test)]
 #[must_use]
 pub(crate) fn supertype_substitution(
     db: &dyn DefDatabase,
@@ -117,11 +133,20 @@ pub(crate) fn supertype_substitution(
     sub_args: &[TypeArg],
     target_fqn: &str,
 ) -> Option<Substitution> {
-    let workspace = db.workspace_index();
-    let classpath = db.classpath_index();
+    let scope = VisibleScope::flat(db);
+    supertype_substitution_in_scope(db, &scope, sub_fqn, sub_args, target_fqn)
+}
 
+#[must_use]
+pub(crate) fn supertype_substitution_in_scope(
+    db: &dyn DefDatabase,
+    scope: &VisibleScope,
+    sub_fqn: &str,
+    sub_args: &[TypeArg],
+    target_fqn: &str,
+) -> Option<Substitution> {
     if sub_fqn == target_fqn {
-        let params = type_params_of_fqn(db, sub_fqn);
+        let params = type_params_of_fqn_in_scope(db, scope, sub_fqn);
         if !params.is_empty() && sub_args.is_empty() {
             return Some(Substitution::default());
         }
@@ -141,8 +166,7 @@ pub(crate) fn supertype_substitution(
             continue;
         }
 
-        let (type_params, super_tys, exists) =
-            direct_generic_supertypes(db, &workspace, &classpath, &cur_fqn);
+        let (type_params, super_tys, exists) = direct_generic_supertypes(db, scope, &cur_fqn);
         if depth == 0 {
             start_exists = exists;
         }
@@ -176,7 +200,7 @@ pub(crate) fn supertype_substitution(
             };
 
             if sup_fqn == target_fqn {
-                let target_params = type_params_of_fqn(db, target_fqn);
+                let target_params = type_params_of_fqn_in_scope(db, scope, target_fqn);
                 if !target_params.is_empty() && next_args.is_empty() {
                     return Some(Substitution::default());
                 }
@@ -201,25 +225,30 @@ pub(crate) fn supertype_substitution(
 
 fn direct_generic_supertypes(
     db: &dyn DefDatabase,
-    workspace: &WorkspaceIndex,
-    classpath: &ClasspathIndex,
+    scope: &VisibleScope,
     fqn: &str,
 ) -> (Vec<SmolStr>, Vec<Ty>, bool) {
-    if let Some((fid, tid)) = workspace.get_type(fqn) {
+    if let Some((fid, tid)) = scope.get_workspace_type(fqn) {
         let tree = db.file_item_tree(fid);
         let ty_item = &tree.types[tid];
-        let scope = type_param_bounds_for_workspace_item(db, &tree, ty_item);
-        let eff_scope = effective_nullness_scope_in_file_tree(db, &tree, workspace, ty_item);
+        let owned_target_scope;
+        let resolve_scope = if !scope.is_scoped() || scope.caller_file() == Some(fid) {
+            scope
+        } else {
+            owned_target_scope = VisibleScope::for_file(db, fid);
+            &owned_target_scope
+        };
+        let tp_scope = type_param_bounds_for_workspace_item(db, resolve_scope, &tree, ty_item);
+        let eff_scope = effective_nullness_scope_in_file_tree(db, &tree, resolve_scope, ty_item);
         let mut out = Vec::new();
         let mut visited_tv = FxHashSet::default();
         let env = TypeResolveEnv {
             db,
             file_tree: &tree,
-            workspace,
-            classpath,
+            scope: resolve_scope,
             owner_ty: Some(ty_item),
             nullness_scope: eff_scope,
-            type_params_in_scope: &scope,
+            type_params_in_scope: &tp_scope,
         };
 
         let mut resolve_ws_sup = |raw: &str| {
@@ -267,8 +296,9 @@ fn direct_generic_supertypes(
         return (ty_item.type_params.clone(), out, true);
     }
 
-    if let Some(bin) = classpath.type_by_fqn(fqn) {
-        let scope = type_param_bounds_for_binary(db, bin);
+    if let Some(bin) = scope.get_binary_type(fqn) {
+        let classpath = scope.classpath();
+        let tp_scope = type_param_bounds_for_binary(db, bin);
         let eff_scope = effective_nullness_scope_for_binary_type(classpath, bin);
         let mut out = Vec::new();
         let mut visited_tv = FxHashSet::default();
@@ -279,7 +309,7 @@ fn direct_generic_supertypes(
                 bin,
                 eff_scope,
                 raw,
-                &scope,
+                &tp_scope,
                 &mut visited_tv,
                 0,
             );
@@ -358,9 +388,21 @@ fn direct_generic_supertypes(
 // ---- Subtyping, Assignability & LUB ----
 
 /// Returns `true` if `sub` is a subtype of `sup` (JLS §4.10).
+#[cfg(test)]
 #[must_use]
 pub(crate) fn is_subtype(db: &dyn DefDatabase, sub: &Ty, sup: &Ty) -> bool {
-    is_subtype_inner(db, sub, sup, 0)
+    let scope = VisibleScope::flat(db);
+    is_subtype_in_scope(db, &scope, sub, sup)
+}
+
+#[must_use]
+pub(crate) fn is_subtype_in_scope(
+    db: &dyn DefDatabase,
+    scope: &VisibleScope,
+    sub: &Ty,
+    sup: &Ty,
+) -> bool {
+    is_subtype_inner(db, scope, sub, sup, 0)
 }
 
 const fn nullability_is_subtype(sub: Nullability, sup: Nullability) -> bool {
@@ -386,7 +428,13 @@ const fn lub_nullability(a: Nullability, b: Nullability) -> Nullability {
     }
 }
 
-fn is_subtype_inner(db: &dyn DefDatabase, sub: &Ty, sup: &Ty, depth: usize) -> bool {
+fn is_subtype_inner(
+    db: &dyn DefDatabase,
+    scope: &VisibleScope,
+    sub: &Ty,
+    sup: &Ty,
+    depth: usize,
+) -> bool {
     if depth >= MAX_SUBST_DEPTH {
         return false;
     }
@@ -402,7 +450,7 @@ fn is_subtype_inner(db: &dyn DefDatabase, sub: &Ty, sup: &Ty, depth: usize) -> b
         return !sup_members.is_empty()
             && sup_members
                 .iter()
-                .all(|m| is_subtype_inner(db, sub, m, depth + 1));
+                .all(|m| is_subtype_inner(db, scope, sub, m, depth + 1));
     }
 
     // `null` is a subtype of every nullable reference type (NOT `Point!`, `T!`, `String[]!`, or primitives).
@@ -414,7 +462,7 @@ fn is_subtype_inner(db: &dyn DefDatabase, sub: &Ty, sup: &Ty, depth: usize) -> b
     if let Ty::Intersection(sub_members) = sub {
         return sub_members
             .iter()
-            .any(|m| is_subtype_inner(db, m, sup, depth + 1));
+            .any(|m| is_subtype_inner(db, scope, m, sup, depth + 1));
     }
 
     match (sub, sup) {
@@ -443,11 +491,11 @@ fn is_subtype_inner(db: &dyn DefDatabase, sub: &Ty, sup: &Ty, depth: usize) -> b
                 }
             };
             if bounds.is_empty() {
-                is_subtype_inner(db, &apply_null(Ty::object()), sup, depth + 1)
+                is_subtype_inner(db, scope, &apply_null(Ty::object()), sup, depth + 1)
             } else {
                 bounds
                     .iter()
-                    .any(|b| is_subtype_inner(db, &apply_null(b.clone()), sup, depth + 1))
+                    .any(|b| is_subtype_inner(db, scope, &apply_null(b.clone()), sup, depth + 1))
             }
         }
         (
@@ -466,7 +514,7 @@ fn is_subtype_inner(db: &dyn DefDatabase, sub: &Ty, sup: &Ty, depth: usize) -> b
             if sub_elem.is_primitive() || sup_elem.is_primitive() {
                 sub_elem == sup_elem
             } else {
-                is_subtype_inner(db, sub_elem, sup_elem, depth + 1)
+                is_subtype_inner(db, scope, sub_elem, sup_elem, depth + 1)
             }
         }
         (
@@ -500,7 +548,7 @@ fn is_subtype_inner(db: &dyn DefDatabase, sub: &Ty, sup: &Ty, depth: usize) -> b
             },
         ) => {
             nullability_is_subtype(*sub_null, *sup_null)
-                && is_class_subtype(db, sub_fqn, sub_args, sup_fqn, sup_args, depth)
+                && is_class_subtype(db, scope, sub_fqn, sub_args, sup_fqn, sup_args, depth)
         }
         _ => false,
     }
@@ -508,6 +556,7 @@ fn is_subtype_inner(db: &dyn DefDatabase, sub: &Ty, sup: &Ty, depth: usize) -> b
 
 fn is_class_subtype(
     db: &dyn DefDatabase,
+    scope: &VisibleScope,
     sub_fqn: &str,
     sub_args: &[TypeArg],
     sup_fqn: &str,
@@ -532,14 +581,14 @@ fn is_class_subtype(
         return sub_args
             .iter()
             .zip(sup_args.iter())
-            .all(|(sa, pa)| type_arg_contained_by(db, sa, pa, depth + 1));
+            .all(|(sa, pa)| type_arg_contained_by(db, scope, sa, pa, depth + 1));
     }
 
-    let Some(subst) = supertype_substitution(db, sub_fqn, sub_args, sup_fqn) else {
+    let Some(subst) = supertype_substitution_in_scope(db, scope, sub_fqn, sub_args, sup_fqn) else {
         // Fallback to linearized_supertypes when `sub_fqn` isn't indexed directly for generics
         // or if `sup_args` is empty.
         return sup_args.is_empty()
-            && linearized_supertypes(db, sub_fqn)
+            && linearized_supertypes_in_scope(db, scope, sub_fqn)
                 .iter()
                 .any(|s| s == sup_fqn);
     };
@@ -548,13 +597,13 @@ fn is_class_subtype(
         return true;
     }
 
-    let sub_params = type_params_of_fqn(db, sub_fqn);
+    let sub_params = type_params_of_fqn_in_scope(db, scope, sub_fqn);
     if !sub_params.is_empty() && sub_args.is_empty() {
         // Raw subtype is compatible with any parameterization of `sup_fqn`.
         return true;
     }
 
-    let sup_params = type_params_of_fqn(db, sup_fqn);
+    let sup_params = type_params_of_fqn_in_scope(db, scope, sup_fqn);
     if sup_params.len() != sup_args.len() {
         return false;
     }
@@ -564,7 +613,7 @@ fn is_class_subtype(
             // Raw supertype path in hierarchy.
             return true;
         };
-        if !type_arg_contained_by(db, sub_arg, sup_arg, depth + 1) {
+        if !type_arg_contained_by(db, scope, sub_arg, sup_arg, depth + 1) {
             return false;
         }
     }
@@ -573,6 +622,7 @@ fn is_class_subtype(
 
 fn type_arg_contained_by(
     db: &dyn DefDatabase,
+    scope: &VisibleScope,
     sub_arg: &TypeArg,
     sup_arg: &TypeArg,
     depth: usize,
@@ -584,23 +634,23 @@ fn type_arg_contained_by(
         (_, TypeArg::Wildcard(WildcardBound::Unbounded)) => true,
         (TypeArg::Type(s), TypeArg::Type(t)) => s == t,
         (TypeArg::Type(s), TypeArg::Wildcard(WildcardBound::Extends(u))) => {
-            is_subtype_inner(db, s, u, depth + 1)
+            is_subtype_inner(db, scope, s, u, depth + 1)
         }
         (TypeArg::Type(s), TypeArg::Wildcard(WildcardBound::Super(l))) => {
-            is_subtype_inner(db, l, s, depth + 1)
+            is_subtype_inner(db, scope, l, s, depth + 1)
         }
         (
             TypeArg::Wildcard(WildcardBound::Extends(u1)),
             TypeArg::Wildcard(WildcardBound::Extends(u2)),
-        ) => is_subtype_inner(db, u1, u2, depth + 1),
+        ) => is_subtype_inner(db, scope, u1, u2, depth + 1),
         (
             TypeArg::Wildcard(WildcardBound::Super(l1)),
             TypeArg::Wildcard(WildcardBound::Super(l2)),
-        ) => is_subtype_inner(db, l2, l1, depth + 1),
+        ) => is_subtype_inner(db, scope, l2, l1, depth + 1),
         (
             TypeArg::Wildcard(WildcardBound::Unbounded),
             TypeArg::Wildcard(WildcardBound::Extends(u)),
-        ) => is_subtype_inner(db, &Ty::object(), u, depth + 1),
+        ) => is_subtype_inner(db, scope, &Ty::object(), u, depth + 1),
         _ => false,
     }
 }
@@ -608,9 +658,21 @@ fn type_arg_contained_by(
 /// Returns `true` if `from` is assignment-compatible with `to` (JLS §5.2: subtyping plus
 /// primitive boxing/unboxing and widening, and resilient migration from `Unspecified`
 /// nullability to `NonNull` while rejecting `Null`/`Nullable` -> `NonNull`).
+#[cfg(test)]
 #[must_use]
 pub(crate) fn is_assignable(db: &dyn DefDatabase, from: &Ty, to: &Ty) -> bool {
-    if is_subtype(db, from, to) {
+    let scope = VisibleScope::flat(db);
+    is_assignable_in_scope(db, &scope, from, to)
+}
+
+#[must_use]
+pub(crate) fn is_assignable_in_scope(
+    db: &dyn DefDatabase,
+    scope: &VisibleScope,
+    from: &Ty,
+    to: &Ty,
+) -> bool {
+    if is_subtype_in_scope(db, scope, from, to) {
         return true;
     }
     // Resilient migration: unannotated (`Unspecified`) reference types may be assigned to
@@ -620,13 +682,13 @@ pub(crate) fn is_assignable(db: &dyn DefDatabase, from: &Ty, to: &Ty) -> bool {
         && !matches!(from, Ty::Null | Ty::Unknown | Ty::Void)
     {
         let from_non_null = from.clone().with_nullability(Nullability::NonNull);
-        if is_subtype(db, &from_non_null, to) {
+        if is_subtype_in_scope(db, scope, &from_non_null, to) {
             return true;
         }
     }
     // Boxing conversion followed by optional widening reference conversion.
     if from.is_primitive() {
-        return is_subtype(db, &from.boxed(), to);
+        return is_subtype_in_scope(db, scope, &from.boxed(), to);
     }
     // Unboxing conversion followed by optional widening primitive conversion.
     if let Ty::Class {
@@ -645,12 +707,30 @@ pub(crate) fn is_assignable(db: &dyn DefDatabase, from: &Ty, to: &Ty) -> bool {
 }
 
 /// Computes the least upper bound (LUB) of `a` and `b` for ternary and switch expression branches.
+#[cfg(test)]
 #[must_use]
 pub(crate) fn least_upper_bound(db: &dyn DefDatabase, a: &Ty, b: &Ty) -> Ty {
-    least_upper_bound_inner(db, a, b, 0)
+    let scope = VisibleScope::flat(db);
+    least_upper_bound_in_scope(db, &scope, a, b)
 }
 
-fn least_upper_bound_inner(db: &dyn DefDatabase, a: &Ty, b: &Ty, depth: usize) -> Ty {
+#[must_use]
+pub(crate) fn least_upper_bound_in_scope(
+    db: &dyn DefDatabase,
+    scope: &VisibleScope,
+    a: &Ty,
+    b: &Ty,
+) -> Ty {
+    least_upper_bound_inner(db, scope, a, b, 0)
+}
+
+fn least_upper_bound_inner(
+    db: &dyn DefDatabase,
+    scope: &VisibleScope,
+    a: &Ty,
+    b: &Ty,
+    depth: usize,
+) -> Ty {
     if depth >= MAX_SUBST_DEPTH {
         return Ty::object();
     }
@@ -692,7 +772,13 @@ fn least_upper_bound_inner(db: &dyn DefDatabase, a: &Ty, b: &Ty, depth: usize) -
             // Mixed boolean & numeric: box both and find reference LUB.
             let ba = pa.boxed_fqn();
             let bb = pb.boxed_fqn();
-            return least_upper_bound_inner(db, &Ty::raw_class(ba), &Ty::raw_class(bb), depth + 1);
+            return least_upper_bound_inner(
+                db,
+                scope,
+                &Ty::raw_class(ba),
+                &Ty::raw_class(bb),
+                depth + 1,
+            );
         }
         (Ty::Primitive(p), Ty::Class { fqn, type_args, .. })
         | (Ty::Class { fqn, type_args, .. }, Ty::Primitive(p)) => {
@@ -708,15 +794,15 @@ fn least_upper_bound_inner(db: &dyn DefDatabase, a: &Ty, b: &Ty, depth: usize) -
             }
             let boxed = Ty::raw_class(p.boxed_fqn());
             let other = if a.is_primitive() { b } else { a };
-            return least_upper_bound_inner(db, &boxed, other, depth + 1);
+            return least_upper_bound_inner(db, scope, &boxed, other, depth + 1);
         }
         _ => {}
     }
 
-    if is_subtype(db, a, b) {
+    if is_subtype_in_scope(db, scope, a, b) {
         return b.clone();
     }
-    if is_subtype(db, b, a) {
+    if is_subtype_in_scope(db, scope, b, a) {
         return a.clone();
     }
 
@@ -727,7 +813,7 @@ fn least_upper_bound_inner(db: &dyn DefDatabase, a: &Ty, b: &Ty, depth: usize) -
             if ea.is_primitive() || eb.is_primitive() {
                 Ty::object().with_nullability(merged_null)
             } else {
-                Ty::array(least_upper_bound_inner(db, ea, eb, depth + 1))
+                Ty::array(least_upper_bound_inner(db, scope, ea, eb, depth + 1))
                     .with_nullability(merged_null)
             }
         }
@@ -745,26 +831,30 @@ fn least_upper_bound_inner(db: &dyn DefDatabase, a: &Ty, b: &Ty, depth: usize) -
         ) => {
             let mut b_supers: FxHashSet<String> = FxHashSet::default();
             b_supers.insert(fb.clone());
-            for s in linearized_supertypes(db, fb) {
+            for s in linearized_supertypes_in_scope(db, scope, fb) {
                 b_supers.insert(s);
             }
 
             let mut a_chain = Vec::with_capacity(1);
             a_chain.push(fa.clone());
-            a_chain.extend(linearized_supertypes(db, fa));
+            a_chain.extend(linearized_supertypes_in_scope(db, scope, fa));
 
             for common_fqn in a_chain {
                 if !b_supers.contains(&common_fqn) {
                     continue;
                 }
-                let params = type_params_of_fqn(db, &common_fqn);
+                let params = type_params_of_fqn_in_scope(db, scope, &common_fqn);
                 if params.is_empty() {
                     return Ty::raw_class(common_fqn).with_nullability(merged_null);
                 }
-                let Some(subst_a) = supertype_substitution(db, fa, args_a, &common_fqn) else {
+                let Some(subst_a) =
+                    supertype_substitution_in_scope(db, scope, fa, args_a, &common_fqn)
+                else {
                     return Ty::raw_class(common_fqn).with_nullability(merged_null);
                 };
-                let Some(subst_b) = supertype_substitution(db, fb, args_b, &common_fqn) else {
+                let Some(subst_b) =
+                    supertype_substitution_in_scope(db, scope, fb, args_b, &common_fqn)
+                else {
                     return Ty::raw_class(common_fqn).with_nullability(merged_null);
                 };
                 if subst_a.map.is_empty() || subst_b.map.is_empty() {
@@ -776,7 +866,7 @@ fn least_upper_bound_inner(db: &dyn DefDatabase, a: &Ty, b: &Ty, depth: usize) -
                     else {
                         return Ty::raw_class(common_fqn).with_nullability(merged_null);
                     };
-                    merged_args.push(lub_type_arg(db, arg_a, arg_b, depth + 1));
+                    merged_args.push(lub_type_arg(db, scope, arg_a, arg_b, depth + 1));
                 }
                 return Ty::class(common_fqn, merged_args).with_nullability(merged_null);
             }
@@ -804,19 +894,25 @@ fn least_upper_bound_inner(db: &dyn DefDatabase, a: &Ty, b: &Ty, depth: usize) -
                 .cloned()
                 .unwrap_or_else(Ty::object)
                 .with_nullability(*nullability);
-            least_upper_bound_inner(db, &upper, other, depth + 1)
+            least_upper_bound_inner(db, scope, &upper, other, depth + 1)
         }
         _ => Ty::object().with_nullability(merged_null),
     }
 }
 
-fn lub_type_arg(db: &dyn DefDatabase, a: &TypeArg, b: &TypeArg, depth: usize) -> TypeArg {
+fn lub_type_arg(
+    db: &dyn DefDatabase,
+    scope: &VisibleScope,
+    a: &TypeArg,
+    b: &TypeArg,
+    depth: usize,
+) -> TypeArg {
     if a == b {
         return a.clone();
     }
     match (a, b) {
         (TypeArg::Type(ta), TypeArg::Type(tb)) => {
-            let l = least_upper_bound_inner(db, ta, tb, depth + 1);
+            let l = least_upper_bound_inner(db, scope, ta, tb, depth + 1);
             if l == Ty::object() || matches!(l, Ty::Unknown) {
                 TypeArg::Wildcard(WildcardBound::Unbounded)
             } else {
@@ -832,7 +928,7 @@ fn lub_type_arg(db: &dyn DefDatabase, a: &TypeArg, b: &TypeArg, depth: usize) ->
             let ub = type_arg_upper(b);
             match (ua, ub) {
                 (Some(ta), Some(tb)) => {
-                    let l = least_upper_bound_inner(db, ta, tb, depth + 1);
+                    let l = least_upper_bound_inner(db, scope, ta, tb, depth + 1);
                     if l == Ty::object() || matches!(l, Ty::Unknown) {
                         TypeArg::Wildcard(WildcardBound::Unbounded)
                     } else {

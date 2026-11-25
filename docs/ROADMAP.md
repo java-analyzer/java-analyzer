@@ -8,7 +8,7 @@ Prior to `v1.0.0`, minor `0.x.0` milestones track cohesive user-facing capabilit
 
 | Milestone | Theme | Specs & Deliverables | Status |
 |-----------|-------|----------------------|--------|
-| **`v0.1.0`** | **Core Semantic Engine & Fast Navigation** | **0001–0008** (done), **0017–0018** (done), **0020 Phase A** (done), **0021 Phase 1** (done), **0009** *(remaining: module visibility & MR-JAR source roots)*, Zed/VSCode/Neovim/Helix clients + prebuilt release binaries | ~90% complete |
+| **`v0.1.0`** | **Core Semantic Engine & Fast Navigation** | **0001–0009** (done), **0017–0018** (done), **0020 Phase A** (done), **0021 Phase 1** (done), **0022** *(release & publishing pipeline)*, Zed/VSCode/Neovim/Helix clients | In progress (`0022` final step) |
 | **`v0.2.0`** | **Authoring Essentials & Public Docs Portal** | **0010** (Code Completion + auto-import), **0011** (References, Highlight, Workspace Symbols, Rename), **0019** (Astro/Starlight GitHub Pages site & Diátaxis docs) | Planned |
 | **`v0.3.0`** | **Live Typechecking, Null-Safety & Quick-Fixes** | **0012** (Semantic Diagnostics, Quick-Fix Code Actions, New Java Type Templates), **0020 Phase B** (Semantic Diagnostic Conformance), **0021 Phase 2** (Null-Safety Inspections) | Planned |
 | **`v0.4.0`** | **Rich Editor Ergonomics** | **0013** (`signatureHelp`, `inlayHint` for `var`/chains/params, `semanticTokens/full`, `foldingRange`) | Planned |
@@ -29,6 +29,7 @@ Prior to `v1.0.0`, minor `0.x.0` milestones track cohesive user-facing capabilit
 | **0006** | Pure-Rust JDK (`jimage` / `ct.sym` / `jmods` / `rt.jar`) & JAR/MR-JAR (JEP 238) binary classpath indexing (`ristretto_classfile`), on-demand `src.zip`/Javadoc attachment & stub materialization | Done |
 | **0007** | Cross-workspace & binary type hierarchy (`extends` / `implements` / `permits`), inherited member & `super` resolution, `textDocument/implementation`, `textDocument/typeDefinition`, `typeHierarchy/*` | Done |
 | **0008** | Structured `Ty` IR (with Valhalla `TypeIdentity` & `Nullability` hooks), generic substitution across source & binary supertypes, bidirectional expression/`var`/lambda SAM inference, JLS §15.12.2 overload resolution | Done |
+| **0009** | Module-scoped symbol visibility (`ModuleId`, `Main`/`Test` isolation, transitive `exported` edges, JPMS `requires`/`exports`) & JEP 238 Multi-Release source-root overlays (`src/main/java<N>`) | Done |
 | **0017** | Deterministic `cargo xtask report` conformance report generator (`CONFORMANCE.md`) | Done |
 | **0018** | Reproducible 9-repo × 4-server LSP benchmark suite (`cargo xtask bench` / `bench-plot`), light/dark SVG charts & interactive Vega-Lite HTML report (`BENCHMARKS.md`) | Done |
 | **0020 (Phase A)** | Rich `ide::Diagnostic` codes/related-info/help, Tier 1 `rustc`-style ASCII caret snapshots + UX invariants, Tier 2 `cargo xtask diag-conformance --phase syntax` | Done (Phase B in `v0.3.0`) |
@@ -76,8 +77,8 @@ flowchart LR
 
 ## Release Infrastructure Track (`[v0.1.0]`)
 
-- **Release Binaries & Nightly Real-World Corpus Job** *(Planned in [nightly-corpus-and-release-binaries.md](plans/nightly-corpus-and-release-binaries.md))*
-  - Publish prebuilt `java-analyzer` binaries (releases + nightly) and run a scheduled nightly CI job executing `java-analyzer inspect --json` and conformance suites against real-world Java repositories.
+- **Spec 0022 — Release Process, Packaging & Publishing** *(Accepted in [0022-release-process-and-publishing.md](specs/0022-release-process-and-publishing.md))*
+  - Cross-platform GitHub Releases (`java-analyzer/java-analyzer`), `cargo xtask release-prep`, `mise` & `cargo-binstall` support, auto-downloading/auto-upgrading Zed & universal VS Code extensions, and nightly real-world corpus CI.
 
 ---
 
@@ -88,10 +89,7 @@ flowchart LR
 - **Spec 0007 — Type Hierarchy, Inheritance & `super` Resolution** *(Done)*
 - **Spec 0008 — Expression Type Inference & Generics** *(Done)*
 - **Spec 0021 (Phase 1) — Nullability & Null-Restricted Types Model & Hover** *(Done)*
-- **Spec 0009 — Module-Scoped Visibility & Multi-Release Source Roots (JEP 238)** `[v0.1.0]`
-  - Enforce Spec 0004 `ModuleId`, `main`/`test` scopes, and JPMS `requires`/`exports` boundaries in `DefDatabase`.
-  - Support per-source-root release overrides for Maven/Gradle multi-release JAR source trees (e.g. `src/main/java9`, `src/main/java17`, `src/main/java21`, `src/main/versions/<N>`), including versioned class/module-info overlays.
-  - *(Note: position-independent `FileItemTree` & `AstIdMap` already shipped on `main`.)*
+- **Spec 0009 — Module-Scoped Visibility & Multi-Release Source Roots (JEP 238)** *(Done)*
 
 ---
 
@@ -134,3 +132,4 @@ flowchart LR
 - **Spec 0016 — Scale, Responsiveness & Editor Polish** `[v0.6.0]`
   - `TextDocumentSyncKind::INCREMENTAL`, request cancellation, background indexing `$/progress` notifications.
   - Packaging & polish for Zed, VSCode, Neovim, and Helix clients ahead of **`v1.0.0`**.
+  - Optional Go-style transparent, strictly opt-in feature & latency telemetry ([usage-stats-and-opt-in-telemetry.md](plans/usage-stats-and-opt-in-telemetry.md)).

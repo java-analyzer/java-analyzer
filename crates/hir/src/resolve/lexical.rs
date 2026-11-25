@@ -6,11 +6,11 @@ use syntax::{
 
 use crate::{
     FileId,
-    hierarchy::linearized_supertypes,
+    hierarchy::linearized_supertypes_in_scope,
     item_tree::{AstIdMap, FileItemTree, TypeId},
+    scope::{ModuleImportTarget, VisibleScope},
     symbols::{
-        ImportKind, MemberKind, TypeKind, WorkspaceIndex, extract_local_type_symbol,
-        node_ident_text,
+        ImportKind, MemberKind, TypeKind, extract_local_type_symbol, node_ident_text,
     },
 };
 
@@ -345,7 +345,7 @@ pub(super) fn resolve_type_segments(
                 && imp.path.last().map(String::as_str) == Some(name)
             {
                 let fqn = imp.path.join(".");
-                if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.index, &fqn) {
+                if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.scope, &fqn) {
                     return Some(ResolvedTarget::IndexedType(fid, tid));
                 }
             }
@@ -355,7 +355,7 @@ pub(super) fn resolve_type_segments(
                 && imp.path.last().map(String::as_str) == Some(name)
             {
                 let fqn = imp.path.join(".");
-                if ctx.classpath.type_by_fqn(&fqn).is_some() {
+                if ctx.scope.contains_binary_type(&fqn) {
                     return Some(ResolvedTarget::BinaryType(fqn));
                 }
             }
@@ -367,7 +367,7 @@ pub(super) fn resolve_type_segments(
                 && imp.path.last().map(String::as_str) == Some(name)
             {
                 let fqn = imp.path.join(".");
-                if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.index, &fqn) {
+                if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.scope, &fqn) {
                     return Some(ResolvedTarget::IndexedType(fid, tid));
                 }
             }
@@ -377,7 +377,7 @@ pub(super) fn resolve_type_segments(
                 && imp.path.last().map(String::as_str) == Some(name)
             {
                 let fqn = imp.path.join(".");
-                if ctx.classpath.type_by_fqn(&fqn).is_some() {
+                if ctx.scope.contains_binary_type(&fqn) {
                     return Some(ResolvedTarget::BinaryType(fqn));
                 }
             }
@@ -385,21 +385,21 @@ pub(super) fn resolve_type_segments(
 
         // 4. Same-package top-level types (workspace first, then binary).
         let pkg = ctx.file_tree.package.as_deref().unwrap_or("");
-        if let Some(found) = lookup_package_type_in_workspace(ctx.file_tree, ctx.index, pkg, name)
+        if let Some(found) = lookup_package_type_in_workspace(ctx.file_tree, ctx.scope, pkg, name)
         {
             return Some(found);
         }
-        if let Some(ty) = ctx.classpath.type_in_package(pkg, name) {
+        if let Some(ty) = ctx.scope.get_binary_type_in_package(pkg, name) {
             return Some(ResolvedTarget::BinaryType(ty.qualified_name.clone()));
         }
 
         // 5. Implicit `java.lang.*` (workspace `java.lang` first if any, then binary `java.lang`).
         if let Some(found) =
-            lookup_package_type_in_workspace(ctx.file_tree, ctx.index, "java.lang", name)
+            lookup_package_type_in_workspace(ctx.file_tree, ctx.scope, "java.lang", name)
         {
             return Some(found);
         }
-        if let Some(ty) = ctx.classpath.type_in_package("java.lang", name) {
+        if let Some(ty) = ctx.scope.get_binary_type_in_package("java.lang", name) {
             return Some(ResolvedTarget::BinaryType(ty.qualified_name.clone()));
         }
 
@@ -407,7 +407,7 @@ pub(super) fn resolve_type_segments(
         for (_, imp) in ctx.file_tree.imports.iter() {
             if imp.kind == ImportKind::TypeOnDemand {
                 let fqn = format!("{}.{name}", imp.path.join("."));
-                if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.index, &fqn) {
+                if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.scope, &fqn) {
                     return Some(ResolvedTarget::IndexedType(fid, tid));
                 }
             }
@@ -415,7 +415,7 @@ pub(super) fn resolve_type_segments(
         for (_, imp) in ctx.file_tree.imports.iter() {
             if imp.kind == ImportKind::TypeOnDemand {
                 let fqn = format!("{}.{name}", imp.path.join("."));
-                if ctx.classpath.type_by_fqn(&fqn).is_some() {
+                if ctx.scope.contains_binary_type(&fqn) {
                     return Some(ResolvedTarget::BinaryType(fqn));
                 }
             }
@@ -425,7 +425,7 @@ pub(super) fn resolve_type_segments(
         for (_, imp) in ctx.file_tree.imports.iter() {
             if imp.kind == ImportKind::StaticOnDemand {
                 let fqn = format!("{}.{name}", imp.path.join("."));
-                if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.index, &fqn) {
+                if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.scope, &fqn) {
                     return Some(ResolvedTarget::IndexedType(fid, tid));
                 }
             }
@@ -433,7 +433,7 @@ pub(super) fn resolve_type_segments(
         for (_, imp) in ctx.file_tree.imports.iter() {
             if imp.kind == ImportKind::StaticOnDemand {
                 let fqn = format!("{}.{name}", imp.path.join("."));
-                if ctx.classpath.type_by_fqn(&fqn).is_some() {
+                if ctx.scope.contains_binary_type(&fqn) {
                     return Some(ResolvedTarget::BinaryType(fqn));
                 }
             }
@@ -443,18 +443,16 @@ pub(super) fn resolve_type_segments(
         for (_, imp) in ctx.file_tree.imports.iter() {
             if imp.kind == ImportKind::Module {
                 let module_name = imp.path.join(".");
-                for exported_pkg in ctx.classpath.transitive_module_exports(&module_name) {
-                    if let Some(found) = lookup_package_type_in_workspace(
-                        ctx.file_tree,
-                        ctx.index,
-                        exported_pkg,
-                        name,
-                    ) {
-                        return Some(found);
-                    }
-                    if let Some(ty) = ctx.classpath.type_in_package(exported_pkg, name) {
-                        return Some(ResolvedTarget::BinaryType(ty.qualified_name.clone()));
-                    }
+                if let Some(target) =
+                    ctx.scope
+                        .resolve_module_import_type(ctx.file_tree, &module_name, name)
+                {
+                    return Some(match target {
+                        ModuleImportTarget::Workspace(fid, tid) => {
+                            ResolvedTarget::IndexedType(fid, tid)
+                        }
+                        ModuleImportTarget::Binary(fqn) => ResolvedTarget::BinaryType(fqn),
+                    });
                 }
             }
         }
@@ -487,7 +485,7 @@ pub(super) fn resolve_type_segments(
             current_qname = next_fqn;
         } else {
             let mut inherited_found = None;
-            for sup_fqn in linearized_supertypes(ctx.db, &current_qname) {
+            for sup_fqn in linearized_supertypes_in_scope(ctx.db, ctx.scope, &current_qname) {
                 let sup_next = format!("{sup_fqn}.{seg}");
                 if let Some(found) = lookup_workspace_or_binary_type(ctx, &sup_next) {
                     inherited_found = Some((found, sup_next));
@@ -504,36 +502,25 @@ pub(super) fn resolve_type_segments(
 
 fn lookup_package_type_in_workspace(
     file_tree: &FileItemTree,
-    index: &WorkspaceIndex,
+    scope: &VisibleScope,
     pkg: &str,
     name: &str,
 ) -> Option<ResolvedTarget> {
-    if let Some(fqn) = index.package_type_map.get(pkg).and_then(|m| m.get(name))
-        && let Some(&(fid, tid)) = index.types_by_fqn.get(fqn)
-    {
-        return Some(ResolvedTarget::IndexedType(fid, tid));
-    }
-    if file_tree.package.as_deref().unwrap_or("") == pkg
-        && let Some((tid, _)) = file_tree
-            .types
-            .iter()
-            .find(|(_, t)| t.enclosing_type.is_none() && t.name == name)
-    {
-        return Some(ResolvedTarget::IndexedType(file_tree.file_id, tid));
-    }
-    None
+    scope
+        .lookup_package_type_in_workspace(file_tree, pkg, name)
+        .map(|(fid, tid)| ResolvedTarget::IndexedType(fid, tid))
 }
 
 pub(super) fn lookup_workspace_or_binary_type(
     ctx: ResolveCtx<'_>,
     fqn: &str,
 ) -> Option<ResolvedTarget> {
-    if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.index, fqn) {
+    if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.scope, fqn) {
         return Some(ResolvedTarget::IndexedType(fid, tid));
     }
-    ctx.classpath
-        .type_by_fqn(fqn)
-        .map(|_| ResolvedTarget::BinaryType(fqn.to_string()))
+    ctx.scope
+        .contains_binary_type(fqn)
+        .then(|| ResolvedTarget::BinaryType(fqn.to_string()))
 }
 
 fn resolve_enclosing_type_or_param(
@@ -544,7 +531,7 @@ fn resolve_enclosing_type_or_param(
     let file_id = ctx.file_id;
     let file_tree = ctx.file_tree;
     let ast_id_map = ctx.ast_id_map;
-    let index = ctx.index;
+    let scope = ctx.scope;
     let site_start = site_node.text_range().start();
     let mut allow_type_params = true;
 
@@ -605,12 +592,13 @@ fn resolve_enclosing_type_or_param(
                     }
                     if ty.nested_types.iter().any(|n| n == name) {
                         let nested_fqn = format!("{}.{}", ty.qualified_name, name);
-                        if let Some((fid, tid)) = lookup_type_by_fqn(file_tree, index, &nested_fqn)
+                        if let Some((fid, tid)) = lookup_type_by_fqn(file_tree, scope, &nested_fqn)
                         {
                             return Some(ResolvedTarget::IndexedType(fid, tid));
                         }
                     }
-                    for sup_fqn in linearized_supertypes(ctx.db, &ty.qualified_name) {
+                    for sup_fqn in linearized_supertypes_in_scope(ctx.db, ctx.scope, &ty.qualified_name)
+                    {
                         let inherited_fqn = format!("{sup_fqn}.{name}");
                         if let Some(found) = lookup_workspace_or_binary_type(ctx, &inherited_fqn) {
                             return Some(found);
@@ -630,7 +618,7 @@ fn resolve_enclosing_type_or_param(
                     }
                     if ty.nested_types.iter().any(|n| n == name) {
                         let nested_fqn = format!("{}.{}", ty.qualified_name, name);
-                        if let Some((fid, tid)) = lookup_type_by_fqn(file_tree, index, &nested_fqn)
+                        if let Some((fid, tid)) = lookup_type_by_fqn(file_tree, scope, &nested_fqn)
                         {
                             return Some(ResolvedTarget::IndexedType(fid, tid));
                         }
@@ -707,14 +695,10 @@ pub(super) fn enclosing_type_targets(
 
 pub(super) fn lookup_type_by_fqn(
     file_tree: &FileItemTree,
-    index: &WorkspaceIndex,
+    scope: &VisibleScope,
     fqn: &str,
 ) -> Option<(FileId, TypeId)> {
-    index.types_by_fqn.get(fqn).copied().or_else(|| {
-        file_tree
-            .find_type_by_fqn(fqn)
-            .map(|(tid, _)| (file_tree.file_id, tid))
-    })
+    scope.lookup_type_by_fqn(file_tree, fqn)
 }
 
 // ---- Static imports ----
@@ -744,7 +728,7 @@ pub(super) fn resolve_via_static_imports(
         {
             let owner_fqn = imp.path[..imp.path.len() - 1].join(".");
             if let Some((owner_file, owner_id)) =
-                lookup_type_by_fqn(ctx.file_tree, ctx.index, &owner_fqn)
+                lookup_type_by_fqn(ctx.file_tree, ctx.scope, &owner_fqn)
                 && let Some(found) = lookup_static_member_or_nested(
                     ctx,
                     owner_file,
@@ -763,7 +747,7 @@ pub(super) fn resolve_via_static_imports(
             && imp.path.last().map(String::as_str) == Some(name)
         {
             let owner_fqn = imp.path[..imp.path.len() - 1].join(".");
-            if ctx.classpath.type_by_fqn(&owner_fqn).is_some()
+            if ctx.scope.contains_binary_type(&owner_fqn)
                 && let Some(found) = lookup_static_member_or_nested_binary(
                     ctx,
                     &owner_fqn,
@@ -781,7 +765,7 @@ pub(super) fn resolve_via_static_imports(
         if imp.kind == ImportKind::StaticOnDemand && !imp.path.is_empty() {
             let owner_fqn = imp.path.join(".");
             if let Some((owner_file, owner_id)) =
-                lookup_type_by_fqn(ctx.file_tree, ctx.index, &owner_fqn)
+                lookup_type_by_fqn(ctx.file_tree, ctx.scope, &owner_fqn)
                 && let Some(found) = lookup_static_member_or_nested(
                     ctx,
                     owner_file,
@@ -797,7 +781,7 @@ pub(super) fn resolve_via_static_imports(
     for (_, imp) in ctx.file_tree.imports.iter() {
         if imp.kind == ImportKind::StaticOnDemand && !imp.path.is_empty() {
             let owner_fqn = imp.path.join(".");
-            if ctx.classpath.type_by_fqn(&owner_fqn).is_some()
+            if ctx.scope.contains_binary_type(&owner_fqn)
                 && let Some(found) = lookup_static_member_or_nested_binary(
                     ctx,
                     &owner_fqn,
@@ -848,7 +832,7 @@ pub(super) fn lookup_static_member_or_nested(
 
     if owner_ty.nested_types.iter().any(|n| n == name) {
         let nested_fqn = format!("{}.{}", owner_ty.qualified_name, name);
-        if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.index, &nested_fqn) {
+        if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.scope, &nested_fqn) {
             return Some(ResolvedTarget::IndexedType(fid, tid));
         }
     }
@@ -870,7 +854,7 @@ pub(super) fn lookup_static_member_or_nested_binary(
     name: &str,
     callable_arity: Option<Option<usize>>,
 ) -> Option<ResolvedTarget> {
-    let owner_ty = ctx.classpath.type_by_fqn(owner_fqn)?;
+    let owner_ty = ctx.scope.get_binary_type(owner_fqn)?;
 
     if let Some(arity) = callable_arity {
         return select_callable_from_binary(

@@ -20,15 +20,21 @@ pub use scope::{
 
 pub(crate) use parse::parse_type_ref;
 pub(crate) use scope::{
-    effective_nullness_scope_for_binary_member, resolve_binary_type_ref_for_member,
+    effective_nullness_scope_for_binary_member, effective_nullness_scope_for_member_in_scope,
+    effective_nullness_scope_for_type_in_scope, resolve_binary_type_ref_for_member,
     resolve_binary_type_ref_for_owner, resolve_type_ref_in_file_for_member,
-    resolve_type_ref_in_file_for_owner, resolve_type_ref_in_file_with_scope,
-    ty_has_explicit_nullability, type_param_bounds_of_fqn, type_params_of_fqn,
+    resolve_type_ref_in_file_for_owner, resolve_type_ref_in_file_with_scope_and_visible,
+    ty_has_explicit_nullability, type_param_bounds_of_fqn_in_scope, type_params_of_fqn_in_scope,
 };
+#[cfg(test)]
+pub(crate) use scope::{type_param_bounds_of_fqn, type_params_of_fqn};
 pub(crate) use subtype::{
-    binary_numeric_promotion, is_assignable, is_subtype, least_upper_bound,
-    supertype_substitution, supertype_substitution_for_ty, unary_numeric_promotion,
+    binary_numeric_promotion, is_assignable_in_scope, is_subtype_in_scope,
+    least_upper_bound_in_scope, supertype_substitution_for_ty_in_scope,
+    supertype_substitution_in_scope, unary_numeric_promotion,
 };
+#[cfg(test)]
+pub(crate) use subtype::{is_assignable, is_subtype, least_upper_bound, supertype_substitution};
 
 #[cfg(test)]
 use scope::{resolve_binary_type_ref, resolve_type_ref_in_file};

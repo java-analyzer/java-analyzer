@@ -835,6 +835,9 @@ fn valhalla_is_value_type_for_primitives_workspace_and_binary_types() {
         fn classpath_index(&self) -> Arc<ClasspathIndex> {
             self.inner.classpath_index()
         }
+        fn workspace_module_graph(&self) -> Arc<crate::ModuleGraphData> {
+            self.inner.workspace_module_graph()
+        }
     }
 
     let src = "\

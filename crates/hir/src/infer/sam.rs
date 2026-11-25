@@ -6,13 +6,15 @@ use smol_str::SmolStr;
 use crate::{
     DefDatabase, FileId,
     classpath::{BinaryMemberSymbol, BinaryTypeSymbol, ClasspathIndex},
-    hierarchy::linearized_supertypes,
+    hierarchy::linearized_supertypes_in_scope,
     item_tree::MemberItem,
+    scope::VisibleScope,
     symbols::{MemberKind, ParamSummary, TypeKind},
     ty::{
         MAX_SUBST_DEPTH, Nullability, PrimitiveType, Ty, resolve_binary_type_ref_for_member,
         resolve_binary_type_ref_for_owner, resolve_type_ref_in_file_for_member,
-        resolve_type_ref_in_file_for_owner, type_param_bounds_of_fqn, type_params_of_fqn,
+        resolve_type_ref_in_file_for_owner, supertype_substitution_in_scope,
+        type_param_bounds_of_fqn_in_scope, type_params_of_fqn_in_scope,
     },
 };
 
@@ -34,17 +36,26 @@ pub struct SamSignature {
 /// (JLS §9.8), returning its parameter and return types substituted with `ty`'s type arguments.
 #[must_use]
 pub fn find_functional_interface_sam(db: &dyn DefDatabase, ty: &Ty) -> Option<SamSignature> {
+    let scope = VisibleScope::flat(db);
+    find_functional_interface_sam_in_scope(db, &scope, ty)
+}
+
+#[must_use]
+pub(crate) fn find_functional_interface_sam_in_scope(
+    db: &dyn DefDatabase,
+    scope: &VisibleScope,
+    ty: &Ty,
+) -> Option<SamSignature> {
     let (fqn, type_args) = match ty {
         Ty::Class { fqn, type_args, .. } => (fqn.as_str(), type_args.as_slice()),
         _ => return None,
     };
 
-    let workspace = db.workspace_index();
-    let classpath = db.classpath_index();
+    let classpath = scope.classpath();
 
-    let is_interface = if let Some((fid, tid)) = workspace.get_type(fqn) {
+    let is_interface = if let Some((fid, tid)) = scope.get_workspace_type(fqn) {
         db.file_item_tree(fid).types[tid].kind == TypeKind::Interface
-    } else if let Some(bin) = classpath.type_by_fqn(fqn) {
+    } else if let Some(bin) = scope.get_binary_type(fqn) {
         bin.kind == TypeKind::Interface
     } else {
         false
@@ -59,7 +70,7 @@ pub fn find_functional_interface_sam(db: &dyn DefDatabase, ty: &Ty) -> Option<Sa
 
     let mut ordered_ifaces = Vec::with_capacity(1);
     ordered_ifaces.push(fqn.to_string());
-    for sup in linearized_supertypes(db, fqn) {
+    for sup in linearized_supertypes_in_scope(db, scope, fqn) {
         if sup != OBJECT_FQN {
             ordered_ifaces.push(sup);
         }
@@ -69,13 +80,13 @@ pub fn find_functional_interface_sam(db: &dyn DefDatabase, ty: &Ty) -> Option<Sa
         if !visited_ifaces.insert(iface_fqn.clone()) {
             continue;
         }
-        if let Some((fid, tid)) = workspace.get_type(&iface_fqn) {
+        if let Some((fid, tid)) = scope.get_workspace_type(&iface_fqn) {
             let tree = db.file_item_tree(fid);
             let ty_item = &tree.types[tid];
             if ty_item.kind != TypeKind::Interface {
                 continue;
             }
-            let owner_scope = type_param_bounds_of_fqn(db, &iface_fqn);
+            let owner_scope = type_param_bounds_of_fqn_in_scope(db, scope, &iface_fqn);
             for &mid in &ty_item.members {
                 let m = &tree.members[mid];
                 if m.kind != MemberKind::Method || m.is_static {
@@ -132,11 +143,11 @@ pub fn find_functional_interface_sam(db: &dyn DefDatabase, ty: &Ty) -> Option<Sa
                     ret_ty,
                 });
             }
-        } else if let Some(bin) = classpath.type_by_fqn(&iface_fqn) {
+        } else if let Some(bin) = scope.get_binary_type(&iface_fqn) {
             if bin.kind != TypeKind::Interface {
                 continue;
             }
-            let owner_scope = type_param_bounds_of_fqn(db, &iface_fqn);
+            let owner_scope = type_param_bounds_of_fqn_in_scope(db, scope, &iface_fqn);
             for m in &bin.members {
                 if m.kind != MemberKind::Method || m.is_static {
                     continue;
@@ -156,7 +167,7 @@ pub fn find_functional_interface_sam(db: &dyn DefDatabase, ty: &Ty) -> Option<Sa
                 if !m.is_abstract {
                     continue;
                 }
-                if is_object_public_method_binary(&classpath, bin, m, &owner_scope) {
+                if is_object_public_method_binary(classpath, bin, m, &owner_scope) {
                     continue;
                 }
                 let mut m_scope = owner_scope.clone();
@@ -167,7 +178,7 @@ pub fn find_functional_interface_sam(db: &dyn DefDatabase, ty: &Ty) -> Option<Sa
                     );
                 }
                 let param_tys = resolve_params_in_binary_for_member(
-                    &classpath,
+                    classpath,
                     bin,
                     m.nullness_scope,
                     &m.params,
@@ -175,7 +186,7 @@ pub fn find_functional_interface_sam(db: &dyn DefDatabase, ty: &Ty) -> Option<Sa
                 );
                 let ret_ty = m.type_ref.as_deref().map_or(Ty::Void, |r| {
                     resolve_binary_type_ref_for_member(
-                        &classpath,
+                        classpath,
                         bin,
                         m.nullness_scope,
                         r,
@@ -197,12 +208,12 @@ pub fn find_functional_interface_sam(db: &dyn DefDatabase, ty: &Ty) -> Option<Sa
         return None;
     }
     let sam = candidates.into_iter().next()?;
-    let subst = crate::ty::supertype_substitution(db, fqn, type_args, &sam.owner_fqn)
+    let subst = supertype_substitution_in_scope(db, scope, fqn, type_args, &sam.owner_fqn)
         .unwrap_or_default();
 
     // Raw functional interface: erase class type variables to Object/bounds if `type_args` is empty
     // and the interface declares type parameters.
-    let raw_iface = !type_params_of_fqn(db, fqn).is_empty() && type_args.is_empty();
+    let raw_iface = !type_params_of_fqn_in_scope(db, scope, fqn).is_empty() && type_args.is_empty();
     let param_types = sam
         .param_tys
         .into_iter()

@@ -1925,3 +1925,278 @@ public class App {
         "```java\nUser! com.example.BinaryApi.requireUser(String! id)\n```\n*from `lib/null-api.jar`*",
     );
 }
+
+#[test]
+fn hover_and_goto_definition_respect_workspace_module_graph() {
+    let base_helper = "\
+package com.example;
+public class PlatformHelper {
+    public String mode() { return \"base\"; }
+}
+";
+    let overlay_helper = "\
+package com.example;
+public class PlatformHelper {
+    public record Info(String label) {}
+    public String mode() { return \"java17\"; }
+    public int java17Only() { return 17; }
+}
+";
+    let test_helper = "\
+package com.example;
+public class TestHelper {
+    public int help() { return 42; }
+}
+";
+    let main_caller = "\
+package com.example;
+public class BaseCaller {
+    void run() {
+        /*base_mode*/new PlatformHelper()./*base_mode_call*/mode();
+        /*base_only*/new PlatformHelper()./*base_only_call*/java17Only();
+        /*main_test_cls*/TestHelper t = new TestHelper();
+        t./*main_test_call*/help();
+    }
+}
+";
+    let overlay_caller = "\
+package com.example;
+public class OverlayCaller {
+    void run() {
+        var x = new PlatformHelper().new /*ov_info*/Info(\"hi\");
+        int n = new PlatformHelper()./*ov_17*/java17Only();
+        String m = new PlatformHelper()./*ov_mode*/mode();
+    }
+}
+";
+    let test_caller = "\
+package com.example;
+public class PlatformHelperTest {
+    void check() {
+        int a = new /*test_helper_cls*/TestHelper()./*test_helper_call*/help();
+        int b = new PlatformHelper()./*test_17*/java17Only();
+        String m = new PlatformHelper()./*test_mode*/mode();
+    }
+}
+";
+
+    let f_base = FileId(1);
+    let f_overlay = FileId(2);
+    let f_test_helper = FileId(3);
+    let f_main_caller = FileId(4);
+    let f_overlay_caller = FileId(5);
+    let f_test_caller = FileId(6);
+
+    let mut host = AnalysisHost::new();
+    let files = [
+        (f_base, base_helper, LanguageLevel::new(Release::JAVA_8, false)),
+        (
+            f_overlay,
+            overlay_helper,
+            LanguageLevel::new(Release::JAVA_17, false),
+        ),
+        (
+            f_test_helper,
+            test_helper,
+            LanguageLevel::new(Release::JAVA_21, false),
+        ),
+        (
+            f_main_caller,
+            main_caller,
+            LanguageLevel::new(Release::JAVA_8, false),
+        ),
+        (
+            f_overlay_caller,
+            overlay_caller,
+            LanguageLevel::new(Release::JAVA_17, false),
+        ),
+        (
+            f_test_caller,
+            test_caller,
+            LanguageLevel::new(Release::JAVA_21, false),
+        ),
+    ];
+    for (fid, src, lvl) in files {
+        host.set_file_text(fid, Arc::new(src.to_string()));
+        host.set_file_language_level(fid, lvl);
+    }
+
+    let mod_id = ModuleId(0);
+    host.set_workspace_modules(vec![(
+        mod_id,
+        Arc::new(vec![
+            f_base,
+            f_overlay,
+            f_test_helper,
+            f_main_caller,
+            f_overlay_caller,
+            f_test_caller,
+        ]),
+    )]);
+
+    let mut module_configs = std::collections::BTreeMap::new();
+    module_configs.insert(
+        mod_id,
+        ModuleScopeConfig {
+            id: mod_id,
+            base_release: Release::JAVA_8,
+            test_release: Release::JAVA_21,
+            dependencies: Vec::new(),
+        },
+    );
+    let mut file_origins = std::collections::BTreeMap::new();
+    file_origins.insert(
+        f_base,
+        FileOrigin {
+            module_id: mod_id,
+            scope: RootScope::Main,
+            release_override: None,
+        },
+    );
+    file_origins.insert(
+        f_overlay,
+        FileOrigin {
+            module_id: mod_id,
+            scope: RootScope::Main,
+            release_override: Some(Release::JAVA_17),
+        },
+    );
+    file_origins.insert(
+        f_test_helper,
+        FileOrigin {
+            module_id: mod_id,
+            scope: RootScope::Test,
+            release_override: None,
+        },
+    );
+    file_origins.insert(
+        f_main_caller,
+        FileOrigin {
+            module_id: mod_id,
+            scope: RootScope::Main,
+            release_override: None,
+        },
+    );
+    file_origins.insert(
+        f_overlay_caller,
+        FileOrigin {
+            module_id: mod_id,
+            scope: RootScope::Main,
+            release_override: Some(Release::JAVA_17),
+        },
+    );
+    file_origins.insert(
+        f_test_caller,
+        FileOrigin {
+            module_id: mod_id,
+            scope: RootScope::Test,
+            release_override: None,
+        },
+    );
+    host.set_workspace_module_graph(Arc::new(ModuleGraphData {
+        modules: module_configs,
+        file_origins,
+    }));
+
+    let snap = host.analysis();
+
+    // Base Main (Java 8) resolves PlatformHelper.mode() to `f_base`, NOT `f_overlay`.
+    let (_, base_mode_focus) = assert_source_target(
+        snap.goto_definition(f_main_caller, cursor(main_caller, "/*base_mode_call*/"))
+            .unwrap()
+            .unwrap(),
+        f_base,
+    );
+    assert_eq!(slice(base_helper, base_mode_focus), "mode");
+    assert_eq!(
+        snap.hover(f_main_caller, cursor(main_caller, "/*base_mode_call*/"))
+            .unwrap()
+            .unwrap()
+            .content,
+        "```java\nString com.example.PlatformHelper.mode()\n```"
+    );
+
+    // Base Main (Java 8) cannot see Java 17 overlay methods or Test types.
+    assert!(
+        snap.goto_definition(f_main_caller, cursor(main_caller, "/*base_only_call*/"))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        snap.goto_definition(f_main_caller, cursor(main_caller, "/*main_test_cls*/"))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        snap.goto_definition(f_main_caller, cursor(main_caller, "/*main_test_call*/"))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        snap.hover(f_main_caller, cursor(main_caller, "/*main_test_cls*/"))
+            .unwrap()
+            .unwrap()
+            .content,
+        "Identifier `TestHelper`"
+    );
+
+    // Java 17 overlay resolves PlatformHelper, Info record, and java17Only() to `f_overlay`.
+    let (_, ov_mode_focus) = assert_source_target(
+        snap.goto_definition(f_overlay_caller, cursor(overlay_caller, "/*ov_mode*/"))
+            .unwrap()
+            .unwrap(),
+        f_overlay,
+    );
+    assert_eq!(slice(overlay_helper, ov_mode_focus), "mode");
+    let (_, ov_17_focus) = assert_source_target(
+        snap.goto_definition(f_overlay_caller, cursor(overlay_caller, "/*ov_17*/"))
+            .unwrap()
+            .unwrap(),
+        f_overlay,
+    );
+    assert_eq!(slice(overlay_helper, ov_17_focus), "java17Only");
+    assert_eq!(
+        snap.hover(f_overlay_caller, cursor(overlay_caller, "/*ov_17*/"))
+            .unwrap()
+            .unwrap()
+            .content,
+        "```java\nint com.example.PlatformHelper.java17Only()\n```"
+    );
+
+    // Java 21 Test sees TestHelper AND the Java 17 overlay of PlatformHelper.
+    let (_, test_cls_focus) = assert_source_target(
+        snap.goto_definition(f_test_caller, cursor(test_caller, "/*test_helper_cls*/"))
+            .unwrap()
+            .unwrap(),
+        f_test_helper,
+    );
+    assert_eq!(slice(test_helper, test_cls_focus), "TestHelper");
+    let (_, test_call_focus) = assert_source_target(
+        snap.goto_definition(f_test_caller, cursor(test_caller, "/*test_helper_call*/"))
+            .unwrap()
+            .unwrap(),
+        f_test_helper,
+    );
+    assert_eq!(slice(test_helper, test_call_focus), "help");
+    let (_, test_17_focus) = assert_source_target(
+        snap.goto_definition(f_test_caller, cursor(test_caller, "/*test_17*/"))
+            .unwrap()
+            .unwrap(),
+        f_overlay,
+    );
+    assert_eq!(slice(overlay_helper, test_17_focus), "java17Only");
+    let (_, test_mode_focus) = assert_source_target(
+        snap.goto_definition(f_test_caller, cursor(test_caller, "/*test_mode*/"))
+            .unwrap()
+            .unwrap(),
+        f_overlay,
+    );
+    assert_eq!(slice(overlay_helper, test_mode_focus), "mode");
+    assert_eq!(
+        snap.hover(f_test_caller, cursor(test_caller, "/*test_helper_call*/"))
+            .unwrap()
+            .unwrap()
+            .content,
+        "```java\nint com.example.TestHelper.help()\n```"
+    );
+}

@@ -16,18 +16,19 @@ use syntax::{
 
 use crate::{
     DefDatabase, FileId,
-    classpath::{BinaryTarget, ClasspathIndex},
-    hierarchy::find_overridden_method,
+    classpath::BinaryTarget,
+    hierarchy::find_overridden_method_in_scope,
     infer::{self, infer_expr_ty, infer_local_ty},
     item_tree::{AstIdMap, FileItemTree, MemberId, TypeId},
+    scope::VisibleScope,
     symbols::{
         ImportKind, MemberKind, MemberSymbol, NullnessScope, ParamSummary, TypeKind, TypeSymbol,
-        WorkspaceIndex, extract_field_decl, extract_local_type_symbol, extract_method_or_ctor,
+        extract_field_decl, extract_local_type_symbol, extract_method_or_ctor,
         format_params_signature, node_ident_text,
     },
     ty::{
         Ty, resolve_type_ref_in_file_for_owner, ty_has_explicit_nullability,
-        type_param_bounds_of_fqn,
+        type_param_bounds_of_fqn_in_scope, type_params_of_fqn_in_scope,
     },
 };
 
@@ -35,8 +36,8 @@ pub(crate) use lexical::{find_local_decl_node, resolve_via_static_imports_pub};
 pub(crate) use overload::{
     CallableCandidate, OverloadPhase, collect_constructor_candidates,
     collect_method_candidates_on_ty, collect_static_import_method_candidates,
-    collect_top_level_method_candidates, is_candidate_strictly_more_specific, score_candidate_phase,
-    select_best_callable_candidate,
+    collect_top_level_method_candidates, is_candidate_strictly_more_specific_in_scope,
+    score_candidate_phase_in_scope, select_best_callable_candidate_in_scope,
 };
 
 use lexical::{
@@ -247,8 +248,9 @@ impl ResolvedTarget {
     fn into_resolved_symbol(
         self,
         db: &dyn DefDatabase,
-        classpath: &ClasspathIndex,
+        scope: &VisibleScope,
     ) -> Option<ResolvedSymbol> {
+        let classpath = scope.classpath();
         match self {
             Self::IndexedType(file_id, type_id) => {
                 let tree = db.file_item_tree(file_id);
@@ -300,7 +302,7 @@ impl ResolvedTarget {
                 })
             }
             Self::IndexedMember(file_id, member_id) => {
-                let detail = infer::format_member_detail(db, &self).or_else(|| {
+                let detail = infer::format_member_detail_in_scope(db, scope, &self).or_else(|| {
                     let tree = db.file_item_tree(file_id);
                     let m = &tree.members[member_id];
                     member_detail(m.kind, m.type_ref.as_deref(), &m.params)
@@ -315,7 +317,13 @@ impl ResolvedTarget {
                 let overrides = (m.kind == MemberKind::Method && !m.is_static)
                     .then(|| {
                         m.owner_type.as_deref().and_then(|owner_fqn| {
-                            find_overridden_method(db, owner_fqn, &m.name, m.params.len())
+                            find_overridden_method_in_scope(
+                                db,
+                                scope,
+                                owner_fqn,
+                                &m.name,
+                                m.params.len(),
+                            )
                         })
                     })
                     .flatten();
@@ -333,7 +341,7 @@ impl ResolvedTarget {
             }
             Self::LocalMember(m) => {
                 let target_ref = Self::LocalMember(m.clone());
-                let detail = infer::format_member_detail(db, &target_ref)
+                let detail = infer::format_member_detail_in_scope(db, scope, &target_ref)
                     .or_else(|| member_detail(m.kind, m.type_ref.as_deref(), &m.params));
                 let qualified_name = match &m.owner_type {
                     Some(owner) => format!("{owner}.{}", m.name),
@@ -342,7 +350,13 @@ impl ResolvedTarget {
                 let overrides = (m.kind == MemberKind::Method && !m.is_static)
                     .then(|| {
                         m.owner_type.as_deref().and_then(|owner_fqn| {
-                            find_overridden_method(db, owner_fqn, &m.name, m.params.len())
+                            find_overridden_method_in_scope(
+                                db,
+                                scope,
+                                owner_fqn,
+                                &m.name,
+                                m.params.len(),
+                            )
                         })
                     })
                     .flatten();
@@ -362,13 +376,15 @@ impl ResolvedTarget {
                 ref owner_fqn,
                 member_index,
             } => {
-                let detail = infer::format_member_detail(db, &self);
+                let detail = infer::format_member_detail_in_scope(db, scope, &self);
                 let t = classpath.type_by_fqn(owner_fqn)?;
                 let m = t.members.get(member_index)?;
                 let detail = detail
                     .or_else(|| member_detail(m.kind, m.type_ref.as_deref(), &m.params));
                 let overrides = (m.kind == MemberKind::Method && !m.is_static)
-                    .then(|| find_overridden_method(db, owner_fqn, &m.name, m.params.len()))
+                    .then(|| {
+                        find_overridden_method_in_scope(db, scope, owner_fqn, &m.name, m.params.len())
+                    })
                     .flatten();
                 Some(ResolvedSymbol {
                     file_id: None,
@@ -426,7 +442,7 @@ impl ResolvedTarget {
                 })
             }
             Self::WithDetail { inner, detail } => {
-                let mut sym = inner.into_resolved_symbol(db, classpath)?;
+                let mut sym = inner.into_resolved_symbol(db, scope)?;
                 sym.detail = Some(detail);
                 Some(sym)
             }
@@ -440,8 +456,7 @@ pub(crate) struct ResolveCtx<'a> {
     pub(crate) file_id: FileId,
     pub(crate) file_tree: &'a FileItemTree,
     pub(crate) ast_id_map: &'a AstIdMap,
-    pub(crate) index: &'a WorkspaceIndex,
-    pub(crate) classpath: &'a ClasspathIndex,
+    pub(crate) scope: &'a VisibleScope,
 }
 
 /// Resolves the Java identifier or `super` keyword at byte `offset` in `file_id`, if any.
@@ -458,19 +473,17 @@ pub fn resolve_at_offset(
 
     let file_tree = db.file_item_tree(file_id);
     let ast_id_map = db.ast_id_map(file_id);
-    let index = db.workspace_index();
-    let classpath = db.classpath_index();
+    let scope = VisibleScope::for_file(db, file_id);
     let ctx = ResolveCtx {
         db,
         file_id,
         file_tree: &file_tree,
         ast_id_map: &ast_id_map,
-        index: &index,
-        classpath: &classpath,
+        scope: &scope,
     };
 
     let target = resolve_target_at_offset(ctx, &root, offset_size)?;
-    target.into_resolved_symbol(db, &classpath)
+    target.into_resolved_symbol(db, &scope)
 }
 
 /// Resolves the declared type of the variable, parameter, field, record component, method return,
@@ -488,15 +501,13 @@ pub fn resolve_type_of_symbol_at_offset(
 
     let file_tree = db.file_item_tree(file_id);
     let ast_id_map = db.ast_id_map(file_id);
-    let index = db.workspace_index();
-    let classpath = db.classpath_index();
+    let scope = VisibleScope::for_file(db, file_id);
     let ctx = ResolveCtx {
         db,
         file_id,
         file_tree: &file_tree,
         ast_id_map: &ast_id_map,
-        index: &index,
-        classpath: &classpath,
+        scope: &scope,
     };
 
     let token = root.token_at_offset(offset).right_biased()?;
@@ -506,20 +517,20 @@ pub fn resolve_type_of_symbol_at_offset(
         let inferred = infer_expr_ty(db, file_id, &parent, None);
         if !matches!(inferred, Ty::Unknown) {
             return unwrap_ty_to_target(ctx, &inferred)
-                .and_then(|t| ResolvedTarget::from(t).into_resolved_symbol(db, &classpath));
+                .and_then(|t| ResolvedTarget::from(t).into_resolved_symbol(db, &scope));
         }
         let ty = resolve_expr_type(ctx, &parent, 0)?;
-        return ResolvedTarget::from(ty).into_resolved_symbol(db, &classpath);
+        return ResolvedTarget::from(ty).into_resolved_symbol(db, &scope);
     }
 
     if token.kind() == NEW_KW && parent.kind() == NEW_EXPR {
         let inferred = infer_expr_ty(db, file_id, &parent, None);
         if !matches!(inferred, Ty::Unknown) {
             return unwrap_ty_to_target(ctx, &inferred)
-                .and_then(|t| ResolvedTarget::from(t).into_resolved_symbol(db, &classpath));
+                .and_then(|t| ResolvedTarget::from(t).into_resolved_symbol(db, &scope));
         }
         let ty = resolve_expr_type(ctx, &parent, 0)?;
-        return ResolvedTarget::from(ty).into_resolved_symbol(db, &classpath);
+        return ResolvedTarget::from(ty).into_resolved_symbol(db, &scope);
     }
 
     if token.kind() == IDENT
@@ -534,7 +545,7 @@ pub fn resolve_type_of_symbol_at_offset(
         let inferred = infer_local_ty(db, file_id, &decl);
         if !matches!(inferred, Ty::Unknown) {
             return unwrap_ty_to_target(ctx, &inferred)
-                .and_then(|t| ResolvedTarget::from(t).into_resolved_symbol(db, &classpath));
+                .and_then(|t| ResolvedTarget::from(t).into_resolved_symbol(db, &scope));
         }
     }
 
@@ -556,8 +567,8 @@ pub fn resolve_type_of_symbol_at_offset(
             ResolvedTarget::BinaryMember {
                 owner_fqn,
                 member_index,
-            } => classpath
-                .type_by_fqn(owner_fqn)
+            } => scope
+                .get_binary_type(owner_fqn)
                 .and_then(|t| t.members.get(*member_index))
                 .is_some_and(|m| m.kind == MemberKind::Constructor),
             _ => false,
@@ -589,7 +600,7 @@ pub fn resolve_type_of_symbol_at_offset(
                 let inferred = infer_expr_ty(db, file_id, &expr, None);
                 if !matches!(inferred, Ty::Unknown) {
                     return unwrap_ty_to_target(ctx, &inferred).and_then(|t| {
-                        ResolvedTarget::from(t).into_resolved_symbol(db, &classpath)
+                        ResolvedTarget::from(t).into_resolved_symbol(db, &scope)
                     });
                 }
             }
@@ -600,7 +611,7 @@ pub fn resolve_type_of_symbol_at_offset(
                 let m_tree = db.file_item_tree(m_file);
                 if m_tree.members[m_id].kind == MemberKind::Constructor {
                     let owner_fqn = m_tree.members[m_id].owner_type.as_deref()?;
-                    lookup_type_by_fqn(&m_tree, &index, owner_fqn)
+                    lookup_type_by_fqn(&m_tree, &scope, owner_fqn)
                         .map(|(fid, tid)| TypeRefTarget::Indexed(fid, tid))?
                 } else {
                     target_to_type_ref(ctx, ResolvedTarget::IndexedMember(m_file, m_id), 0)?
@@ -609,14 +620,14 @@ pub fn resolve_type_of_symbol_at_offset(
             ResolvedTarget::LocalMember(m) if m.kind == MemberKind::Constructor => {
                 let owner_fqn = m.owner_type.as_deref()?;
                 let decl_tree = db.file_item_tree(m.file_id);
-                lookup_type_by_fqn(&decl_tree, &index, owner_fqn)
+                lookup_type_by_fqn(&decl_tree, &scope, owner_fqn)
                     .map(|(fid, tid)| TypeRefTarget::Indexed(fid, tid))?
             }
             ResolvedTarget::BinaryMember {
                 owner_fqn,
                 member_index,
             } => {
-                let owner_ty = classpath.type_by_fqn(&owner_fqn)?;
+                let owner_ty = scope.get_binary_type(&owner_fqn)?;
                 let m = owner_ty.members.get(member_index)?;
                 if m.kind == MemberKind::Constructor {
                     TypeRefTarget::Binary(owner_fqn)
@@ -633,7 +644,7 @@ pub fn resolve_type_of_symbol_at_offset(
             }
             other => target_to_type_ref(ctx, other, 0)?,
         };
-        return ResolvedTarget::from(ty).into_resolved_symbol(db, &classpath);
+        return ResolvedTarget::from(ty).into_resolved_symbol(db, &scope);
     }
 
     None
@@ -889,7 +900,7 @@ fn resolve_declaration_site(ctx: ResolveCtx<'_>, name_node: &SyntaxNode) -> Opti
                     .find(|m| m.kind == MemberKind::Method && m.name == target_name)
                     .map(ResolvedTarget::LocalMember),
                 ResolvedTarget::BinaryType(fqn) => {
-                    let anno_ty = ctx.classpath.type_by_fqn(&fqn)?;
+                    let anno_ty = ctx.scope.get_binary_type(&fqn)?;
                     anno_ty
                         .members
                         .iter()
@@ -1027,7 +1038,7 @@ fn resolve_path_ref(
                 let type_fqn = all_segs[..all_segs.len() - 1].join(".");
                 let member_name = all_segs.last()?;
                 if let Some((owner_file, owner_id)) =
-                    lookup_type_by_fqn(ctx.file_tree, ctx.index, &type_fqn)
+                    lookup_type_by_fqn(ctx.file_tree, ctx.scope, &type_fqn)
                 {
                     return lookup_static_member_or_nested(
                         ctx,
@@ -1037,7 +1048,7 @@ fn resolve_path_ref(
                         None,
                     );
                 }
-                if ctx.classpath.type_by_fqn(&type_fqn).is_some() {
+                if ctx.scope.contains_binary_type(&type_fqn) {
                     return lookup_static_member_or_nested_binary(
                         ctx,
                         &type_fqn,
@@ -1049,14 +1060,13 @@ fn resolve_path_ref(
             }
 
             let prefix_fqn = prefix.join(".");
-            if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.index, &prefix_fqn) {
+            if let Some((fid, tid)) = lookup_type_by_fqn(ctx.file_tree, ctx.scope, &prefix_fqn) {
                 return Some(ResolvedTarget::IndexedType(fid, tid));
             }
-            if ctx.classpath.type_by_fqn(&prefix_fqn).is_some() {
+            if ctx.scope.contains_binary_type(&prefix_fqn) {
                 return Some(ResolvedTarget::BinaryType(prefix_fqn));
             }
-            if ctx.index.has_package_prefix(&prefix_fqn) || ctx.classpath.has_package(&prefix_fqn)
-            {
+            if ctx.scope.has_package_prefix(&prefix_fqn) {
                 return Some(ResolvedTarget::Package(prefix_fqn));
             }
             None
@@ -1288,8 +1298,8 @@ pub(super) fn resolve_name_ref_expr(
     for ty in enclosing_type_targets(ctx.file_id, ctx.file_tree, ctx.ast_id_map, expr_node) {
         if let Some(found) = lookup_non_method_member_or_nested_with_supers(ctx, &ty, &name) {
             let enc_fqn = ty.qualified_name(ctx.db, ctx.file_tree);
-            let tp_bounds = type_param_bounds_of_fqn(ctx.db, &enc_fqn);
-            let enc_args = crate::ty::type_params_of_fqn(ctx.db, &enc_fqn)
+            let tp_bounds = type_param_bounds_of_fqn_in_scope(ctx.db, ctx.scope, &enc_fqn);
+            let enc_args = type_params_of_fqn_in_scope(ctx.db, ctx.scope, &enc_fqn)
                 .into_iter()
                 .map(|tp| {
                     let tv = resolve_type_ref_in_file_for_owner(
