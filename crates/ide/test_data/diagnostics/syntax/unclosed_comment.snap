@@ -1,0 +1,17 @@
+error[syntax/expected-token]: '}' expected
+  --> unclosed_comment.java:1:13
+   |
+ 1 | class Main {
+   |             ^
+   |
+   = help: add a closing `}` to close the block or declaration
+
+error[syntax/unclosed-comment]: unclosed comment
+  --> unclosed_comment.java:2:5
+   |
+ 2 |     /* unclosed comment
+   |     ^^^^^^^^^^^^^^^^^^^
+ 3 | }
+   | ^
+   |
+   = help: close the block comment with `*/`

@@ -1,0 +1,7 @@
+error[syntax/expected-token]: '}' expected
+  --> unclosed_brace.java:4:2
+   |
+ 4 | }
+   |  ^
+   |
+   = help: add a closing `}` to close the block or declaration

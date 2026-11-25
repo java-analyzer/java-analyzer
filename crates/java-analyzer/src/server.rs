@@ -310,19 +310,15 @@ impl GlobalState {
                                 .diagnostics_with_layout(file_id, layout_ctx)
                                 .unwrap_or_default()
                                 .into_iter()
-                                .map(|d| lsp_types::Diagnostic {
-                                    range: text_range_to_range_with_index(
-                                        &index,
+                                .map(|d| {
+                                    self.to_lsp_diagnostic(
+                                        file_id,
+                                        uri,
                                         &text,
-                                        d.range.start().into(),
-                                        d.range.end().into(),
-                                    ),
-                                    severity: Some(match d.severity {
-                                        ide::Severity::Error => DiagnosticSeverity::ERROR,
-                                    }),
-                                    source: Some("java-analyzer".to_string()),
-                                    message: d.message,
-                                    ..Default::default()
+                                        &index,
+                                        &analysis,
+                                        d,
+                                    )
                                 })
                                 .collect();
 
@@ -370,6 +366,77 @@ impl GlobalState {
             uri: uri.clone(),
             diagnostics,
             version,
+        }
+    }
+
+    fn to_lsp_diagnostic(
+        &self,
+        file_id: FileId,
+        uri: &Uri,
+        text: &str,
+        index: &LineIndex,
+        analysis: &Analysis,
+        diag: ide::Diagnostic,
+    ) -> lsp_types::Diagnostic {
+        let related_information: Vec<lsp_types::DiagnosticRelatedInformation> = diag
+            .related
+            .into_iter()
+            .filter_map(|rel| {
+                let rel_uri = if rel.file_id == file_id {
+                    uri.clone()
+                } else {
+                    self.file_urls.get(&rel.file_id)?.clone()
+                };
+                let rel_range = if rel.file_id == file_id {
+                    text_range_to_range_with_index(
+                        index,
+                        text,
+                        rel.range.start().into(),
+                        rel.range.end().into(),
+                    )
+                } else {
+                    let rel_text = analysis.file_text(rel.file_id).ok()?;
+                    let rel_index = self.line_index(rel.file_id, &rel_text);
+                    text_range_to_range_with_index(
+                        &rel_index,
+                        &rel_text,
+                        rel.range.start().into(),
+                        rel.range.end().into(),
+                    )
+                };
+                Some(lsp_types::DiagnosticRelatedInformation {
+                    location: Location {
+                        uri: rel_uri,
+                        range: rel_range,
+                    },
+                    message: rel.message,
+                })
+            })
+            .collect();
+
+        let mut message = diag.message;
+        if let Some(help) = diag.help {
+            message.push_str("\nhelp: ");
+            message.push_str(&help);
+        }
+
+        lsp_types::Diagnostic {
+            range: text_range_to_range_with_index(
+                index,
+                text,
+                diag.range.start().into(),
+                diag.range.end().into(),
+            ),
+            severity: Some(match diag.severity {
+                ide::Severity::Error => DiagnosticSeverity::ERROR,
+                ide::Severity::Warning => DiagnosticSeverity::WARNING,
+                ide::Severity::Info => DiagnosticSeverity::INFORMATION,
+            }),
+            code: Some(lsp_types::NumberOrString::String(diag.code.to_string())),
+            source: Some("java-analyzer".to_string()),
+            message,
+            related_information: (!related_information.is_empty()).then_some(related_information),
+            ..Default::default()
         }
     }
 
@@ -1103,7 +1170,12 @@ mod tests {
                 .diagnostics
                 .iter()
                 .any(|d| d.severity == Some(DiagnosticSeverity::ERROR)
-                    && d.message.contains("declared package 'wrong.pkg' does not match package-info.java package 'com.example'")),
+                    && d.code
+                        == Some(lsp_types::NumberOrString::String(
+                            "workspace/package-mismatch".to_string()
+                        ))
+                    && d.message.contains("declared package 'wrong.pkg' does not match package-info.java package 'com.example'")
+                    && d.message.contains("\nhelp: ")),
             "Expected package mismatch error diagnostic, got: {:?}",
             pub_diags.diagnostics
         );
@@ -1289,5 +1361,71 @@ mod tests {
         assert!(Arc::ptr_eq(&state.line_indexes, &snap.line_indexes));
         assert!(Arc::ptr_eq(&state.classpath_index, &snap.classpath_index));
         assert!(Arc::ptr_eq(&state.jar_companions, &snap.jar_companions));
+    }
+
+    #[test]
+    fn to_lsp_diagnostic_maps_code_severities_related_info_and_help() {
+        let dir = TestDir::new();
+        let main_path = dir.write("src/Main.java", "class Main { int x = 1; }\n");
+        let helper_path = dir.write("src/Helper.java", "class Helper { /*😀*/ String s; }\n");
+
+        let state = GlobalState::with_workspace(dir.path());
+        let main_uri = path_to_uri(&main_path).unwrap();
+        let helper_uri = path_to_uri(&helper_path).unwrap();
+        let main_id = state.files[&main_uri];
+        let helper_id = state.files[&helper_uri];
+        let analysis = state.host.analysis();
+        let main_text = analysis.file_text(main_id).unwrap();
+        let main_index = state.line_index(main_id, &main_text);
+
+        let lsp_warn = state.to_lsp_diagnostic(
+            main_id,
+            &main_uri,
+            &main_text,
+            &main_index,
+            &analysis,
+            ide::Diagnostic {
+                code: "type/incompatible-types",
+                range: ide::TextRange::new(13.into(), 22.into()),
+                severity: ide::Severity::Warning,
+                message: "incompatible types".to_string(),
+                related: vec![ide::RelatedInformation {
+                    file_id: helper_id,
+                    range: ide::TextRange::new(23.into(), 29.into()),
+                    message: "declared here".to_string(),
+                }],
+                help: Some("cast the value".to_string()),
+            },
+        );
+        assert_eq!(lsp_warn.severity, Some(DiagnosticSeverity::WARNING));
+        assert_eq!(
+            lsp_warn.code,
+            Some(lsp_types::NumberOrString::String(
+                "type/incompatible-types".to_string()
+            ))
+        );
+        assert_eq!(lsp_warn.message, "incompatible types\nhelp: cast the value");
+        let rel = lsp_warn.related_information.unwrap();
+        assert_eq!(rel.len(), 1);
+        assert_eq!(rel[0].location.uri, helper_uri);
+        assert_eq!(rel[0].message, "declared here");
+
+        let lsp_info = state.to_lsp_diagnostic(
+            main_id,
+            &main_uri,
+            &main_text,
+            &main_index,
+            &analysis,
+            ide::Diagnostic {
+                code: "inspect/unused-local",
+                range: ide::TextRange::new(17.into(), 18.into()),
+                severity: ide::Severity::Info,
+                message: "unused local `x`".to_string(),
+                related: vec![],
+                help: None,
+            },
+        );
+        assert_eq!(lsp_info.severity, Some(DiagnosticSeverity::INFORMATION));
+        assert!(lsp_info.related_information.is_none());
     }
 }

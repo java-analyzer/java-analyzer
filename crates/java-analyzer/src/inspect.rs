@@ -389,7 +389,7 @@ mod tests {
             "output:\n{text}"
         );
         assert!(
-            text.contains("src/test/java/com/example/BrokenTest.java (1 error): expected '}'"),
+            text.contains("src/test/java/com/example/BrokenTest.java (1 error): '}' expected"),
             "output:\n{text}"
         );
     }
@@ -436,6 +436,6 @@ mod tests {
         assert_eq!(errs.len(), 1);
         assert_eq!(errs[0]["path"], "src/com/example/Wrong.java");
         assert_eq!(errs[0]["error_count"], 1);
-        assert_eq!(errs[0]["first_error"], "expected '}'");
+        assert_eq!(errs[0]["first_error"], "'}' expected");
     }
 }

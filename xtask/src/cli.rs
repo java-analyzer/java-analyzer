@@ -13,6 +13,7 @@ use crate::{
         probes::{OpCategory, Shape, Tier},
     },
     conformance::{self, Config, Kind, Source},
+    diag_conformance::{self, DiagConformanceArgs},
     report::{self, ReportArgs},
 };
 
@@ -28,6 +29,8 @@ pub struct XtaskCli {
 pub enum XtaskSubcommand {
     /// Parse Java corpora and write conformance reports
     Conformance(ConformanceCliArgs),
+    /// Evaluate diagnostic quality and javac parity against jtreg negative corpora
+    DiagConformance(DiagConformanceArgs),
     /// Assemble unified CONFORMANCE.md from verification outputs
     Report(ReportArgs),
     /// Run the reproducible Java LSP benchmark suite
@@ -202,12 +205,14 @@ pub struct ConfigArgs {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
     Conformance(Args),
+    DiagConformance(DiagConformanceArgs),
     Report(ReportArgs),
     Bench(Box<BenchArgs>),
     BenchPlot(BenchPlotArgs),
     BenchGenPlain(GenPlainArgs),
     UsageSpec,
     Help,
+    DiagConformanceHelp,
     ReportHelp,
     BenchHelp,
     BenchPlotHelp,
@@ -220,6 +225,7 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, Str
     match XtaskCli::parse_from(&refs) {
         Ok(cli) => Ok(match cli.command {
             Some(XtaskSubcommand::Conformance(c)) => Command::Conformance(c.into()),
+            Some(XtaskSubcommand::DiagConformance(d)) => Command::DiagConformance(d),
             Some(XtaskSubcommand::Report(r)) => Command::Report(r),
             Some(XtaskSubcommand::Bench(b)) => Command::Bench(Box::new((*b).into())),
             Some(XtaskSubcommand::BenchPlot(p)) => Command::BenchPlot(p),
@@ -228,6 +234,7 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, Str
             None => Command::Help,
         }),
         Err(usage::Error::Help { cmd, .. }) => Ok(match cmd.name {
+            "diag-conformance" => Command::DiagConformanceHelp,
             "report" => Command::ReportHelp,
             "bench" => Command::BenchHelp,
             "bench-plot" => Command::BenchPlotHelp,
@@ -307,6 +314,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> i32 {
 
     match subcmd {
         XtaskSubcommand::Report(report_args) => report::run(&report_args),
+        XtaskSubcommand::DiagConformance(diag_args) => diag_conformance::run(&diag_args),
         XtaskSubcommand::Bench(bench_args) => bench::run(&(*bench_args).into()),
         XtaskSubcommand::BenchPlot(plot_args) => bench::run_bench_plot(&plot_args),
         XtaskSubcommand::BenchGenPlain(gen_args) => bench::run_gen_plain(&gen_args),

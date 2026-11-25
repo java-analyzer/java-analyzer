@@ -1,0 +1,13 @@
+error[syntax/feature-not-supported]: switch expressions require language level 14
+  --> switch_expr_in_java_8.java:4:16
+   |
+ 4 |         return switch (x) {
+   |                ^^^^^^^^^^^^
+ 5 |             case 1 -> 10;
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^
+ 6 |             default -> 20;
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+ 7 |         };
+   | ^^^^^^^^^
+   |
+   = help: set the project language level to Java 14 or newer

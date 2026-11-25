@@ -1,0 +1,27 @@
+error[syntax/unclosed-literal]: unclosed text block
+  --> unclosed_text_block.java:2:17
+   |
+ 2 |     String tb = """
+   |                 ^^^
+ 3 |         hello
+   | ^^^^^^^^^^^^^
+ 4 | }
+   | ^
+   |
+   = help: add a closing `"""` delimiter
+
+error[syntax/expected-token]: ';' expected
+  --> unclosed_text_block.java:5:1
+   |
+ 5 | 
+   | ^
+   |
+   = help: add a semicolon at the end of the statement
+
+error[syntax/expected-token]: '}' expected
+  --> unclosed_text_block.java:5:1
+   |
+ 5 | 
+   | ^
+   |
+   = help: add a closing `}` to close the block or declaration

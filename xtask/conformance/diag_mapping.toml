@@ -1,0 +1,242 @@
+# Diagnostic mapping registry for `cargo xtask diag-conformance`.
+# Maps javac `-XDrawDiagnostics` keys (`compiler.err.*` / `compiler.warn.*`)
+# to java-analyzer diagnostic codes (`<category>/<slug>`), evaluation phase,
+# and expected primary-message patterns.
+#
+# See `docs/specs/0020-diagnostic-conformance-testing.md`.
+
+[[mapping]]
+javac_key = "compiler.err.expected"
+phase = "syntax"
+ja_code = "syntax/expected-token"
+message_pattern = "expected"
+notes = "e.g. `';' expected`, `')' expected`, `identifier expected`"
+
+[[mapping]]
+javac_key = "compiler.err.expected2"
+phase = "syntax"
+ja_code = "syntax/expected-token"
+message_pattern = "expected"
+notes = "Two-token alternative expected by javac; java-analyzer emits `syntax/expected-token`."
+
+[[mapping]]
+javac_key = "compiler.err.expected3"
+phase = "syntax"
+ja_code = "syntax/expected-token"
+message_pattern = "expected"
+notes = "Three-token alternative expected by javac; java-analyzer emits `syntax/expected-token`."
+
+[[mapping]]
+javac_key = "compiler.err.illegal.start.of.expr"
+phase = "syntax"
+ja_code = "syntax/illegal-start"
+message_pattern = "illegal start of expression"
+
+[[mapping]]
+javac_key = "compiler.err.illegal.start.of.type"
+phase = "syntax"
+ja_code = "syntax/illegal-start"
+message_pattern = "illegal start of type"
+
+[[mapping]]
+javac_key = "compiler.err.illegal.start.of.stmt"
+phase = "syntax"
+ja_code = "syntax/illegal-start"
+message_pattern = "illegal start of statement"
+
+[[mapping]]
+javac_key = "compiler.err.premature.eof"
+phase = "syntax"
+ja_code = "syntax/expected-token"
+message_pattern = "expected"
+notes = "java-analyzer typically reports the missing closing delimiter (e.g. `'}' expected`) at EOF rather than generic premature EOF."
+
+[[mapping]]
+javac_key = "compiler.err.not.stmt"
+phase = "syntax"
+ja_code = "syntax/illegal-start"
+message_pattern = "illegal start of statement"
+notes = "Deliberate UX unification: javac's `not a statement` is reported as `illegal start of statement` or a missing token."
+
+[[mapping]]
+javac_key = "compiler.err.illegal.char"
+phase = "syntax"
+ja_code = "syntax/illegal-start"
+message_pattern = "unexpected character"
+
+[[mapping]]
+javac_key = "compiler.err.unclosed.str.lit"
+phase = "syntax"
+ja_code = "syntax/unclosed-literal"
+message_pattern = "unclosed string literal"
+
+[[mapping]]
+javac_key = "compiler.err.unclosed.char.lit"
+phase = "syntax"
+ja_code = "syntax/unclosed-literal"
+message_pattern = "unclosed character literal"
+
+[[mapping]]
+javac_key = "compiler.err.unclosed.comment"
+phase = "syntax"
+ja_code = "syntax/unclosed-comment"
+message_pattern = "unclosed comment"
+
+[[mapping]]
+javac_key = "compiler.err.unclosed.text.block"
+phase = "syntax"
+ja_code = "syntax/unclosed-literal"
+message_pattern = "unclosed text block"
+
+[[mapping]]
+javac_key = "compiler.err.illegal.text.block.open"
+phase = "syntax"
+ja_code = "syntax/unclosed-literal"
+message_pattern = "illegal text block open delimiter"
+notes = "Deliberate wording improvement: clarifies missing line terminator after `\"\"\"`."
+
+[[mapping]]
+javac_key = "compiler.err.illegal.esc.char"
+phase = "syntax"
+ja_code = "syntax/parse-error"
+message_pattern = "illegal escape character"
+
+[[mapping]]
+javac_key = "compiler.err.illegal.line.end.in.char.lit"
+phase = "syntax"
+ja_code = "syntax/unclosed-literal"
+message_pattern = "unclosed character literal"
+
+[[mapping]]
+javac_key = "compiler.err.empty.char.lit"
+phase = "syntax"
+ja_code = "syntax/parse-error"
+message_pattern = "empty character literal"
+
+[[mapping]]
+javac_key = "compiler.err.malformed.fp.lit"
+phase = "syntax"
+ja_code = "syntax/parse-error"
+message_pattern = "malformed floating-point literal"
+
+[[mapping]]
+javac_key = "compiler.err.int.number.too.large"
+phase = "syntax"
+ja_code = "syntax/parse-error"
+message_pattern = "integer number too large"
+
+[[mapping]]
+javac_key = "compiler.err.orphaned"
+phase = "syntax"
+ja_code = "syntax/illegal-start"
+message_pattern = "unexpected"
+notes = "javac reports `orphaned <kw>`; java-analyzer emits `unexpected '<kw>'` or `unmatched '}'`."
+
+[[mapping]]
+javac_key = "compiler.err.else.without.if"
+phase = "syntax"
+ja_code = "syntax/illegal-start"
+message_pattern = "unexpected 'else'"
+notes = "Reported as `unexpected 'else'` with removal/pairing help hint."
+
+[[mapping]]
+javac_key = "compiler.err.catch.without.try"
+phase = "syntax"
+ja_code = "syntax/illegal-start"
+message_pattern = "unexpected 'catch'"
+notes = "Reported as `unexpected 'catch'`."
+
+[[mapping]]
+javac_key = "compiler.err.finally.without.try"
+phase = "syntax"
+ja_code = "syntax/illegal-start"
+message_pattern = "unexpected 'finally'"
+notes = "Reported as `unexpected 'finally'`."
+
+[[mapping]]
+javac_key = "compiler.err.try.without.catch.or.finally"
+phase = "syntax"
+ja_code = "syntax/expected-token"
+message_pattern = "'catch' or 'finally' expected"
+
+[[mapping]]
+javac_key = "compiler.err.try.without.catch.finally.or.resource.decls"
+phase = "syntax"
+ja_code = "syntax/expected-token"
+message_pattern = "'catch' or 'finally' expected"
+
+[[mapping]]
+javac_key = "compiler.err.var.not.allowed"
+phase = "syntax"
+ja_code = "syntax/feature-not-supported"
+message_pattern = "language level"
+notes = "Version-gated feature check for `var` local variable type inference."
+
+[[mapping]]
+javac_key = "compiler.err.underscore.as.identifier"
+phase = "syntax"
+ja_code = "syntax/feature-not-supported"
+message_pattern = "language level"
+notes = "Java 9+ restriction on `_` as an identifier."
+
+[[mapping]]
+javac_key = "compiler.err.underscore.as.identifier.in.method"
+phase = "syntax"
+ja_code = "syntax/feature-not-supported"
+message_pattern = "language level"
+
+[[mapping]]
+javac_key = "compiler.err.unnamed.var.not.allowed"
+phase = "syntax"
+ja_code = "syntax/feature-not-supported"
+message_pattern = "language level"
+notes = "Version-gated feature check for unnamed patterns/variables (`_`)."
+
+[[mapping]]
+javac_key = "compiler.err.preview.feature.disabled"
+phase = "syntax"
+ja_code = "syntax/preview-required"
+message_pattern = "preview feature"
+
+[[mapping]]
+javac_key = "compiler.err.preview.feature.disabled.plural"
+phase = "syntax"
+ja_code = "syntax/preview-required"
+message_pattern = "preview feature"
+
+[[mapping]]
+javac_key = "compiler.err.feature.not.supported.in.source"
+phase = "syntax"
+ja_code = "syntax/feature-not-supported"
+message_pattern = "language level"
+
+[[mapping]]
+javac_key = "compiler.err.feature.not.supported.in.source.plural"
+phase = "syntax"
+ja_code = "syntax/feature-not-supported"
+message_pattern = "language level"
+
+# ---- Phase B (Semantic & Typechecker Diagnostics — Spec 0012) ----
+# Seeded examples for Phase B; uncomment or expand as Spec 0012 diagnostics land.
+#
+# [[mapping]]
+# javac_key = "compiler.err.prob.found.req"
+# phase = "semantic"
+# ja_code = "type/incompatible-types"
+# message_pattern = "incompatible types:"
+# requires_related = true
+# notes = "Attach RelatedInformation pointing to the expected declaration or return type."
+#
+# [[mapping]]
+# javac_key = "compiler.err.already.defined"
+# phase = "semantic"
+# ja_code = "symbol/duplicate-declaration"
+# message_pattern = "already defined"
+# requires_related = true
+#
+# [[mapping]]
+# javac_key = "compiler.err.cant.resolve.location"
+# phase = "semantic"
+# ja_code = "resolve/unresolved-symbol"
+# message_pattern = "cannot find symbol"
+# requires_related = false

@@ -772,6 +772,7 @@ fn markdown_output_is_deterministic_and_matches_snapshot() {
     let report1 = report::generate(&ReportArgs {
         conformance: conf.clone(),
         workspace_corpus: wc.clone(),
+        diag_conformance: None,
         test_output: Some(tests.clone()),
         clippy_status: ClippyStatus::Pass,
         known_findings: None,
@@ -868,4 +869,113 @@ None.
 ";
 
     assert_eq!(md1, expected);
+}
+
+#[test]
+fn diag_conformance_section_renders_when_present_and_omits_gracefully_when_absent() {
+    let dir = scratch("diag-conformance-report");
+    let conf = dir.join("report.json");
+    let diag_json = dir.join("diagnostics.json");
+    let missing_diag_json = dir.join("missing-diagnostics.json");
+    let out_with = dir.join("WITH_DIAG.md");
+    let out_absent = dir.join("WITHOUT_DIAG.md");
+
+    write_clean_conformance(&conf);
+    write(
+        &dir,
+        "diagnostics.json",
+        r#"{
+  "schema_version": 1,
+  "status": "ok",
+  "skip_reason": null,
+  "phase": "syntax",
+  "corpus_dir": "target/conformance/corpus",
+  "totals": {
+    "cases": 42,
+    "skipped_files": 0,
+    "expected_diagnostics": 50,
+    "emitted_diagnostics": 52,
+    "line_matched_exact": 45,
+    "line_matched_plus_minus_1": 48,
+    "line_match_exact_pct": 90.0,
+    "line_match_plus_minus_1_pct": 96.0,
+    "category_matched": 44,
+    "category_evaluated": 48,
+    "category_parity_pct": 91.67,
+    "ux_lint_passed": 52,
+    "ux_lint_violations": 0,
+    "ux_lint_pass_pct": 100.0,
+    "cascade_noise_ratio": 1.04
+  },
+  "phases": {
+    "syntax": {
+      "cases": 42,
+      "skipped_files": 0,
+      "expected_diagnostics": 50,
+      "emitted_diagnostics": 52,
+      "line_matched_exact": 45,
+      "line_matched_plus_minus_1": 48,
+      "line_match_exact_pct": 90.0,
+      "line_match_plus_minus_1_pct": 96.0,
+      "category_matched": 44,
+      "category_evaluated": 48,
+      "category_parity_pct": 91.67,
+      "ux_lint_passed": 52,
+      "ux_lint_violations": 0,
+      "ux_lint_pass_pct": 100.0,
+      "cascade_noise_ratio": 1.04
+    }
+  },
+  "per_javac_key": {},
+  "top_unmapped_keys": [],
+  "top_mismatched_keys": [],
+  "worst_cascade_files": [],
+  "ux_lint_violation_counts": {}
+}"#,
+    );
+
+    let code = cli::run(args(&[
+        "report",
+        "--conformance",
+        conf.to_str().unwrap(),
+        "--workspace-corpus",
+        dir.join("missing-wc").to_str().unwrap(),
+        "--diag-conformance",
+        diag_json.to_str().unwrap(),
+        "--date",
+        "2026-11-25",
+        "--out",
+        out_with.to_str().unwrap(),
+        "--strict",
+    ]));
+    assert_eq!(code, 0);
+
+    let md = fs::read_to_string(&out_with).unwrap();
+    assert!(md.contains("## 4. Diagnostic Conformance"), "{md}");
+    assert!(
+        md.contains("| Phase | Cases | Line Match Exact / ±1 | Category Parity | UX Lint Pass | Cascade Noise Ratio |"),
+        "{md}"
+    );
+    assert!(
+        md.contains("| `syntax` | 42 | 90.0% / 96.0% | 91.7% | 100.0% | 1.04 |"),
+        "{md}"
+    );
+
+    // Absent --diag-conformance file omits Section 4 gracefully and exits 0.
+    let code_absent = cli::run(args(&[
+        "report",
+        "--conformance",
+        conf.to_str().unwrap(),
+        "--workspace-corpus",
+        dir.join("missing-wc").to_str().unwrap(),
+        "--diag-conformance",
+        missing_diag_json.to_str().unwrap(),
+        "--date",
+        "2026-11-25",
+        "--out",
+        out_absent.to_str().unwrap(),
+    ]));
+    assert_eq!(code_absent, 0);
+    let md_absent = fs::read_to_string(&out_absent).unwrap();
+    assert!(!md_absent.contains("## 4. Diagnostic Conformance"), "{md_absent}");
 }

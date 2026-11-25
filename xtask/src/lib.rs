@@ -3,6 +3,7 @@
 pub mod bench;
 pub mod cli;
 pub mod conformance;
+pub mod diag_conformance;
 pub mod isolate;
 pub mod jtreg;
 pub mod report;

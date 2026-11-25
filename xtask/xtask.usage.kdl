@@ -26,12 +26,41 @@ Report only: the exit code is 0 whatever the conformance results are, and non-ze
     }
     flag "-h --help" help="Print help" action=help builtin=#true
 }
+cmd diag-conformance help="Evaluate diagnostic quality and javac parity against jtreg negative corpora" {
+    long_help #"""
+Evaluate diagnostic quality and javac parity against jtreg negative corpora.
+
+Report only: exits 0 whenever the report is written (even when the corpus is missing), and non-zero only on tool errors (invalid arguments, malformed mapping TOML, or I/O write errors).
+"""#
+    flag --phase help="Diagnostic phase to evaluate: syntax | semantic | all" default=syntax {
+        arg <PHASE> {
+            choices {
+                choice syntax
+                choice semantic
+                choice all
+            }
+        }
+    }
+    flag --corpus-dir help="Root directory containing jtreg negative corpus files" default="target/conformance/corpus" {
+        arg <PATH>
+    }
+    flag --mapping help="TOML mapping registry overriding embedded xtask/conformance/diag_mapping.toml" {
+        arg <PATH>
+    }
+    flag --out help="Output JSON report path" default="target/conformance/diagnostics.json" {
+        arg <PATH>
+    }
+    flag "-h --help" help="Print help" action=help builtin=#true
+}
 cmd report help="Assemble unified CONFORMANCE.md from verification outputs" {
     flag --conformance help="Path to conformance report.json" default="target/conformance/report.json" {
         arg <PATH>
     }
     flag --workspace-corpus help="Directory containing timings.tsv and <repo>.json" default="target/workspace-corpus" {
         arg <DIR>
+    }
+    flag --diag-conformance help="Optional path to diagnostic conformance JSON (`target/conformance/diagnostics.json`)" {
+        arg <PATH>
     }
     flag --test-output help="Captured stdout from `cargo test --workspace --all-targets`" {
         arg <PATH>

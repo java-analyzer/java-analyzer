@@ -23,6 +23,7 @@ fn usage_spec_command_parses_and_exits_zero() {
 fn unknown_flags_return_exit_code_two() {
     for argv in [
         vec!["--bogus".to_string()],
+        vec!["diag-conformance".to_string(), "--bogus".to_string()],
         vec!["bench".to_string(), "--bogus".to_string()],
         vec!["bench-plot".to_string(), "--bogus".to_string()],
         vec!["bench-gen-plain".to_string(), "--bogus".to_string()],

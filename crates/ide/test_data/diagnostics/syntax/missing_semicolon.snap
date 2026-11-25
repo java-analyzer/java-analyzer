@@ -1,0 +1,7 @@
+error[syntax/expected-token]: ';' expected
+  --> missing_semicolon.java:3:22
+   |
+ 3 |         int x = 1 + 2
+   |                      ^
+   |
+   = help: add a semicolon at the end of the statement

@@ -10,6 +10,8 @@ use std::{
 
 use serde::Deserialize;
 
+use crate::diag_conformance::{self, DiagnosticConformanceReport, ReportStatus};
+
 pub const EMBEDDED_KNOWN_FINDINGS: &str =
     include_str!("../conformance/workspace-known-findings.toml");
 
@@ -30,6 +32,9 @@ pub struct ReportArgs {
     /// Directory containing timings.tsv and <repo>.json
     #[usage(long, value_name = "DIR", default = "target/workspace-corpus")]
     pub workspace_corpus: PathBuf,
+    /// Optional path to diagnostic conformance JSON (`target/conformance/diagnostics.json`)
+    #[usage(long, value_name = "PATH")]
+    pub diag_conformance: Option<PathBuf>,
     /// Captured stdout from `cargo test --workspace --all-targets`
     #[usage(long, value_name = "PATH")]
     pub test_output: Option<PathBuf>,
@@ -58,6 +63,7 @@ impl Default for ReportArgs {
         Self {
             conformance: PathBuf::from("target/conformance/report.json"),
             workspace_corpus: PathBuf::from("target/workspace-corpus"),
+            diag_conformance: None,
             test_output: None,
             clippy_status: ClippyStatus::Skipped,
             known_findings: None,
@@ -741,7 +747,7 @@ pub enum Verdict {
     Fail,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UnifiedReport {
     pub date: String,
     pub revision: Option<String>,
@@ -750,6 +756,7 @@ pub struct UnifiedReport {
     pub conformance_path: PathBuf,
     pub conformance: Option<ConformanceSummary>,
     pub workspace_corpus: Option<WorkspaceCorpusSummary>,
+    pub diag_conformance: Option<DiagnosticConformanceReport>,
 }
 
 impl UnifiedReport {
@@ -799,6 +806,10 @@ impl UnifiedReport {
         ));
         out.push_str("\n---\n\n");
         out.push_str(&render_workspace_section(self.workspace_corpus.as_ref()));
+        if let Some(diag) = &self.diag_conformance {
+            out.push_str("\n---\n\n");
+            out.push_str(&render_diag_conformance_section(diag));
+        }
         out
     }
 
@@ -1141,6 +1152,54 @@ pub fn render_workspace_section(summary: Option<&WorkspaceCorpusSummary>) -> Str
     out
 }
 
+pub fn render_diag_conformance_section(report: &DiagnosticConformanceReport) -> String {
+    let mut out = String::from("## 4. Diagnostic Conformance (`cargo xtask diag-conformance`)\n\n");
+    if report.status == ReportStatus::Skipped {
+        let reason = report.skip_reason.as_deref().unwrap_or("skipped");
+        out.push_str(&format!("*Skipped ({reason})*\n"));
+        return out;
+    }
+
+    out.push_str(&format!(
+        "Evaluated phase `{}` across **{} negative case(s)** (**{} expected**, **{} emitted** diagnostics).\n\n",
+        report.phase,
+        format_count(report.totals.cases),
+        format_count(report.totals.expected_diagnostics),
+        format_count(report.totals.emitted_diagnostics),
+    ));
+
+    out.push_str("| Phase | Cases | Line Match Exact / ±1 | Category Parity | UX Lint Pass | Cascade Noise Ratio |\n");
+    out.push_str("|---|---:|---:|---:|---:|---:|\n");
+
+    for (phase, metrics) in &report.phases {
+        out.push_str(&format!(
+            "| `{}` | {} | {:.1}% / {:.1}% | {:.1}% | {:.1}% | {:.2} |\n",
+            phase,
+            format_count(metrics.cases),
+            metrics.line_match_exact_pct,
+            metrics.line_match_plus_minus_1_pct,
+            metrics.category_parity_pct,
+            metrics.ux_lint_pass_pct,
+            metrics.cascade_noise_ratio,
+        ));
+    }
+
+    if report.phases.len() > 1 {
+        let t = &report.totals;
+        out.push_str(&format!(
+            "| **Total** | **{}** | **{:.1}% / {:.1}%** | **{:.1}%** | **{:.1}%** | **{:.2}** |\n",
+            format_count(t.cases),
+            t.line_match_exact_pct,
+            t.line_match_plus_minus_1_pct,
+            t.category_parity_pct,
+            t.ux_lint_pass_pct,
+            t.cascade_noise_ratio,
+        ));
+    }
+
+    out
+}
+
 fn format_effective_rate(conforming: usize, files: usize, known_divergences: usize) -> String {
     let effective = files.saturating_sub(known_divergences);
     let base = if effective == 0 {
@@ -1199,6 +1258,15 @@ pub fn generate(args: &ReportArgs) -> Result<UnifiedReport, String> {
 
     let workspace_corpus = load_workspace_corpus(&args.workspace_corpus, &known_rules)?;
 
+    let diag_conformance = match &args.diag_conformance {
+        Some(path) if path.is_file() => {
+            let text = fs::read_to_string(path)
+                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            Some(diag_conformance::parse_report_json(&text)?)
+        }
+        Some(_) | None => None,
+    };
+
     let date = args.date.clone().unwrap_or_else(current_utc_date);
 
     Ok(UnifiedReport {
@@ -1209,6 +1277,7 @@ pub fn generate(args: &ReportArgs) -> Result<UnifiedReport, String> {
         conformance_path: args.conformance.clone(),
         conformance,
         workspace_corpus,
+        diag_conformance,
     })
 }
 

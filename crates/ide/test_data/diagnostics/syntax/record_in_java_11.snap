@@ -1,0 +1,7 @@
+error[syntax/feature-not-supported]: records require language level 16
+  --> record_in_java_11.java:2:1
+   |
+ 2 | record Point(int x, int y) {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: set the project language level to Java 16 or newer

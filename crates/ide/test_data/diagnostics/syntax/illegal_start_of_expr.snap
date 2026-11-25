@@ -1,0 +1,7 @@
+error[syntax/illegal-start]: illegal start of expression
+  --> illegal_start_of_expr.java:3:16
+   |
+ 3 |         int x = ;
+   |                ^
+   |
+   = help: provide a valid expression here

@@ -8,6 +8,7 @@ description.workspace = true
 
 [dependencies]
 hir.workspace = true
+line-index.workspace = true
 syntax.workspace = true
 
 [dev-dependencies]

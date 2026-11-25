@@ -26,7 +26,11 @@ fn syntax_error_is_published_with_lsp_range() {
     let params = client.next_notification(PUBLISH);
     let diagnostics = params["diagnostics"].as_array().unwrap();
     assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
-    assert_eq!(diagnostics[0]["message"], json!("expected ';'"));
+    assert_eq!(diagnostics[0]["code"], json!("syntax/expected-token"));
+    assert_eq!(
+        diagnostics[0]["message"],
+        json!("';' expected\nhelp: add a semicolon at the end of the statement")
+    );
     assert_eq!(diagnostics[0]["severity"], json!(1));
     assert_eq!(diagnostics[0]["source"], json!("java-analyzer"));
     // Just after `x` on the second line.
@@ -49,8 +53,14 @@ fn diagnostics_columns_are_utf16() {
     let diagnostics = params["diagnostics"].as_array().unwrap();
     let unterminated = diagnostics
         .iter()
-        .find(|d| d["message"] == json!("unterminated string literal"))
-        .unwrap_or_else(|| panic!("no unterminated string diagnostic in {diagnostics:?}"));
+        .find(|d| d["code"] == json!("syntax/unclosed-literal"))
+        .unwrap_or_else(|| panic!("no unclosed string diagnostic in {diagnostics:?}"));
+    assert!(
+        unterminated["message"]
+            .as_str()
+            .is_some_and(|m| m.starts_with("unclosed string literal")),
+        "{unterminated:?}"
+    );
     assert_eq!(
         unterminated["range"]["start"],
         json!({ "line": 0, "character": 28 })

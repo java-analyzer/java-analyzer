@@ -1,0 +1,7 @@
+error[syntax/preview-required]: records are a preview feature in Java 14
+  --> record_preview_in_java_14.java:2:1
+   |
+ 2 | record Point(int x, int y) {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: pass `--enable-preview` to enable preview language features
