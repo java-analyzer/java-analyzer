@@ -44,7 +44,8 @@ impl FromStr for ReleaseArg {
     bin = "java-analyzer",
     version = env!("CARGO_PKG_VERSION"),
     unknown_flags = "error",
-    validate_with = validate_cli
+    validate_with = validate_cli,
+    completion
 )]
 pub struct Cli {
     /// Accepted for LSP clients that pass `--stdio` (default transport).
@@ -56,7 +57,7 @@ pub struct Cli {
 }
 
 #[derive(Debug, Clone, usage::Subcommands, PartialEq, Eq)]
-#[usage(crate = usage)]
+#[usage(crate = usage, run)]
 pub enum Command {
     /// Start the Language Server Protocol server over stdio (default).
     ///
@@ -73,9 +74,77 @@ pub enum Command {
     /// Focused strictly on workspace layout, JDK/release pinning, and dependency overrides;
     /// does not index binary JDK/JAR bytecode.
     Configure(Box<ConfigureArgs>),
+    /// Generate shell completions
+    Completion(CompletionCmd),
     /// Print the canonical KDL usage spec for java-analyzer to stdout
     #[usage(hide)]
     UsageSpec,
+}
+
+/// Wrapper around [`usage::completion::Completion`] so `Command` can dispatch via [`usage::Run`].
+#[derive(Debug, Clone, usage::Args)]
+#[usage(crate = usage)]
+pub struct CompletionCmd {
+    #[usage(flatten)]
+    pub completion: usage::completion::Completion,
+}
+
+impl PartialEq for CompletionCmd {
+    fn eq(&self, other: &Self) -> bool {
+        self.completion.shell == other.completion.shell
+            && self.completion.install == other.completion.install
+            && self.completion.force == other.completion.force
+    }
+}
+
+impl Eq for CompletionCmd {}
+
+impl usage::Run for CommandLsp {
+    type Output = anyhow::Result<()>;
+
+    fn run(self) -> Self::Output {
+        crate::server::run_stdio()
+    }
+}
+
+impl usage::Run for InspectArgs {
+    type Output = anyhow::Result<()>;
+
+    fn run(self) -> Self::Output {
+        crate::inspect::run(self)?;
+        Ok(())
+    }
+}
+
+impl usage::Run for ConfigureArgs {
+    type Output = anyhow::Result<()>;
+
+    fn run(self) -> Self::Output {
+        crate::configure::run(self)?;
+        Ok(())
+    }
+}
+
+impl usage::Run for CompletionCmd {
+    type Output = anyhow::Result<()>;
+
+    fn run(self) -> Self::Output {
+        self.completion.run_split(
+            "java-analyzer",
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+        )?;
+        Ok(())
+    }
+}
+
+impl usage::Run for CommandUsageSpec {
+    type Output = anyhow::Result<()>;
+
+    fn run(self) -> Self::Output {
+        print!("{}", Cli::to_kdl());
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, usage::Args)]
@@ -435,5 +504,162 @@ mod tests {
                 other => panic!("expected Exit(2) for {argv:?}, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn completion_subcommand_parses_shells_and_flags() {
+        let cli = parse_args(string_args(&["completion", "zsh"])).unwrap();
+        let Some(Command::Completion(cmd)) = cli.command else {
+            panic!("expected Completion command");
+        };
+        assert_eq!(cmd.completion.shell, "zsh");
+        assert!(!cmd.completion.install);
+        assert!(!cmd.completion.force);
+
+        let cli = parse_args(string_args(&["completion", "fish", "--install", "--force"])).unwrap();
+        let Some(Command::Completion(cmd)) = cli.command else {
+            panic!("expected Completion command");
+        };
+        assert_eq!(cmd.completion.shell, "fish");
+        assert!(cmd.completion.install);
+        assert!(cmd.completion.force);
+
+        assert!(parse_args(string_args(&["completion", "tcsh"])).is_err());
+        assert!(parse_args(string_args(&["completion", "zsh", "--force"])).is_err());
+    }
+
+    #[test]
+    fn dynamic_completion_requests_return_candidates() {
+        let root_req = parse_outcome(&os_args(&[
+            "__complete_word__",
+            "--shell",
+            "zsh",
+            "--words",
+            "java-analyzer",
+            "",
+        ]));
+        let usage::embedded::Outcome::Exit(exit) = root_req else {
+            panic!("expected Exit outcome for __complete_word__");
+        };
+        assert_eq!(exit.code, 0, "{}", exit.text);
+        assert!(!exit.stderr);
+        for subcmd in ["lsp", "inspect", "configure", "completion"] {
+            assert!(
+                exit.text.contains(subcmd),
+                "missing `{subcmd}` in:\n{}",
+                exit.text
+            );
+        }
+        assert!(
+            !exit.text.contains("usage-spec"),
+            "hidden subcommand `usage-spec` should not appear in completions:\n{}",
+            exit.text
+        );
+
+        let shell_req = parse_outcome(&os_args(&[
+            "__complete_word__",
+            "--shell",
+            "zsh",
+            "--words",
+            "java-analyzer",
+            "completion",
+            "",
+        ]));
+        let usage::embedded::Outcome::Exit(exit) = shell_req else {
+            panic!("expected Exit outcome for completion shell choices");
+        };
+        assert_eq!(exit.code, 0, "{}", exit.text);
+        for shell in ["bash", "zsh", "fish"] {
+            assert!(
+                exit.text.contains(shell),
+                "missing shell `{shell}` in:\n{}",
+                exit.text
+            );
+        }
+    }
+
+    #[test]
+    fn completion_install_is_hermetic_via_run_split_in() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let config_home = tmp.path().join("xdg-config");
+        let data_home = tmp.path().join("xdg-data");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&config_home).unwrap();
+        std::fs::create_dir_all(&data_home).unwrap();
+
+        let env = usage::install::Env::new(
+            usage::install::Platform::Linux,
+            [
+                ("HOME".to_string(), home.as_os_str().to_os_string()),
+                (
+                    "XDG_CONFIG_HOME".to_string(),
+                    config_home.as_os_str().to_os_string(),
+                ),
+                (
+                    "XDG_DATA_HOME".to_string(),
+                    data_home.as_os_str().to_os_string(),
+                ),
+            ],
+        );
+
+        let cli = parse_args(string_args(&["completion", "fish", "--install"])).unwrap();
+        let Some(Command::Completion(cmd)) = cli.command else {
+            panic!("expected Completion command");
+        };
+
+        let mut out = Vec::new();
+        let mut report = Vec::new();
+        cmd.completion
+            .run_split_in("java-analyzer", &env, &mut out, &mut report)
+            .unwrap();
+
+        assert!(out.is_empty(), "install should leave stdout empty");
+        let report_text = String::from_utf8(report).unwrap();
+        assert!(
+            report_text.contains("installed"),
+            "unexpected report: {report_text}"
+        );
+
+        let installed_path = config_home.join("fish/completions/java-analyzer.fish");
+        assert!(
+            installed_path.is_file(),
+            "expected completion file at {}",
+            installed_path.display()
+        );
+        let script = std::fs::read_to_string(&installed_path).unwrap();
+        assert!(script.contains("__complete_word__"), "{script}");
+
+        // Overwriting a foreign file requires `--force`.
+        std::fs::write(&installed_path, "# custom user script\n").unwrap();
+        let mut out = Vec::new();
+        let mut report = Vec::new();
+        assert!(
+            cmd.completion
+                .run_split_in("java-analyzer", &env, &mut out, &mut report)
+                .is_err()
+        );
+
+        let forced_cli =
+            parse_args(string_args(&["completion", "fish", "--install", "--force"])).unwrap();
+        let Some(Command::Completion(forced_cmd)) = forced_cli.command else {
+            panic!("expected Completion command");
+        };
+        let mut out = Vec::new();
+        let mut report = Vec::new();
+        forced_cmd
+            .completion
+            .run_split_in("java-analyzer", &env, &mut out, &mut report)
+            .unwrap();
+        let forced_report = String::from_utf8(report).unwrap();
+        assert!(
+            forced_report.contains("replaced"),
+            "unexpected forced report: {forced_report}"
+        );
+        let updated_script = std::fs::read_to_string(&installed_path).unwrap();
+        assert!(
+            updated_script.contains("__complete_word__"),
+            "{updated_script}"
+        );
     }
 }

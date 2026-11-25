@@ -1,7 +1,6 @@
 use std::{ffi::OsString, process::ExitCode};
 
-use java_analyzer::cli::{Cli, Command, parse_outcome};
-use lsp_server::Connection;
+use java_analyzer::cli::{Command, parse_outcome};
 
 fn main() -> ExitCode {
     let os_args: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -17,39 +16,9 @@ fn main() -> ExitCode {
         }
     };
 
-    if let Err(err) = run(cli) {
+    if let Err(err) = usage::Run::run(cli.command.unwrap_or(Command::Lsp)) {
         eprintln!("Error: {err:?}");
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
-}
-
-fn run(cli: Cli) -> anyhow::Result<()> {
-    match cli.command {
-        None | Some(Command::Lsp) => {
-            let _ = tracing_subscriber::fmt()
-                .with_writer(std::io::stderr)
-                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-                .with_ansi(false)
-                .try_init();
-            tracing::info!("Starting java-analyzer LSP server...");
-            let (connection, io_threads) = Connection::stdio();
-            java_analyzer::server::run(connection)?;
-            io_threads.join()?;
-            tracing::info!("java-analyzer LSP server shut down");
-            Ok(())
-        }
-        Some(Command::Inspect(args)) => {
-            java_analyzer::inspect::run(args)?;
-            Ok(())
-        }
-        Some(Command::Configure(args)) => {
-            java_analyzer::configure::run(*args)?;
-            Ok(())
-        }
-        Some(Command::UsageSpec) => {
-            print!("{}", Cli::to_kdl());
-            Ok(())
-        }
-    }
 }

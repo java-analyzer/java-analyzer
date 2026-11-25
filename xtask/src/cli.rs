@@ -18,14 +18,20 @@ use crate::{
 };
 
 #[derive(Debug, usage::Cli)]
-#[usage(crate = usage, name = "xtask", bin = "cargo xtask", unknown_flags = "error")]
+#[usage(
+    crate = usage,
+    name = "xtask",
+    bin = "cargo xtask",
+    unknown_flags = "error",
+    completion
+)]
 pub struct XtaskCli {
     #[usage(subcommand)]
     pub command: Option<XtaskSubcommand>,
 }
 
 #[derive(Debug, usage::Subcommands)]
-#[usage(crate = usage)]
+#[usage(crate = usage, run)]
 pub enum XtaskSubcommand {
     /// Parse Java corpora and write conformance reports
     Conformance(ConformanceCliArgs),
@@ -39,8 +45,101 @@ pub enum XtaskSubcommand {
     BenchPlot(BenchPlotArgs),
     /// Generate the synthetic plain-small Java corpus
     BenchGenPlain(GenPlainArgs),
+    /// Generate shell completions
+    Completion(CompletionCmd),
     /// Print the canonical KDL usage spec for xtask to stdout
     UsageSpec,
+}
+
+/// Wrapper around [`usage::completion::Completion`] so `XtaskSubcommand` can dispatch via
+/// [`usage::Run`].
+#[derive(Debug, Clone, usage::Args)]
+#[usage(crate = usage)]
+pub struct CompletionCmd {
+    #[usage(flatten)]
+    pub completion: usage::completion::Completion,
+}
+
+impl PartialEq for CompletionCmd {
+    fn eq(&self, other: &Self) -> bool {
+        self.completion.shell == other.completion.shell
+            && self.completion.install == other.completion.install
+            && self.completion.force == other.completion.force
+    }
+}
+
+impl Eq for CompletionCmd {}
+
+impl usage::Run for ConformanceCliArgs {
+    type Output = i32;
+
+    fn run(self) -> Self::Output {
+        run_conformance(Args::from(self))
+    }
+}
+
+impl usage::Run for DiagConformanceArgs {
+    type Output = i32;
+
+    fn run(self) -> Self::Output {
+        diag_conformance::run(&self)
+    }
+}
+
+impl usage::Run for ReportArgs {
+    type Output = i32;
+
+    fn run(self) -> Self::Output {
+        report::run(&self)
+    }
+}
+
+impl usage::Run for BenchCliArgs {
+    type Output = i32;
+
+    fn run(self) -> Self::Output {
+        bench::run(&self.into())
+    }
+}
+
+impl usage::Run for BenchPlotArgs {
+    type Output = i32;
+
+    fn run(self) -> Self::Output {
+        bench::run_bench_plot(&self)
+    }
+}
+
+impl usage::Run for GenPlainArgs {
+    type Output = i32;
+
+    fn run(self) -> Self::Output {
+        bench::run_gen_plain(&self)
+    }
+}
+
+impl usage::Run for CompletionCmd {
+    type Output = i32;
+
+    fn run(self) -> Self::Output {
+        if let Err(err) =
+            self.completion
+                .run_split("xtask", &mut std::io::stdout(), &mut std::io::stderr())
+        {
+            eprintln!("error: {err}");
+            return 1;
+        }
+        0
+    }
+}
+
+impl usage::Run for XtaskSubcommandUsageSpec {
+    type Output = i32;
+
+    fn run(self) -> Self::Output {
+        print!("{}", XtaskCli::to_kdl());
+        0
+    }
 }
 
 fn default_release() -> syntax::Release {
@@ -210,6 +309,7 @@ pub enum Command {
     Bench(Box<BenchArgs>),
     BenchPlot(BenchPlotArgs),
     BenchGenPlain(GenPlainArgs),
+    Completion(CompletionCmd),
     UsageSpec,
     Help,
     DiagConformanceHelp,
@@ -230,6 +330,7 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, Str
             Some(XtaskSubcommand::Bench(b)) => Command::Bench(Box::new((*b).into())),
             Some(XtaskSubcommand::BenchPlot(p)) => Command::BenchPlot(p),
             Some(XtaskSubcommand::BenchGenPlain(g)) => Command::BenchGenPlain(g),
+            Some(XtaskSubcommand::Completion(c)) => Command::Completion(c),
             Some(XtaskSubcommand::UsageSpec) => Command::UsageSpec,
             None => Command::Help,
         }),
@@ -312,20 +413,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> i32 {
         return 0;
     };
 
-    match subcmd {
-        XtaskSubcommand::Report(report_args) => report::run(&report_args),
-        XtaskSubcommand::DiagConformance(diag_args) => diag_conformance::run(&diag_args),
-        XtaskSubcommand::Bench(bench_args) => bench::run(&(*bench_args).into()),
-        XtaskSubcommand::BenchPlot(plot_args) => bench::run_bench_plot(&plot_args),
-        XtaskSubcommand::BenchGenPlain(gen_args) => bench::run_gen_plain(&gen_args),
-        XtaskSubcommand::UsageSpec => {
-            print!("{}", XtaskCli::to_kdl());
-            0
-        }
-        XtaskSubcommand::Conformance(conformance_args) => {
-            run_conformance(Args::from(conformance_args))
-        }
-    }
+    usage::Run::run(subcmd)
 }
 
 fn run_conformance(args: Args) -> i32 {

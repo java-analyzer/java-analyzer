@@ -74,6 +74,12 @@ cargo install --path crates/java-analyzer
 
 This puts the `java-analyzer` binary in `~/.cargo/bin`; make sure that directory is on your `PATH`. The server speaks LSP over stdio.
 
+To install dynamic shell completions (supported for `zsh`, `bash`, `fish`, and others):
+
+```sh
+java-analyzer completion zsh --install
+```
+
 ### 2. Install an editor client
 
 Clients live in [`editors/`](editors/README.md); see that file for full details and settings.

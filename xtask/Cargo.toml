@@ -17,5 +17,9 @@ serde_json.workspace = true
 toml.workspace = true
 usage.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+usage = { workspace = true, features = ["test"] }
+
 [lints]
 workspace = true

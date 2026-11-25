@@ -839,6 +839,21 @@ fn notification_needs_workspace(method: &str) -> bool {
     )
 }
 
+/// Starts the LSP server over stdio, initializing stderr tracing.
+pub fn run_stdio() -> anyhow::Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_ansi(false)
+        .try_init();
+    tracing::info!("Starting java-analyzer LSP server...");
+    let (connection, io_threads) = Connection::stdio();
+    run(connection)?;
+    io_threads.join()?;
+    tracing::info!("java-analyzer LSP server shut down");
+    Ok(())
+}
+
 /// Runs the server main loop until the client requests shutdown/exit.
 pub fn run(connection: Connection) -> anyhow::Result<()> {
     let init_params_val = connection.initialize(capabilities_json()?)?;
