@@ -8,7 +8,7 @@
 | **0002 / 0003** | Lossless Java lexer & parser (Java 8 through latest JDK — currently 27, tracking new releases & preview JEPs), feature-gated language levels, OpenJDK/jtreg conformance runner (`xtask`) | Done (ongoing) |
 | **0004** | Lightweight workspace & project model (zero-config roots, `package-info.java`, `META-INF/`, 3-tier config, Maven/Gradle/Ant+Ivy, `configure` & `inspect` CLIs) | Done (follow-ups in [0004-workspace-model-followups.md](plans/0004-workspace-model-followups.md)) |
 | **0005** | Cross-file symbol indexing (`DefDatabase`), lexical/import/member name resolution, `textDocument/definition`, semantic `hover` | Done |
-| **Clients** | Zed, VSCode, and Neovim client skeletons (`editors/`) | Done |
+| **Clients** | Zed, VSCode, Neovim, and Helix client configs (`editors/`) | Done |
 
 ---
 
@@ -94,10 +94,10 @@ flowchart LR
   - `textDocument/signatureHelp` (active parameter tracking across overloads).
   - `textDocument/inlayHint` (inferred `var` types, chained types, parameter names).
   - `textDocument/semanticTokens/full` and `textDocument/foldingRange`.
-- **Spec 0014 — Java Formatting (`textDocument/formatting` & `rangeFormatting`)**
-  - Lossless CST-driven Java formatter preserving comments and trivia.
-  - Built-in named code styles first: **`oracle`** (Oracle official Java code conventions), **`google`** (Google Java Style), and **`palantir`** (Palantir Java Format), selectable via `.java-analyzer.toml` / LSP settings.
-  - Fine-grained configurable formatting options as a follow-up layer.
+- **Spec 0014 — Java Formatting (`crates/java-fmt`, `crates/java-fmt-cli` & LSP `formatting` / `rangeFormatting`)**
+  - Pure, sans-IO lossless CST-driven formatter library (`crates/java-fmt`, depending only on `syntax`) embedded into `ide` for LSP formatting and usable in Rust/WASM/FFI integrations.
+  - Standalone multi-binary CLI crate (`crates/java-fmt-cli`) shipping canonical `java-fmt` alongside dedicated flag-compatible drop-in binaries (`google-java-format`, `palantir-java-format`) for `jj fix`, `git` pre-commit/CI, Gradle/Maven Spotless, and standalone editor save-hooks (Zed, Neovim, Helix, Emacs, VS Code, IntelliJ).
+  - Built-in named code styles first: **`oracle`** (Oracle official Java code conventions), **`google`** (Google Java Style + AOSP), and **`palantir`** (Palantir Java Format), selectable via `.java-analyzer.toml` / `javafmt.toml` / CLI flags, with fine-grained options as a follow-up layer.
 
 ---
 

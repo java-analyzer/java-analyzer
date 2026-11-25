@@ -74,7 +74,44 @@ autocmd fallback in `setup()`.
 vim.lsp.config("java_analyzer", {
   cmd = { "java-analyzer" },
   filetypes = { "java" },
-  root_markers = { "pom.xml", "build.gradle", ".git" },
+  root_markers = { ".java-analyzer.toml", "pom.xml", "build.gradle", ".jj", ".git" },
 })
 vim.lsp.enable("java_analyzer")
+```
+
+## Helix (`editors/helix`)
+
+Helix includes Java tree-sitter support out of the box and defaults to `jdtls`.
+To switch Java buffers to `java-analyzer`, copy or merge
+[`editors/helix/languages.toml`](helix/languages.toml) into
+`~/.config/helix/languages.toml` (global) or `.helix/languages.toml`
+(project-local):
+
+```toml
+[language-server.java-analyzer]
+command = "java-analyzer"
+# Use an absolute path if `~/.cargo/bin` is not on Helix's PATH:
+# command = "/abs/path/to/java-analyzer"
+
+[[language]]
+name = "java"
+roots = [
+  ".java-analyzer.toml",
+  "pom.xml",
+  "build.gradle",
+  "build.gradle.kts",
+  "settings.gradle",
+  "settings.gradle.kts",
+  "build.xml",
+  "ivy.xml",
+  ".jj",
+  ".git",
+]
+language-servers = ["java-analyzer"]
+```
+
+Verify Helix picks up the binary with:
+
+```sh
+hx --health java
 ```

@@ -4,13 +4,17 @@ M.defaults = {
   cmd = { "java-analyzer" },
   filetypes = { "java" },
   root_markers = {
+    ".java-analyzer.toml",
     "pom.xml",
     "build.gradle",
     "build.gradle.kts",
     "settings.gradle",
     "settings.gradle.kts",
+    "build.xml",
+    "ivy.xml",
     "mvnw",
     "gradlew",
+    ".jj",
     ".git",
   },
 }

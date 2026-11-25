@@ -88,6 +88,7 @@ Clients live in [`editors/`](editors/README.md); see that file for full details 
   ```
 
 - **Neovim**: add `editors/nvim` to your runtimepath, then call `require("java-analyzer").setup()` (or `vim.lsp.enable("java_analyzer")` on Neovim 0.11+).
+- **Helix**: merge [`editors/helix/languages.toml`](editors/helix/languages.toml) into `~/.config/helix/languages.toml` (or `.helix/languages.toml`) and verify with `hx --health java`.
 
 Node.js for the VSCode client is managed with [mise](https://mise.jdx.dev): run `mise install` in the repo root.
 

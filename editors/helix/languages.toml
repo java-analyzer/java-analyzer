@@ -1,0 +1,22 @@
+# Copy or merge into `~/.config/helix/languages.toml` (global) or `.helix/languages.toml` (per-project).
+# Verify with: hx --health java
+
+[language-server.java-analyzer]
+command = "java-analyzer"
+# args = ["--stdio"]
+
+[[language]]
+name = "java"
+roots = [
+  ".java-analyzer.toml",
+  "pom.xml",
+  "build.gradle",
+  "build.gradle.kts",
+  "settings.gradle",
+  "settings.gradle.kts",
+  "build.xml",
+  "ivy.xml",
+  ".jj",
+  ".git",
+]
+language-servers = ["java-analyzer"]
