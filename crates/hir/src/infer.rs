@@ -36,7 +36,7 @@ use crate::{
 };
 
 /// Maximum recursion depth for expression and local-binding type inference.
-pub const MAX_INFER_DEPTH: usize = 32;
+const MAX_INFER_DEPTH: usize = 32;
 
 const OBJECT_FQN: &str = "java.lang.Object";
 const STRING_FQN: &str = "java.lang.String";

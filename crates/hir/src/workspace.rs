@@ -604,7 +604,7 @@ fn strip_package_suffix(dir: &str, package: &str) -> Option<String> {
 /// For standard layouts (`<mod>/src/main/java`, `<mod>/src/test/java`, `<mod>/src/<sourceSet>/java`,
 /// `<mod>/src/java`, `<mod>/test/java`, `<mod>/src`, `<mod>/test`), returns `<mod>` (or `"."` at
 /// the workspace root); otherwise returns the root directory itself.
-pub fn module_dir_for_root(root_dir: &str) -> String {
+fn module_dir_for_root(root_dir: &str) -> String {
     let norm = normalize_rel_path(root_dir);
     if norm.starts_with("src/main/")
         || norm.starts_with("src/test/")

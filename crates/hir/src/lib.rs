@@ -1,14 +1,14 @@
-pub mod classfile;
-pub mod classpath;
-pub mod hierarchy;
-pub mod infer;
+pub(crate) mod classfile;
+pub(crate) mod classpath;
+pub(crate) mod hierarchy;
+pub(crate) mod infer;
 pub(crate) mod item_tree;
-pub mod resolve;
+pub(crate) mod resolve;
 pub(crate) mod symbols;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_fixture;
-pub mod ty;
-pub mod workspace;
+pub(crate) mod ty;
+pub(crate) mod workspace;
 
 use std::sync::Arc;
 
