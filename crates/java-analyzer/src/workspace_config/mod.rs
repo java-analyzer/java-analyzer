@@ -199,6 +199,18 @@ pub fn parse_build_tool_kind(s: &str) -> Option<BuildToolKind> {
     }
 }
 
+impl std::str::FromStr for BuildToolKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        parse_build_tool_kind(s).ok_or_else(|| {
+            format!(
+                "Unknown build tool kind '{s}' (expected: none, maven, gradle, ant, bazel, mill, sbt, elide, jbang, custom)"
+            )
+        })
+    }
+}
+
 pub use ide::parse_shebang_level;
 
 /// Probes `workspace_dir` strictly read-only following the 3-tier precedence rules.

@@ -1,0 +1,85 @@
+name java-analyzer
+bin java-analyzer
+version "0.1.0"
+about "A lightweight Java LSP server and workspace configurator."
+unknown_flags error
+flag --stdio help="Accepted for LSP clients that pass `--stdio` (default transport)." hide=#true
+flag "-h --help" help="Print help" action=help builtin=#true
+flag "-V --version" help="Print version" action=version builtin=#true
+cmd lsp help="Start the Language Server Protocol server over stdio (default)." {
+    long_help #"""
+Start the Language Server Protocol server over stdio (default).
+
+Indexes workspace sources, JDK modules, and JAR dependencies for semantic analysis, hover (with on-demand Javadoc), and jump-to-definition.
+"""#
+    flag "-h --help" help="Print help" action=help builtin=#true
+}
+cmd inspect help="Inspect autodiscovered workspace configuration, source/resource roots, and conflicts." {
+    long_help #"""
+Inspect autodiscovered workspace configuration, source/resource roots, and conflicts.
+
+Read-only view of how the LSP discovers build specs, JDK/release settings, and module layouts; intentionally avoids indexing binary JDK/JAR bytecode.
+"""#
+    flag --json help="Emit machine-readable JSON summary"
+    flag --show-errors help="List files with syntax/parse errors"
+    flag "-h --help" help="Print help" action=help builtin=#true
+    arg "[WORKSPACE_DIR]" help="Workspace directory to inspect (defaults to current directory)"
+}
+cmd configure help="Disambiguate workspace conflicts and write a minimal `.java-analyzer.toml` configuration." {
+    long_help #"""
+Disambiguate workspace conflicts and write a minimal `.java-analyzer.toml` configuration.
+
+Focused strictly on workspace layout, JDK/release pinning, and dependency overrides; does not index binary JDK/JAR bytecode.
+"""#
+    flag --jdk help="Pin the JDK installation directory" {
+        arg <PATH>
+    }
+    flag --release help="Pin the Java release version (8..=27)" {
+        arg <N>
+    }
+    flag --preview help="Enable Java preview features"
+    flag --no-preview help="Disable Java preview features"
+    flag --build help="Disambiguate build tool (none, maven, gradle, ant, bazel, mill, sbt, elide, jbang, custom)" {
+        arg <KIND>
+    }
+    flag --classpath-cmd help="Set custom command to emit compile-time classpath" {
+        arg <CMD>
+    }
+    flag --include help="Include an additional workspace module directory" var=#true {
+        arg <DIR>
+    }
+    flag --exclude help="Exclude an auto-detected workspace module directory" var=#true {
+        arg <DIR>
+    }
+    flag --module help="Target module for `--include-*` / `--exclude-*` flags" default=. {
+        arg <PATH_OR_NAME>
+    }
+    flag --include-source help="Add a Java source root to the target module" var=#true {
+        arg <DIR>
+    }
+    flag --exclude-source help="Remove a Java source root from the target module" var=#true {
+        arg <DIR>
+    }
+    flag --include-resource help="Add a resource root to the target module" var=#true {
+        arg <DIR>
+    }
+    flag --exclude-resource help="Remove a resource root from the target module" var=#true {
+        arg <DIR>
+    }
+    flag --include-dep help="Add a compile-time dependency (Maven coord, github:owner/repo#ref, path, or module)" var=#true {
+        arg <SPEC>
+    }
+    flag --exclude-dep help="Remove a compile-time dependency from the target module" var=#true {
+        arg <SPEC>
+    }
+    flag --reconcile help="Reconcile conflicting external version files (.java-version, .sdkmanrc, pom.xml, etc.)"
+    flag --print help="Print inferred workspace layout and minimal .java-analyzer.toml without writing" {
+        alias --dry-run hide=#true
+    }
+    flag "-y --yes" help="Run non-interactively and write minimal .java-analyzer.toml if overrides are needed"
+    flag "-h --help" help="Print help" action=help builtin=#true
+    arg "[WORKSPACE_DIR]" help="Workspace directory to configure (defaults to current directory)"
+}
+cmd usage-spec help="Print the canonical KDL usage spec for java-analyzer to stdout" hide=#true {
+    flag "-h --help" help="Print help" action=help builtin=#true
+}

@@ -33,8 +33,8 @@ This spec defines the architecture, information design, and publishing pipeline 
    - Canonical repo documents (`docs/ROADMAP.md`, `docs/specs/*.md`, `CONFORMANCE.md`, `BENCHMARKS.md`, `charts/*.svg`, and `results.json`) remain authoritative in Git and are ingested/transformed automatically at site build time into gitignored build inputs.
 5. **Zero-Friction Local Dev & CI Deployment**:
    - Local `mise` tasks (`site-install`, `site-sync`, `site-dev`, `site-build`, `site-check`) for live preview, static production build, and broken-link/asset validation.
-   - GitHub Actions workflow (`.github/workflows/pages.yml`) that validates builds on PRs and deploys automatically to GitHub Pages on pushes to `main` via `actions/configure-pages`, `actions/upload-pages-artifact`, and `actions/deploy-pages` (no `gh-pages` branch).
-   - URL-agnostic `SITE_URL` / `SITE_BASE` configuration so the exact same site deploys cleanly under a personal Pages subpath, an org root (`java-analyzer.github.io`), or a custom domain without structural changes.
+   - Canonical public URL at **`https://java-analyzer.github.io/`** (`SITE_URL=https://java-analyzer.github.io`, `SITE_BASE=/`) hosted under the `java-analyzer` GitHub organization (`java-analyzer/java-analyzer.github.io`), while keeping `SITE_URL` / `SITE_BASE` env-configurable so subpath previews and future custom domains work without structural changes.
+   - GitHub Actions workflow (`.github/workflows/pages.yml`) that validates builds on PRs and publishes the built static site automatically on pushes to `main`.
 6. **Simple, Maintainable Web Stack**:
    - Standardize on **Astro + Starlight** defaults (built-in Pagefind search, light/dark toggle, keyboard navigation, Shiki syntax highlighting, and `<Tabs>`/`<Card>` components) plus a single Mermaid plugin for `ROADMAP.md` and architecture diagrams.
    - Strictly isolated from the Rust Cargo workspace (`site/` directory) so `cargo test` and `cargo clippy` remain fast and unaffected.
@@ -55,7 +55,7 @@ This spec defines the architecture, information design, and publishing pipeline 
 ## Resolved Design Decisions
 
 1. **Static Site Generator:** **Astro + Starlight** (with Starlight's out-of-the-box defaults including Pagefind search, light/dark toggle, keyboard navigation, and Shiki highlighting, plus a Mermaid plugin). Reuses `node = "lts"` already pinned in `mise.toml`.
-2. **Hosting URL / Domain:** **URL-agnostic (`actions/configure-pages`)** — `SITE_URL` and `SITE_BASE` are driven by environment variables; final domain or `java-analyzer.github.io` org decision is deferred until launch.
+2. **Hosting URL / Domain:** **`https://java-analyzer.github.io/`** under the `java-analyzer` GitHub organization (`java-analyzer/java-analyzer.github.io`, `SITE_BASE=/`), with `SITE_URL` and `SITE_BASE` kept environment-driven so subpath previews or a future custom domain require zero structural changes.
 3. **Interactive Vega-Lite Benchmark Report:** **Included** — check in `results.json` so CI regenerates and publishes the interactive Vega-Lite `report.html` at `/benchmarks/report/` alongside `BENCHMARKS.md` and `charts/*.svg`.
 4. **Rustdoc (`/api/`):** **Deferred** — out of scope for v1; can be added as a follow-up step in the same Pages workflow later.
 
@@ -122,15 +122,15 @@ The pre-build sync script must be deterministic, idempotent, and zero-dependency
 - `mise run site-install` — `npm --prefix site ci`
 - `mise run site-sync` — `node site/scripts/sync-docs.mjs`
 - `mise run site-dev` — run `site-sync` and start Astro dev server
-- `mise run site-build` — run `site-sync` and build production static output in `site/dist/`
-- `mise run site-check` — build with subpath (`SITE_BASE=/java-analyzer`) and verify `site/dist/index.html`, all expected routes, SVG assets, and zero broken internal links
+- `mise run site-build` — run `site-sync` and build production static output in `site/dist/` (defaults to `SITE_URL=https://java-analyzer.github.io` and `SITE_BASE=/`)
+- `mise run site-check` — build and verify `site/dist/index.html`, all expected routes, SVG assets, and zero broken internal links (checking both root `SITE_BASE=/` and subpath `SITE_BASE=/java-analyzer`)
 
 ### 4. GitHub Actions Deployment (`.github/workflows/pages.yml`)
 
+- **Target**: Publishes `site/dist/` to **`https://java-analyzer.github.io/`** (via `java-analyzer/java-analyzer.github.io` Pages deployment, or direct `actions/deploy-pages` if hosted from the org Pages repo).
 - **Triggers**: `push` to `main`, `pull_request` targeting `main` (build + link check only, no deploy), and `workflow_dispatch`.
-- **Permissions**: `contents: read`, `pages: write`, `id-token: write`.
 - **Concurrency**: `group: pages`, `cancel-in-progress: false`.
-- **Steps**: Checkout → setup Node LTS (matching `mise.toml` with npm cache) → `actions/configure-pages@v5` → `npm --prefix site ci` → generate interactive benchmark report if needed → `SITE_URL` / `SITE_BASE` sync & build → link/asset check → `actions/upload-pages-artifact@v3` → `actions/deploy-pages@v4` (on `main`).
+- **Steps**: Checkout → setup Node LTS (matching `mise.toml` with npm cache) → `npm --prefix site ci` → generate interactive benchmark report (`cargo xtask bench-plot --out html` from checked-in `results.json`) → `SITE_URL=https://java-analyzer.github.io` `SITE_BASE=/` sync & build → link/asset check → publish to `java-analyzer.github.io` on `main`.
 
 ---
 

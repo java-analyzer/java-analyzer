@@ -47,7 +47,10 @@ pub fn run_with_io<R: BufRead, W: Write>(
 
     // Handle `--reconcile` flag non-interactively
     if args.reconcile {
-        let target_release = args.release.unwrap_or(probe.resolved_level.release);
+        let target_release = args
+            .release
+            .map(Release::from)
+            .unwrap_or(probe.resolved_level.release);
         let modified = reconcile_version_conflict(&workspace_dir, target_release);
         for p in &modified {
             writeln!(
@@ -142,7 +145,7 @@ pub(crate) fn apply_cli_args_to_config(args: &ConfigureArgs, cfg: &mut ExplicitC
         cfg.jdk = Some(jdk.clone());
     }
     if let Some(rel) = args.release {
-        cfg.release = Some(rel);
+        cfg.release = Some(rel.into());
     }
     if let Some(prev) = args.preview_override() {
         cfg.preview = Some(prev);
@@ -624,7 +627,7 @@ mod tests {
         let args = ConfigureArgs {
             workspace_dir: Some(tmp.path().to_path_buf()),
             build: Some(BuildToolKind::Maven),
-            release: Some(Release::JAVA_21),
+            release: Some(Release::JAVA_21.into()),
             yes: true,
             ..Default::default()
         };
@@ -642,7 +645,7 @@ mod tests {
     fn apply_cli_args_updates_explicit_config() {
         let args = ConfigureArgs {
             build: Some(BuildToolKind::Gradle),
-            release: Some(Release::JAVA_21),
+            release: Some(Release::JAVA_21.into()),
             preview: true,
             classpath_cmd: Some(
                 "mvn dependency:build-classpath -Dmdep.outputFile=/dev/stdout".to_string(),
