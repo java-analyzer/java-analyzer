@@ -1,3 +1,8 @@
+#![expect(
+    clippy::unwrap_used,
+    reason = "integration test helper functions"
+)]
+
 mod common;
 
 use std::{fs, io::Write as _, path::Path};

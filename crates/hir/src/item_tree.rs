@@ -486,7 +486,10 @@ fn has_override_annotation(node: &SyntaxNode) -> bool {
         })
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "recursive item-tree lowering threads arenas, AST ID map, and enclosing scope"
+)]
 fn lower_type_decl(
     file_id: FileId,
     node: &SyntaxNode,
@@ -703,7 +706,10 @@ fn lower_type_decl(
     Some(name)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "field lowering threads arenas, AST ID map, and output member list"
+)]
 fn lower_field_decl(
     file_id: FileId,
     node: &SyntaxNode,
@@ -762,7 +768,10 @@ fn lower_field_decl(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "method/constructor lowering threads arenas, AST ID map, and enclosing scope"
+)]
 fn lower_method_or_ctor(
     file_id: FileId,
     node: &SyntaxNode,

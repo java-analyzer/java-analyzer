@@ -53,10 +53,9 @@ pub fn lex_with_errors(input: &str) -> (Vec<Token>, Vec<LexError>) {
 type Lexed = (SyntaxKind, usize, Option<&'static str>);
 
 fn next_token(rest: &str) -> Lexed {
-    let c = rest
-        .chars()
-        .next()
-        .expect("next_token called on empty input");
+    let Some(c) = rest.chars().next() else {
+        return (EOF, 0, None);
+    };
     match c {
         c if is_whitespace(c) => {
             let len = rest.find(|c| !is_whitespace(c)).unwrap_or(rest.len());

@@ -143,13 +143,15 @@ fn extract_compile_directives(source: &str) -> Vec<CompileDirective> {
                 active
                     .args
                     .extend(trimmed.split_whitespace().map(str::to_string));
-                out.push(current.take().unwrap());
+                if let Some(c) = current.take() {
+                    out.push(c);
+                }
             } else if raw_line.trim_start().starts_with('*') {
                 active
                     .args
                     .extend(trimmed.split_whitespace().map(str::to_string));
-            } else {
-                out.push(current.take().unwrap());
+            } else if let Some(c) = current.take() {
+                out.push(c);
             }
         }
     }

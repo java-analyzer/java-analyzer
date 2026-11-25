@@ -112,12 +112,17 @@ pub fn parse_with_level(text: &str, level: LanguageLevel) -> Parse {
     let root = SyntaxNode::new_root(green.clone());
     language_level::check_feature_gates(&root, level, &mut errors);
 
-    errors.extend(lex_errors.into_iter().map(|e| SyntaxError {
-        message: e.message.to_string(),
-        range: TextRange::at(
-            TextSize::try_from(e.offset).expect("source text larger than 4 GiB"),
-            TextSize::try_from(e.len).expect("source text larger than 4 GiB"),
-        ),
+    errors.extend(lex_errors.into_iter().map(|e| {
+        let offset = u32::try_from(e.offset)
+            .map(TextSize::from)
+            .unwrap_or(TextSize::from(u32::MAX));
+        let len = u32::try_from(e.len)
+            .map(TextSize::from)
+            .unwrap_or(TextSize::from(u32::MAX));
+        SyntaxError {
+            message: e.message.to_string(),
+            range: TextRange::at(offset, len),
+        }
     }));
     errors.sort_by_key(|e| (e.range.start(), e.range.end()));
 

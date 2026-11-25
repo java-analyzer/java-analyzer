@@ -155,5 +155,7 @@ impl Builder<'_> {
 }
 
 fn size(offset: usize) -> TextSize {
-    TextSize::try_from(offset).expect("source text larger than 4 GiB")
+    u32::try_from(offset)
+        .map(TextSize::from)
+        .unwrap_or(TextSize::from(u32::MAX))
 }

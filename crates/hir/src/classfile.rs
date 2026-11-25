@@ -1001,7 +1001,11 @@ fn finalize_field_type_and_nullability(
     (Some(ty.render()), decl_nullability)
 }
 
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[expect(
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    reason = "deferred to Commit 2 classfile split"
+)]
 fn finalize_method_signature(
     decoded: &mut DecodedMethodSignature,
     attributes: &[Attribute],
@@ -1505,7 +1509,10 @@ struct DecodedClassSignature {
 }
 
 impl DecodedClassSignature {
-    #[allow(clippy::type_complexity)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "deferred to Commit 2 classfile split"
+    )]
     fn into_parts(
         self,
     ) -> (

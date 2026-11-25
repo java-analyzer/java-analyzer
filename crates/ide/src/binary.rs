@@ -436,7 +436,7 @@ fn find_member_in_type(
                                 .filter(|n| n.kind() == VARIABLE_DECLARATOR)
                             {
                                 if node_name_matches(&decl, member_name) {
-                                    return Some((member.clone(), decl));
+                                    return Some((member, decl));
                                 }
                             }
                         }

@@ -872,7 +872,10 @@ fn measure_first_response(
     Some(spawn_instant.elapsed().as_secs_f64() * 1000.0)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "readiness polling coordinates LSP client, repo metadata, and probe timeouts"
+)]
 fn wait_until_ready(
     client: &mut LspClient,
     caps: &ServerCaps,
@@ -993,7 +996,10 @@ fn execute_op(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "probe dispatch passes LSP client, cached files, and timing context"
+)]
 fn execute_probe(
     client: &mut LspClient,
     repo_dir: &Path,
@@ -1230,7 +1236,10 @@ fn execute_probe(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "edit probe dispatch passes LSP client, cached files, and timing context"
+)]
 fn execute_edit(
     client: &mut LspClient,
     caps: &ServerCaps,
@@ -1311,7 +1320,10 @@ fn execute_edit(
     outcome
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "completion probe dispatch passes LSP client, cached files, and timing context"
+)]
 fn execute_completion(
     client: &mut LspClient,
     repo_dir: &Path,
@@ -1360,7 +1372,7 @@ fn execute_completion(
     let outcome = if resolve_top {
         match comp_res {
             Ok(val) => {
-                let first_item = extract_completion_items(&val).first().cloned().cloned();
+                let first_item = extract_completion_items(&val).first().copied().cloned();
                 if let Some(item) = first_item {
                     let resolve_start = Instant::now();
                     let res = client.request("completionItem/resolve", item, timeout);

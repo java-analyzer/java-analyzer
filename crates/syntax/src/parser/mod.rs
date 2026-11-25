@@ -51,8 +51,10 @@ impl<'t> Input<'t> {
             if token.kind.is_trivia() {
                 prev_was_significant = false;
             } else {
-                if prev_was_significant {
-                    *input.joint.last_mut().expect("a previous token") = true;
+                if prev_was_significant
+                    && let Some(last) = input.joint.last_mut()
+                {
+                    *last = true;
                 }
                 input.kinds.push(token.kind);
                 input.texts.push(&text[offset..offset + token.len]);

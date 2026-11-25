@@ -1417,11 +1417,7 @@ fn find_local_binding(
                 if in_try_scope
                     && let Some(res_list) = ancestor.children().find(|n| n.kind() == RESOURCE_LIST)
                 {
-                    let resources: Vec<SyntaxNode> = res_list
-                        .children()
-                        .filter(|n| n.kind() == RESOURCE)
-                        .collect();
-                    for res in resources.into_iter().rev() {
+                    for res in rev_children(&res_list).filter(|n| n.kind() == RESOURCE) {
                         if res.text_range().end() <= ref_range.start()
                             && let Some(name_node) = res.children().find(|n| n.kind() == NAME)
                             && name_node.text() == name
@@ -1442,11 +1438,7 @@ fn find_local_binding(
                 if let Some(params_node) = ancestor.children().find(|n| n.kind() == LAMBDA_PARAMS)
                     && ref_range.start() >= params_node.text_range().end()
                 {
-                    let params: Vec<SyntaxNode> = params_node
-                        .children()
-                        .filter(|n| n.kind() == PARAM)
-                        .collect();
-                    for param in params.into_iter().rev() {
+                    for param in rev_children(&params_node).filter(|n| n.kind() == PARAM) {
                         if let Some(name_node) = param.children().find(|n| n.kind() == NAME)
                             && name_node.text() == name
                         {
@@ -1518,11 +1510,7 @@ fn find_local_binding(
                 if let Some(param_list) = ancestor.children().find(|n| n.kind() == PARAM_LIST)
                     && ref_range.start() >= param_list.text_range().end()
                 {
-                    let params: Vec<SyntaxNode> = param_list
-                        .children()
-                        .filter(|n| n.kind() == PARAM)
-                        .collect();
-                    for param in params.into_iter().rev() {
+                    for param in rev_children(&param_list).filter(|n| n.kind() == PARAM) {
                         if let Some(name_node) = param.children().find(|n| n.kind() == NAME)
                             && name_node.text() == name
                         {
@@ -1550,17 +1538,17 @@ fn find_local_binding(
     None
 }
 
+fn rev_children(node: &SyntaxNode) -> impl Iterator<Item = SyntaxNode> {
+    std::iter::successors(node.last_child(), SyntaxNode::prev_sibling)
+}
+
 fn find_local_var_in_block(
     file_id: FileId,
     block: &SyntaxNode,
     ref_range: TextRange,
     name: &str,
 ) -> Option<(LocalSymbol, SyntaxNode)> {
-    let decls: Vec<SyntaxNode> = block
-        .children()
-        .filter(|n| n.kind() == LOCAL_VAR_DECL)
-        .collect();
-    for decl in decls.into_iter().rev() {
+    for decl in rev_children(block).filter(|n| n.kind() == LOCAL_VAR_DECL) {
         if let Some(found) = find_declarator_before(file_id, &decl, ref_range, name) {
             return Some(found);
         }
@@ -1575,11 +1563,7 @@ fn find_declarator_before(
     name: &str,
 ) -> Option<(LocalSymbol, SyntaxNode)> {
     let base_type = local_var_decl.children().find(|n| is_type_node(n.kind()));
-    let declarators: Vec<SyntaxNode> = local_var_decl
-        .children()
-        .filter(|n| n.kind() == VARIABLE_DECLARATOR)
-        .collect();
-    for declarator in declarators.into_iter().rev() {
+    for declarator in rev_children(local_var_decl).filter(|n| n.kind() == VARIABLE_DECLARATOR) {
         if declarator.text_range().end() > ref_range.start() {
             continue;
         }
@@ -1888,11 +1872,9 @@ fn resolve_enclosing_type_or_param(
     for ancestor in site_node.ancestors() {
         match ancestor.kind() {
             BLOCK => {
-                let locals: Vec<SyntaxNode> = ancestor
-                    .children()
+                for ty_node in rev_children(&ancestor)
                     .filter(|n| TypeKind::from_syntax(n.kind()).is_some())
-                    .collect();
-                for ty_node in locals.into_iter().rev() {
+                {
                     if let Some(name_node) = ty_node.children().find(|n| n.kind() == NAME)
                         && name_node.text() == name
                         && name_node.text_range().end() <= site_start
@@ -2594,7 +2576,10 @@ fn lookup_method_or_member(
     lookup_non_method_member_or_nested_with_supers(ctx, ty, name)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "forwards callable matching flags into select_callable_by"
+)]
 fn select_callable_from_tree(
     tree: &FileItemTree,
     member_ids: &[MemberId],
@@ -2625,7 +2610,6 @@ fn select_callable_from_tree(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn select_callable_from_slice<'a>(
     members: &'a [MemberSymbol],
     target_kind: MemberKind,
@@ -2650,7 +2634,6 @@ fn select_callable_from_slice<'a>(
     .map(|m| m.map(|idx| &members[idx]))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn select_callable_from_binary(
     members: &[crate::classpath::BinaryMemberSymbol],
     target_kind: MemberKind,
@@ -3502,7 +3485,10 @@ pub(crate) fn collect_constructor_candidates(
     out
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "collects candidate methods across source and binary owners with call-site context"
+)]
 fn collect_owner_methods(
     ctx: ResolveCtx<'_>,
     owner_fqn: &str,

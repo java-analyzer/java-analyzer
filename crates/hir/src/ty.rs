@@ -1485,7 +1485,10 @@ fn is_known_java_lang_nested_outer(name: &str) -> bool {
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "deferred to Commit 2 ty split (TypeResolveEnv)"
+)]
 fn resolve_type_ref_in_file_inner(
     db: &dyn DefDatabase,
     file_tree: &FileItemTree,
@@ -3232,7 +3235,7 @@ mod tests {
         assert_eq!(composed.apply(&e), user);
 
         // Deeply nested type stops cleanly at MAX_SUBST_DEPTH without panicking.
-        let mut deep = e.clone();
+        let mut deep = e;
         for _ in 0..(MAX_SUBST_DEPTH + 10) {
             deep = Ty::array(deep);
         }

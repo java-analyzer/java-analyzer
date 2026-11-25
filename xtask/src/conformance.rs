@@ -598,7 +598,7 @@ fn sanitize(id: &str) -> String {
 /// Writes `report.json`, `report.md` and the failure lists to `out_dir`.
 pub fn write_report(report: &Report, out_dir: &Path) -> io::Result<()> {
     fs::create_dir_all(out_dir)?;
-    let json = serde_json::to_string_pretty(&to_json(report)).expect("a Value always serializes");
+    let json = serde_json::to_string_pretty(&to_json(report)).map_err(io::Error::other)?;
     fs::write(out_dir.join("report.json"), json + "\n")?;
     fs::write(out_dir.join("report.md"), to_markdown(report))?;
     write_failure_lists(report, out_dir)

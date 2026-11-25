@@ -45,3 +45,10 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 syntax = { path = "crates/syntax" }
 hir = { path = "crates/hir" }
 ide = { path = "crates/ide" }
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+redundant_clone = "warn"
+needless_collect = "warn"
+cloned_instead_of_copied = "warn"

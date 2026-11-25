@@ -1320,7 +1320,7 @@ pub fn materialize_binary_location_in_cache_root(
             }
             candidates.push(rel_java.clone());
             if raw_rel_java != rel_java {
-                candidates.push(raw_rel_java.clone());
+                candidates.push(raw_rel_java);
             }
 
             let src_dir = cache_root.join("jdk-src").join(&jdk_key);
@@ -1334,7 +1334,7 @@ pub fn materialize_binary_location_in_cache_root(
             let jar_key = jar_cache_key(label);
             let mut candidates = vec![rel_java.clone()];
             if raw_rel_java != rel_java {
-                candidates.push(raw_rel_java.clone());
+                candidates.push(raw_rel_java);
             }
 
             let src_dir = cache_root.join("jar-src").join(&jar_key);

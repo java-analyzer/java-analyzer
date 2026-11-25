@@ -102,7 +102,7 @@ pub(super) fn detect_version_specs(workspace_dir: &Path) -> Vec<DetectedVersionS
                 if let Some(release) = parse_version_string(token) {
                     specs.push(DetectedVersionSpec {
                         source: ".bazelrc".to_string(),
-                        path: bazelrc_path.clone(),
+                        path: bazelrc_path,
                         release,
                         preview: false,
                     });

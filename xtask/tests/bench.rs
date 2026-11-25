@@ -1,3 +1,8 @@
+#![expect(
+    clippy::unwrap_used,
+    reason = "integration test helper functions"
+)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,

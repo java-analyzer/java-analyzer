@@ -1,4 +1,9 @@
 #![allow(dead_code)] // shared by several test crates, each using a subset
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration test harness helper module"
+)]
 
 use std::{
     fs,

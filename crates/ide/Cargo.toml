@@ -13,3 +13,6 @@ syntax.workspace = true
 
 [dev-dependencies]
 hir = { workspace = true, features = ["test-utils"] }
+
+[lints]
+workspace = true

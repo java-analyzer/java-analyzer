@@ -1,3 +1,8 @@
+#![expect(
+    clippy::unwrap_used,
+    reason = "integration test helper functions"
+)]
+
 use std::{collections::BTreeSet, fs, path::Path};
 
 use xtask::{
