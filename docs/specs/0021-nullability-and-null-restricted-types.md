@@ -25,7 +25,7 @@ This spec defines a **source-agnostic nullability & null-restricted type model**
    - Extract scope defaults from `module-info.java`, `package-info.java`, type declarations, and member declarations, resolving annotation names via file imports.
    - Follow JLS §9.7.4 for type-use annotations (`@Nullable String[]` annotates the element `String`; `String @Nullable []` annotates the array; `Outer.@Nullable Inner` annotates `Inner`) and declaration-site annotations (legacy non-`TYPE_USE` annotations on fields/methods/parameters).
 3. **Binary `.class` Annotation & Type-Annotation Decoding (`classfile.rs`, `classpath.rs`):**
-   - Use `ristretto_classfile = "0.31"` (matching `rustc 1.95.0` MSRV; upgrade to `0.35` deferred until toolchain >= `rustc 1.99.1`), which already exposes full annotation and type-annotation attributes.
+   - Upgrade `ristretto_classfile` from `0.31` to `0.35` (Java 27 classfile support, `rustc 1.99.1+` MSRV).
    - Decode **both** `RuntimeVisibleAnnotations` / `RuntimeInvisibleAnnotations` (covering `RUNTIME`-retention JSpecify and `CLASS`-retention JetBrains annotations) and **both** `RuntimeVisibleTypeAnnotations` / `RuntimeInvisibleTypeAnnotations` (JVMS §4.7.20 `TargetType` + `TypePath` for nested generic arguments and array dimensions).
 4. **JSpecify 1.0 Type Defaulting, Substitution & Inference (`ty.rs`, `infer.rs`):**
    - Resolve effective lexical scope (`member → inner type → outer type → package-info → module-info`).

@@ -8,8 +8,8 @@ use std::{borrow::Cow, collections::BTreeMap, error::Error, fmt};
 use ristretto_classfile::{
     ClassAccessFlags, ClassFile, ConstantPool, FieldAccessFlags, MethodAccessFlags, Version,
     attributes::{
-        Annotation, Attribute, NestedClassAccessFlags, RequiresFlags, TargetPath, TargetType,
-        TypeAnnotation,
+        Annotation, Attribute, MethodParameterAccessFlags, NestedClassAccessFlags, RequiresFlags,
+        TargetPath, TargetType, TypeAnnotation,
     },
 };
 use smol_str::{SmolStr, format_smolstr};
@@ -455,20 +455,14 @@ fn parse_module_attribute(
     cp: &ConstantPool<'_>,
 ) -> Result<Option<BinaryModuleInfo>, ClassfileError> {
     for attr in &class_file.attributes {
-        if let Attribute::Module {
-            module_name_index,
-            exports: mod_exports,
-            requires: mod_requires,
-            ..
-        } = attr
-        {
+        if let Attribute::Module { module, .. } = attr {
             let name = cp
-                .try_get_module(*module_name_index)
+                .try_get_module(module.module_name_index)
                 .map_err(ClassfileError::from_ristretto)?
                 .to_rust_string();
 
             let mut exports = Vec::new();
-            for exp in mod_exports {
+            for exp in &module.exports {
                 // Only unqualified exports are visible to `import module M;`.
                 if exp.to_index.is_empty() {
                     let pkg_internal = cp
@@ -480,7 +474,7 @@ fn parse_module_attribute(
             }
 
             let mut requires_transitive = Vec::new();
-            for req in mod_requires {
+            for req in &module.requires {
                 if req.flags.contains(RequiresFlags::TRANSITIVE) {
                     let dep_name = cp
                         .try_get_module(req.index)
@@ -681,7 +675,7 @@ fn extract_method_param_names(
         };
         let filtered: Vec<_> = parameters
             .iter()
-            .filter(|p| !p.access_flags.contains(MethodAccessFlags::SYNTHETIC))
+            .filter(|p| !p.access_flags.contains(MethodParameterAccessFlags::SYNTHETIC))
             .collect();
         let source = if filtered.len() == param_count {
             filtered
@@ -1851,8 +1845,9 @@ mod tests {
         BaseType, ClassAccessFlags, ClassFile, ConstantPool, Field, FieldAccessFlags, FieldType,
         JAVA_17, JAVA_21, JAVA_25, Method, MethodAccessFlags, Version,
         attributes::{
-            Attribute, Exports, ExportsFlags, InnerClass, MethodParameter, ModuleAccessFlags,
-            NestedClassAccessFlags, Record as RecordAttr, Requires, RequiresFlags,
+            Attribute, Exports, ExportsFlags, InnerClass, MethodParameter,
+            MethodParameterAccessFlags, ModuleAccessFlags, ModuleAttribute, NestedClassAccessFlags,
+            Record as RecordAttr, Requires, RequiresFlags,
         },
     };
 
@@ -1937,11 +1932,11 @@ mod tests {
                             parameters: vec![
                                 MethodParameter {
                                     name_index: p0_name,
-                                    access_flags: MethodAccessFlags::FINAL,
+                                    access_flags: MethodParameterAccessFlags::FINAL,
                                 },
                                 MethodParameter {
                                     name_index: p1_name,
-                                    access_flags: MethodAccessFlags::empty(),
+                                    access_flags: MethodParameterAccessFlags::empty(),
                                 },
                             ],
                         },
@@ -2201,36 +2196,38 @@ mod tests {
             super_class: 0,
             attributes: vec![Attribute::Module {
                 name_index: mod_attr_name,
-                module_name_index: self_mod,
-                flags: ModuleAccessFlags::empty(),
-                version_index: 0,
-                requires: vec![
-                    Requires {
-                        index: dep_trans,
-                        flags: RequiresFlags::TRANSITIVE,
-                        version_index: 0,
-                    },
-                    Requires {
-                        index: dep_priv,
-                        flags: RequiresFlags::empty(),
-                        version_index: 0,
-                    },
-                ],
-                exports: vec![
-                    Exports {
-                        index: pub_pkg,
-                        flags: ExportsFlags::empty(),
-                        to_index: vec![],
-                    },
-                    Exports {
-                        index: qual_pkg,
-                        flags: ExportsFlags::empty(),
-                        to_index: vec![friend_mod],
-                    },
-                ],
-                opens: vec![],
-                uses: vec![],
-                provides: vec![],
+                module: Box::new(ModuleAttribute {
+                    module_name_index: self_mod,
+                    flags: ModuleAccessFlags::empty(),
+                    version_index: 0,
+                    requires: vec![
+                        Requires {
+                            index: dep_trans,
+                            flags: RequiresFlags::TRANSITIVE,
+                            version_index: 0,
+                        },
+                        Requires {
+                            index: dep_priv,
+                            flags: RequiresFlags::empty(),
+                            version_index: 0,
+                        },
+                    ],
+                    exports: vec![
+                        Exports {
+                            index: pub_pkg,
+                            flags: ExportsFlags::empty(),
+                            to_index: vec![],
+                        },
+                        Exports {
+                            index: qual_pkg,
+                            flags: ExportsFlags::empty(),
+                            to_index: vec![friend_mod],
+                        },
+                    ],
+                    opens: vec![],
+                    uses: vec![],
+                    provides: vec![],
+                }),
             }],
             constant_pool: cp,
             ..Default::default()
@@ -2679,14 +2676,16 @@ mod tests {
             attributes: vec![
                 Attribute::Module {
                     name_index: mod_attr,
-                    module_name_index: self_mod,
-                    flags: ModuleAccessFlags::empty(),
-                    version_index: 0,
-                    requires: vec![],
-                    exports: vec![],
-                    opens: vec![],
-                    uses: vec![],
-                    provides: vec![],
+                    module: Box::new(ModuleAttribute {
+                        module_name_index: self_mod,
+                        flags: ModuleAccessFlags::empty(),
+                        version_index: 0,
+                        requires: vec![],
+                        exports: vec![],
+                        opens: vec![],
+                        uses: vec![],
+                        provides: vec![],
+                    }),
                 },
                 Attribute::RuntimeVisibleAnnotations {
                     name_index: rva_attr,
