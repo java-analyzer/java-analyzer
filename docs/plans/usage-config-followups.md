@@ -15,8 +15,8 @@ Enabling `features = ["config"]` on `usage` (`usage-config` + `#[derive(usage::C
 - **Layered resolution**: `usage::config::resolve(Settings::SETTINGS_REGISTRY, Layers::new()...)` merging CLI overrides, environment variables (`EnvLayer`), TOML files (`.java-analyzer.toml` / `javafmt.toml`), and defaults with explicit precedence and provenance.
 - **Canonical KDL config schema**: `Settings::spec_kdl()` and `#[usage(settings)]` on `Cli` / `Args` so `java-analyzer.usage.kdl` (and `javafmt.usage.kdl`) advertise both CLI flags and config properties (`prop "..."`) from one definition, keeping docs, completions, and editors synchronized.
 
-### Migration & Compatibility Notes
-- **Backwards-compatible `.java-analyzer.toml` parsing**: Keep existing untagged/module-scoped shapes (`ReleaseValue` accepting `21` or `"21"`, `ClasspathCommand` accepting string or array, `[modules."..."]` delta tables) supported during any migration to `usage-config`.
+### Migration Notes
+- **Pre-1.0 clean break (no legacy shims)**: Backwards compatibility for `.java-analyzer.toml` shapes is intentionally ignored until 1.0 readiness — prefer clean, idiomatic `#[derive(usage::Config)]` schemas over legacy untagged DTO shims.
 - **Lean release dependencies**: Keep `features = ["config"]` disabled until the config unification work lands so the release binary does not carry unused `usage-config` machinery prematurely.
 
 ## 2. `multicall` & `#[usage(run)]` Dispatch for Spec 0014 Formatter Entrypoints
