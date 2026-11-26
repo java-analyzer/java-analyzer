@@ -222,8 +222,7 @@ cmd bench-gen-plain help="Generate the synthetic plain-small Java corpus" {
     flag "-h --help" help="Print help" action=help builtin=#true
 }
 cmd release-prep help="Synchronize or verify release version strings across workspace manifests" {
-    flag --check help="Verify version synchronization and CHANGELOG.md without modifying files"
-    flag --allow-missing-changelog help="Allow updating or checking manifests even if CHANGELOG.md lacks `## [<VERSION>]`"
+    flag --check help="Verify version synchronization across workspace manifests without modifying files"
     flag "-h --help" help="Print help" action=help builtin=#true
     arg "[VERSION]" help="Target SemVer version (`X.Y.Z` or `X.Y.Z-rc.N`); defaults to workspace version in `--check` mode"
 }

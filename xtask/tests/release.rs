@@ -12,17 +12,13 @@ use xtask::{
 };
 use zip::ZipArchive;
 
-fn write_fixture_workspace(root: &Path, version: &str, changelog: &str) {
-    if let Err(err) = try_write_fixture_workspace(root, version, changelog) {
+fn write_fixture_workspace(root: &Path, version: &str) {
+    if let Err(err) = try_write_fixture_workspace(root, version) {
         panic!("failed to write fixture workspace: {err}");
     }
 }
 
-fn try_write_fixture_workspace(
-    root: &Path,
-    version: &str,
-    changelog: &str,
-) -> std::io::Result<()> {
+fn try_write_fixture_workspace(root: &Path, version: &str) -> std::io::Result<()> {
     fs::write(
         root.join("Cargo.toml"),
         format!(
@@ -52,7 +48,6 @@ fn try_write_fixture_workspace(
         format!("name java-analyzer\nbin java-analyzer\nversion \"{version}\"\nabout \"test\"\n"),
     )?;
 
-    fs::write(root.join("CHANGELOG.md"), changelog)?;
     Ok(())
 }
 
@@ -81,15 +76,14 @@ fn semver_validation_accepts_release_and_rc_and_rejects_malformed() {
 }
 
 #[test]
-fn release_prep_check_detects_drift_and_missing_changelog() {
+fn release_prep_check_detects_manifest_drift() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    write_fixture_workspace(root, "0.1.0", "# Changelog\n\n## [0.1.0] - 2026-11-26\n");
+    write_fixture_workspace(root, "0.1.0");
 
     let check_args = ReleasePrepArgs {
         version: None,
         check: true,
-        allow_missing_changelog: false,
     };
     let ok = release_prep::run_in(root, &check_args).unwrap();
     assert_eq!(ok.target_version, "0.1.0");
@@ -103,26 +97,35 @@ fn release_prep_check_detects_drift_and_missing_changelog() {
     let err = release_prep::run_in(root, &check_args).unwrap_err();
     assert!(err.contains("editors/vscode/package.json"), "{err}");
 
-    // Restore vscode, remove CHANGELOG heading -> fails --check.
-    write_fixture_workspace(root, "0.1.0", "# Changelog\n\n## [Unreleased]\n");
+    // Drift in editors/zed/extension.toml and java-analyzer.usage.kdl are also reported.
+    write_fixture_workspace(root, "0.1.0");
+    fs::write(
+        root.join("editors/zed/extension.toml"),
+        "id = \"java-analyzer\"\nname = \"Java Analyzer\"\nversion = \"0.0.8\"\nschema_version = 1\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("crates/java-analyzer/java-analyzer.usage.kdl"),
+        "name java-analyzer\nbin java-analyzer\nversion \"0.0.7\"\nabout \"test\"\n",
+    )
+    .unwrap();
     let err = release_prep::run_in(root, &check_args).unwrap_err();
-    assert!(err.contains("CHANGELOG.md"), "{err}");
+    assert!(err.contains("editors/zed/extension.toml"), "{err}");
+    assert!(
+        err.contains("crates/java-analyzer/java-analyzer.usage.kdl"),
+        "{err}"
+    );
 }
 
 #[test]
 fn release_prep_syncs_all_manifests_preserving_formatting() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    write_fixture_workspace(
-        root,
-        "0.1.0",
-        "# Changelog\n\n## [Unreleased]\n\n## [0.2.0-rc.1]\n",
-    );
+    write_fixture_workspace(root, "0.1.0");
 
     let update_args = ReleasePrepArgs {
         version: Some("0.2.0-rc.1".to_string()),
         check: false,
-        allow_missing_changelog: false,
     };
     let report = release_prep::run_in(root, &update_args).unwrap();
     assert_eq!(report.target_version, "0.2.0-rc.1");
@@ -142,28 +145,20 @@ fn release_prep_syncs_all_manifests_preserving_formatting() {
     let kdl = fs::read_to_string(root.join("crates/java-analyzer/java-analyzer.usage.kdl")).unwrap();
     assert!(kdl.contains("version \"0.2.0-rc.1\""), "{kdl}");
 
-    // Subsequent --check passes.
-    release_prep::run_in(
+    // Subsequent --check passes without CHANGELOG.md.
+    let checked = release_prep::run_in(
         root,
         &ReleasePrepArgs {
             version: None,
             check: true,
-            allow_missing_changelog: false,
         },
     )
     .unwrap();
+    assert_eq!(checked.target_version, "0.2.0-rc.1");
 
-    // Missing changelog section returns error in write mode unless allowed.
-    let missing_err = release_prep::run_in(
-        root,
-        &ReleasePrepArgs {
-            version: Some("0.3.0".to_string()),
-            check: false,
-            allow_missing_changelog: false,
-        },
-    )
-    .unwrap_err();
-    assert!(missing_err.contains("CHANGELOG.md"), "{missing_err}");
+    // Re-running update to the same version is a no-op (0 updated files).
+    let noop = release_prep::run_in(root, &update_args).unwrap();
+    assert!(noop.updated_files.is_empty(), "{:?}", noop.updated_files);
 }
 
 #[test]
@@ -185,7 +180,7 @@ fn dist_packages_tar_gz_and_zip_with_sha256sums_and_build_info() {
 
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    write_fixture_workspace(root, "0.1.0", "# Changelog\n\n## [0.1.0]\n");
+    write_fixture_workspace(root, "0.1.0");
     fs::write(root.join("README.md"), "# java-analyzer\n").unwrap();
     fs::write(root.join("LICENSE-APACHE"), "Apache-2.0\n").unwrap();
     fs::write(root.join("LICENSE-MIT"), "MIT\n").unwrap();

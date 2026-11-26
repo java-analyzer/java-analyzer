@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  release:
+    types: [published]
   workflow_call:
     inputs:
       tag:
@@ -27,6 +29,7 @@ env:
 jobs:
   prepare:
     name: Prepare Release Metadata
+    if: github.event_name != 'release'
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
@@ -34,8 +37,13 @@ jobs:
       is_nightly: ${{ steps.meta.outputs.is_nightly }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff
       - name: Determine release tag and verify manifests
         id: meta
         shell: bash
@@ -53,9 +61,28 @@ jobs:
             echo "is_nightly=false" >> "$GITHUB_OUTPUT"
             echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
           fi
+          mkdir -p target/release-notes
           if [[ "$tag" == v* ]]; then
             cargo xtask release-prep "${tag#v}" --check
+            if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null 2>&1; then
+              git-cliff --config cliff.toml --current --output target/release-notes/release-notes.md
+            else
+              git-cliff --config cliff.toml --unreleased --tag "$tag" --output target/release-notes/release-notes.md
+            fi
+          elif [ "$tag" = "nightly" ]; then
+            printf 'Automated rolling nightly prerelease built from commit `%s` (https://github.com/%s/commit/%s), promoted after passing the nightly conformance suite.\n\n' \
+              "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$GITHUB_SHA" > target/release-notes/release-notes.md
+            git-cliff --config cliff.toml --unreleased --strip footer >> target/release-notes/release-notes.md || true
+          else
+            printf 'Release `%s` built from commit `%s` (https://github.com/%s/commit/%s).\n' \
+              "$tag" "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$GITHUB_SHA" > target/release-notes/release-notes.md
           fi
+      - name: Upload release notes artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: target/release-notes/release-notes.md
+          if-no-files-found: error
 
   build:
     name: Build (${{ matrix.target }})
@@ -202,9 +229,6 @@ jobs:
     name: Publish GitHub Release
     needs: [prepare, build, package-vscode]
     runs-on: ubuntu-latest
-    env:
-      OVSX_PAT: ${{ secrets.OVSX_PAT }}
-      VSCE_PAT: ${{ secrets.VSCE_PAT }}
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -227,13 +251,36 @@ jobs:
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
           name: ${{ needs.prepare.outputs.tag }}
+          draft: ${{ needs.prepare.outputs.is_nightly != 'true' }}
           prerelease: ${{ needs.prepare.outputs.is_prerelease == 'true' }}
-          generate_release_notes: ${{ needs.prepare.outputs.is_nightly != 'true' }}
+          body_path: artifacts/release-notes/release-notes.md
+          generate_release_notes: false
           make_latest: ${{ needs.prepare.outputs.is_prerelease != 'true' }}
           files: release-assets/*
+
+  publish-registries:
+    name: Publish Editor Registries
+    if: github.event_name == 'release' && !github.event.release.prerelease && startsWith(github.event.release.tag_name, 'v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Download VSIX from published GitHub Release
+        if: env.OVSX_PAT != '' || env.VSCE_PAT != ''
+        run: |
+          mkdir -p release-vsix
+          gh release download "${{ github.event.release.tag_name }}" --pattern '*.vsix' --dir release-vsix
       - name: Publish to Open VSX
-        if: startsWith(github.ref, 'refs/tags/v') && env.OVSX_PAT != ''
-        run: npx ovsx publish release-assets/*.vsix -p "$OVSX_PAT"
+        if: env.OVSX_PAT != ''
+        run: npx ovsx publish release-vsix/*.vsix -p "$OVSX_PAT"
       - name: Publish to VS Code Marketplace
-        if: startsWith(github.ref, 'refs/tags/v') && env.VSCE_PAT != ''
-        run: npx @vscode/vsce publish --packagePath release-assets/*.vsix -p "$VSCE_PAT"
+        if: env.VSCE_PAT != ''
+        run: npx @vscode/vsce publish --packagePath release-vsix/*.vsix -p "$VSCE_PAT"

@@ -12,12 +12,9 @@ pub struct ReleasePrepArgs {
     /// Target SemVer version (`X.Y.Z` or `X.Y.Z-rc.N`); defaults to workspace version in `--check` mode
     #[usage(value_name = "VERSION")]
     pub version: Option<String>,
-    /// Verify version synchronization and CHANGELOG.md without modifying files
+    /// Verify version synchronization across workspace manifests without modifying files
     #[usage(long)]
     pub check: bool,
-    /// Allow updating or checking manifests even if CHANGELOG.md lacks `## [<VERSION>]`
-    #[usage(long)]
-    pub allow_missing_changelog: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,7 +129,7 @@ pub fn run(args: &ReleasePrepArgs) -> i32 {
         Ok(report) => {
             if args.check {
                 println!(
-                    "release-prep: all manifests and CHANGELOG.md match v{}",
+                    "release-prep: all manifests match v{}",
                     report.target_version
                 );
             } else {
@@ -156,7 +153,6 @@ pub fn run_in(root: &Path, args: &ReleasePrepArgs) -> Result<VersionReport, Stri
     let vscode_path = root.join("editors/vscode/package.json");
     let zed_path = root.join("editors/zed/extension.toml");
     let kdl_path = root.join("crates/java-analyzer/java-analyzer.usage.kdl");
-    let changelog_path = root.join("CHANGELOG.md");
 
     let cargo_text = read_file(&cargo_path)?;
     let cargo_ver = read_workspace_cargo_version(&cargo_text, &cargo_path)?;
@@ -200,10 +196,6 @@ pub fn run_in(root: &Path, args: &ReleasePrepArgs) -> Result<VersionReport, Stri
                     "{label}: expected version '{target_version}', found '{found}'"
                 ));
             }
-        }
-        if !args.allow_missing_changelog {
-            check_changelog(&changelog_path, &target_version)
-                .unwrap_or_else(|e| errors.push(e));
         }
         if !errors.is_empty() {
             return Err(format!(
@@ -279,10 +271,6 @@ pub fn run_in(root: &Path, args: &ReleasePrepArgs) -> Result<VersionReport, Stri
         updated_files.push(kdl_path);
     }
 
-    if !args.allow_missing_changelog {
-        check_changelog(&changelog_path, &target_version)?;
-    }
-
     Ok(VersionReport {
         target_version,
         updated_files,
@@ -342,23 +330,6 @@ fn read_kdl_version(text: &str, path: &Path) -> Result<String, String> {
         }
     }
     Err(format!("{}: missing top-level `version \"...\"` line", path.display()))
-}
-
-fn check_changelog(path: &Path, version: &str) -> Result<(), String> {
-    let text = read_file(path)?;
-    let exact = format!("## [{version}]");
-    let with_meta = format!("## [{version}] ");
-    let has_section = text.lines().any(|line| {
-        let trimmed = line.trim();
-        trimmed == exact || trimmed.starts_with(&with_meta)
-    });
-    if !has_section {
-        return Err(format!(
-            "{}: missing release heading '## [{version}]' (pass --allow-missing-changelog to skip)",
-            path.display()
-        ));
-    }
-    Ok(())
 }
 
 fn replace_toml_section_version(

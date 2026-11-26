@@ -23,7 +23,12 @@ Java LSP in Rust, modeled after `rust-analyzer` using `rowan` (lossless CST) and
    - `jj diff` when viewing diffs.
    - In a Git-like linear workflow, for the equivalent of `git commit -m 'your commit message'`, run `jj bookmark advance` first to advance the bookmark to `@`, and then `jj commit -m 'your commit message'` to commit `@` with a message and create a new blank commit on top of it.
    - For multi-step refactorings, start from a clean `jj status` and commit each step as a separate local change (do not push unless asked).
-   - For non-trivial commits, follow the one-line subject with up to three short narrative paragraphs (1–2 sentences each): (1) the problem and why it mattered, (2) the approach introduced, and (3) optional reviewer notes or recommended top-down review order.
+   - **Pre-`1.0` Commit Convention ("Road to 1.0" Mode)**: Use Conventional Commits (`<type>(<scope>)[!]: <lowercase imperative summary>`, <= 72 chars) so `git-cliff` (`cliff.toml`) groups progress by 1.0 capability pillar:
+     - **Published types**: `feat`, `fix`, `perf` (plus `!` for breaking CLI/config changes). Phrase subjects around user-visible capability or fixed symptom; keep internal struct/query names in the body.
+     - **Internal types** (kept in `jj log`, auto-skipped from release notes): `refactor`, `test`, `ci`, `build`, `chore`, `docs`.
+     - **Scopes**: `ide`, `lsp` (*LSP & IDE Capabilities*); `syntax`, `hir`, `diagnostics` (*Java Language & Semantic Support*); `workspace`, `cli`, `fmt` (*Workspace, CLI & Formatter*); `zed`, `vscode`, `nvim`, `helix` (*Editor Integrations*); `conformance`, `bench` (*Conformance & Performance*); plus internal scopes `xtask`, `spec`, `plan`, `agents`, `deps`.
+     - **Optional trailers** (after a blank line at the end of the commit body): `Spec: <NNNN>` (renders spec reference), `Highlight: <1–2 sentence callout>` (promoted to `## Milestone Highlights` at the top of the Draft GitHub Release), and `Changelog: ignore` (suppresses same-cycle unreleased fixups).
+   - For non-trivial commits, follow the header with up to three short narrative paragraphs (1–2 sentences each): (1) the problem and why it mattered, (2) the approach introduced, and (3) optional reviewer notes or recommended top-down review order.
 2. **Prefer single-quoted (`'...'`) strings in shell commands**: Single quotes prevent variable/command interpolation and allow multiline strings while keeping commands prefix-matchable for tool permission rules.
 3. **Prefer sharp focused CLI tools to ad-hoc scripts (never use ad-hoc `python3 -c` / `node -e` / `perl -e` one-liners when a dedicated CLI tool exists)**:
    - `ast-grep` (`sg`) when searching/replacing over structured AST (e.g., `ast-grep run -p '...'`)

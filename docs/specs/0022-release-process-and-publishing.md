@@ -19,7 +19,7 @@ This spec defines a reproducible, end-to-end **CI, release engineering, binary p
 1. **Canonical Organization Metadata & Single-Command Release Prep (`cargo xtask release-prep <VERSION>`):**
    - Standardize all repository URLs and metadata across `Cargo.toml`, `editors/vscode/package.json`, `editors/zed/extension.toml`, and docs on **`https://github.com/java-analyzer/java-analyzer`**.
    - Atomically synchronize version strings across root `Cargo.toml`, `editors/vscode/package.json`, `editors/zed/extension.toml`, and `crates/java-analyzer/java-analyzer.usage.kdl` (via `Cli::to_kdl()`), verified in CI via `--check`.
-   - Maintain `CHANGELOG.md` with per-release milestone notes.
+   - Generate per-release tag-to-tag changelogs dynamically from git history via `git-cliff` (`cliff.toml` and `mise run release-notes`), with no committed `CHANGELOG.md` in the repository.
 2. **Continuous Integration Gate (`.github/workflows/ci.yml`):**
    - Gate every push to `main` and pull request on `cargo xtask release-prep --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --all-targets`, Zed extension host tests (`editors/zed`), and VS Code extension TypeScript compilation (`editors/vscode`).
 3. **Cross-Platform Native Binary Releases & Rolling Nightlies (`.github/workflows/release.yml`):**
@@ -29,6 +29,7 @@ This spec defines a reproducible, end-to-end **CI, release engineering, binary p
      - `x86_64-pc-windows-msvc`
    - Bundle each archive with `java-analyzer` (plus `java-fmt` and multicall drop-in links starting in `v0.5.0`), `LICENSE-MIT`, `LICENSE-APACHE`, `README.md`, and pre-generated `bash`/`zsh`/`fish` completion scripts.
    - Publish `SHA256SUMS` and GitHub Artifact Attestations (`actions/attest-build-provenance`).
+   - Create `v*.*.*` releases as **Draft GitHub Releases** pre-populated with the `git-cliff` tag-to-tag changelog (`<latest-v*-tag>..HEAD`, ignoring `nightly`) so maintainers can compose/refine high-level release prose on GitHub before publishing (while `nightly` publishes automatically), and trigger editor registry publishing (`publish-registries`) on `release: [published]`.
 4. **Zero-Friction CLI Installation (`v0.1.0` Soft Launch → `v0.2.0` Public Registries):**
    - **`mise` (`v0.1.0`):** Standard asset naming enables immediate `mise use -g github:java-analyzer/java-analyzer` with zero external registry PR.
    - **`cargo-binstall` (`v0.1.0`):** Add `[package.metadata.binstall]` to `crates/java-analyzer/Cargo.toml` pointing at `https://github.com/java-analyzer/java-analyzer/releases/download/...`.
@@ -107,7 +108,7 @@ Add `cargo xtask release-prep [<VERSION>] [--check]` (`usage-rs`):
   2. `editors/vscode/package.json` (`"version"`)
   3. `editors/zed/extension.toml` (`version`)
   4. `crates/java-analyzer/java-analyzer.usage.kdl` (regenerated so its embedded `version` matches)
-- Verifies `CHANGELOG.md` contains a `## [<VERSION>]` section when preparing a release.
+- Release notes are generated dynamically from git history via `git-cliff` (`cliff.toml` / `mise run release-notes`) rather than from a committed `CHANGELOG.md`. During the pre-`1.0.0` climb, `cliff.toml` groups Conventional Commits by capability pillar (`LSP & IDE Capabilities`, `Java Language & Semantic Support`, `Workspace, CLI & Formatter`, `Editor Integrations`, `Conformance & Performance`, `Bug Fixes`), promotes `Highlight:` trailers into `## Milestone Highlights`, renders `Spec:` references, and hides `refactor`/`test`/`ci`/`chore`/`docs` churn and `Changelog: ignore` fixups (see [post-1.0-changelog-transition.md](../plans/post-1.0-changelog-transition.md)).
 
 ---
 
@@ -163,8 +164,10 @@ Shipped as a single universal `java-analyzer-<VER>.vsix`:
 
 1. **`ci.yml`** (`pull_request`, `push` to `main`):
    - Runs `cargo xtask release-prep --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --all-targets`, `cd editors/zed && cargo test`, and `cd editors/vscode && npm ci && npm run compile`.
-2. **`release.yml`** (`push` tags `v*.*.*`, plus reusable `workflow_call` for `nightly`):
-   - Builds the 5 target binaries, runs native smoke tests (`--version`, `completion zsh`), packages archives + `SHA256SUMS`, generates SLSA provenance attestations (`actions/attest-build-provenance`), packages the universal `java-analyzer-<VER>.vsix`, and publishes the GitHub Release (with conditional `OVSX_PAT` / `VSCE_PAT` publish steps ready for `v0.2.0`).
+2. **`release.yml`** (`push` tags `v*.*.*`, `release: [published]`, plus reusable `workflow_call` for `nightly`):
+   - `prepare` checks out full history (`fetch-depth: 0`), verifies manifest synchronization (`cargo xtask release-prep <VER> --check` on `v*` tags), and generates release notes with `git-cliff` (`cliff.toml`, measuring `<latest-v*-tag>..HEAD` and ignoring `nightly`) uploaded as the `release-notes` artifact.
+   - Builds the 5 target binaries, runs native smoke tests (`--version`, `completion zsh`), packages archives + `SHA256SUMS`, generates SLSA provenance attestations (`actions/attest-build-provenance`), packages the universal `java-analyzer-<VER>.vsix`, and creates a **Draft GitHub Release** pre-populated with `release-notes.md` for `v*.*.*` tags (while `nightly` publishes automatically as a rolling prerelease).
+   - `publish-registries` runs on `release: [published]` (when non-prerelease and tagged `v*`), downloading the `.vsix` from the newly published GitHub Release and publishing to Open VSX and VS Code Marketplace (`OVSX_PAT` / `VSCE_PAT`) only after the maintainer clicks **Publish release**.
 3. **`nightly.yml`** (`schedule: cron '0 3 * * *'` + `workflow_dispatch`):
    - Executes `mise run conformance-report --strict` against OpenJDK + the 12-repo `workspace-corpus`.
    - Uploads `CONFORMANCE.md` and `target/workspace-corpus/*.json` as workflow artifacts, and promotes the rolling `nightly` prerelease via `release.yml` when green.

@@ -1,6 +1,7 @@
 [tools]
 ast-grep = "latest"
 fd = "latest"
+git-cliff = "latest"
 jq = "latest"
 jujutsu = "latest"
 node = "lts"
@@ -934,8 +935,7 @@ target/release/xtask bench-plot "${args[@]}"
 [tasks.release-prep]
 description = "Synchronize or verify release version strings across workspace manifests"
 usage = '''
-flag "--check" help="Verify version synchronization and CHANGELOG.md without modifying files"
-flag "--allow-missing-changelog" help="Allow updating or checking manifests when CHANGELOG.md lacks the target version"
+flag "--check" help="Verify version synchronization across workspace manifests without modifying files"
 arg "[version]" help="Target SemVer version (e.g. 0.1.0 or 0.2.0-rc.1)"
 '''
 run = '''
@@ -949,11 +949,48 @@ fi
 if [ "${usage_check:-false}" = "true" ]; then
   args+=(--check)
 fi
-if [ "${usage_allow_missing_changelog:-false}" = "true" ]; then
-  args+=(--allow-missing-changelog)
-fi
 
 cargo xtask release-prep "${args[@]}"
+'''
+
+[tasks.release-notes]
+description = "Generate release changelog since the latest v*.*.* tag using git-cliff"
+usage = '''
+flag "--tag <tag>" help="Target release tag (e.g. v0.1.0); defaults to v<workspace_version>"
+flag "--out <path>" help="Write generated Markdown to file instead of stdout"
+'''
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+tag="${usage_tag:-}"
+if [ -z "$tag" ]; then
+  ver="$(yq -p toml -oy '.workspace.package.version' Cargo.toml)"
+  tag="v${ver}"
+fi
+
+tag_exists=false
+if [ -f ".git/refs/tags/${tag}" ]; then
+  tag_exists=true
+elif [ -f ".git/packed-refs" ] && awk -v t="refs/tags/${tag}" '$2 == t { found = 1 } END { exit !found }' .git/packed-refs; then
+  tag_exists=true
+elif command -v jj >/dev/null 2>&1 && jj tag list | rg -Fq "${tag}:"; then
+  tag_exists=true
+fi
+
+args=(--config cliff.toml)
+if [ "$tag_exists" = "true" ]; then
+  args+=(--current)
+else
+  args+=(--unreleased --tag "$tag")
+fi
+
+if [ -n "${usage_out:-}" ]; then
+  mkdir -p "$(dirname "$usage_out")"
+  args+=(--output "$usage_out")
+fi
+
+git-cliff "${args[@]}"
 '''
 
 [tasks.dist]

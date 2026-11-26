@@ -1,0 +1,114 @@
+# git-cliff configuration for java-analyzer release notes (Pre-1.0 "Road to 1.0" mode).
+# Used by `mise run release-notes` and `.github/workflows/release.yml`.
+# Post-1.0 transition plan: `docs/plans/post-1.0-changelog-transition.md`.
+
+[remote.github]
+owner = "java-analyzer"
+repo = "java-analyzer"
+
+[changelog]
+header = ""
+body = """
+{%- set_global has_highlights = false -%}
+{%- for commit in commits -%}
+  {%- if commit.footers -%}
+    {%- for footer in commit.footers -%}
+      {%- if footer.token == "Highlight" -%}
+        {%- set_global has_highlights = true -%}
+      {%- endif -%}
+    {%- endfor -%}
+  {%- endif -%}
+{%- endfor -%}
+{%- if has_highlights %}
+## Milestone Highlights
+
+{% for commit in commits -%}
+  {%- if commit.footers -%}
+    {%- for footer in commit.footers -%}
+      {%- if footer.token == "Highlight" -%}
+- {{ footer.value | trim }}
+{% endif -%}
+    {%- endfor -%}
+  {%- endif -%}
+{%- endfor %}
+{% endif -%}
+{% for group, group_commits in commits | group_by(attribute="group") -%}
+### {{ group | striptags | trim }}
+
+{% for commit in group_commits -%}
+  {%- set subject = commit.message | split(pat="\n") | first | trim -%}
+  {%- set chars = subject | split(pat="") -%}
+  {%- set first_ch = chars | slice(start=1, end=2) | first | default(value="") | upper -%}
+  {%- set rest = chars | slice(start=2) | join(sep="") -%}
+  {%- set_global spec_ref = "" -%}
+  {%- if commit.footers -%}
+    {%- for footer in commit.footers -%}
+      {%- if footer.token == "Spec" -%}
+        {%- set_global spec_ref = footer.value | trim -%}
+      {%- endif -%}
+    {%- endfor -%}
+  {%- endif -%}
+- {% if commit.scope %}**{{ commit.scope }}**: {% endif %}{{ first_ch }}{{ rest }}{% if spec_ref != "" %} — Spec {{ spec_ref }}{% endif %}{% if commit.id %} ([{{ commit.id | truncate(length=7, end="") }}](https://github.com/java-analyzer/java-analyzer/commit/{{ commit.id }})){% endif %}
+{% endfor %}
+{% endfor -%}
+{% if previous.version -%}
+**Full Changelog**: https://github.com/java-analyzer/java-analyzer/compare/{{ previous.version }}...{{ version }}
+{% elif version -%}
+**Full Changelog**: https://github.com/java-analyzer/java-analyzer/commits/{{ version }}
+{% endif %}
+"""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = false
+split_commits = false
+tag_pattern = "^v[0-9]+\\.[0-9]+\\.[0-9]+(-rc\\.[0-9]+)?$"
+ignore_tags = "^nightly$"
+topo_order = false
+sort_commits = "newest"
+commit_preprocessors = [
+  # Normalize legacy `feature(...)` prefix to standard `feat(...)`.
+  { pattern = '^feature(\([^)]+\))?:', replace = "feat${1}:" },
+  { pattern = '^feat\(testing\):', replace = "feat(conformance):" },
+  # Auto-link (#123) issue/PR references.
+  { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://github.com/java-analyzer/java-analyzer/issues/${1}))" },
+]
+commit_parsers = [
+  # Explicit opt-out trailer for same-cycle unreleased fixups.
+  { footer = "(?i)^Changelog:\\s*(ignore|skip|false)", skip = true },
+
+  # Breaking changes (`!` or `BREAKING CHANGE:` footer) always surface at the top.
+  { message = "^[a-z]+(\\([^)]+\\))?!:", group = "<!-- 0 -->Breaking Changes" },
+  { footer = "^BREAKING[ -]CHANGE:", group = "<!-- 0 -->Breaking Changes" },
+
+  # Auto-skip internal Conventional Commit types (kept in `jj log` for developers).
+  { message = "^(refactor|test|ci|build|chore|style|docs)(\\([^)]+\\))?:", skip = true },
+
+  # Auto-skip legacy pre-v0.1.0 internal/housekeeping commits.
+  { message = '(?i)^(update|document .* in) AGENTS\.md', skip = true },
+  { message = '(?i)^add (curated Rust best-practices skills|architecture audit|workspace clippy lints|spec [0-9]+)', skip = true },
+  { message = '(?i)^remove (completed ARCHITECTURE_AUDIT\.md|initial project bootstrapping script)', skip = true },
+  { message = '(?i)^(add license|initialize project and scaffold core crates)(\r?\n|$)', skip = true },
+  { message = '(?i)^(Refactor|Split|Tighten|Migrate|Extract|Use|Deduplicate|Collapse|Adopt|Replace|Eliminate|Centralize|Upgrade|Bump|Plan)\b', skip = true },
+
+  # Pre-1.0 Capability-Pillar Feature Groups (`feat(<scope>): ...`).
+  { message = "^feat\\((ide|lsp)\\):", group = "<!-- 1 -->LSP & IDE Capabilities" },
+  { message = "^feat\\((syntax|hir|diagnostics)\\):", group = "<!-- 2 -->Java Language & Semantic Support" },
+  { message = "^feat\\((workspace|cli|fmt)\\):", group = "<!-- 3 -->Workspace, CLI & Formatter" },
+  { message = "^feat\\((zed|vscode|nvim|helix)\\):", group = "<!-- 4 -->Editor Integrations" },
+  { message = "^feat\\((conformance|bench)\\):", group = "<!-- 5 -->Conformance & Performance" },
+  { message = "^perf(\\([^)]+\\))?:", group = "<!-- 5 -->Conformance & Performance" },
+  { message = "^feat(\\([^)]+\\))?:", group = "<!-- 6 -->Added" },
+  { message = "^fix(\\([^)]+\\))?:", group = "<!-- 7 -->Bug Fixes" },
+
+  # Pre-v0.1.0 imperative-subject fallback mappings (retire after v0.1.0 is tagged).
+  { message = '(?i)^(Add minimal stdio LSP|Implement salsa queries and ide)', group = "<!-- 1 -->LSP & IDE Capabilities" },
+  { message = '(?i)^(Parse |Complete (Java lexer|M4 parser)|Add event-based parser|Implement (basic CST|Java language levels|symbol indexing|JDK and JAR|type hierarchy|Spec 0008|Spec 0009|Spec 0020|Spec 0021)|Support OpenJDK)', group = "<!-- 2 -->Java Language & Semantic Support" },
+  { message = '(?i)^(Implement lightweight workspace|Add (inspect CLI|shell completions|pre-1\.0 roadmap)|Implement Spec 0022)', group = "<!-- 3 -->Workspace, CLI & Formatter" },
+  { message = '(?i)^Add (Zed, VSCode|Helix editor)', group = "<!-- 4 -->Editor Integrations" },
+  { message = '(?i)^Add (conformance runner|mise tasks to fetch Java corpora|dynamic OpenJDK conformance|workspace-corpus|Spec 0018|bench-plot)', group = "<!-- 5 -->Conformance & Performance" },
+  { message = '(?i)^(Implement|Add|Support|Complete|Introduce|Create)\b', group = "<!-- 6 -->Added" },
+  { message = '(?i)^(Fix|Resolve)\b', group = "<!-- 7 -->Bug Fixes" },
+  { skip = true, message = ".*" },
+]
