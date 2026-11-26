@@ -2,9 +2,19 @@
 
 All clients launch the `java-analyzer` binary and talk LSP over stdio.
 
-Install the server first:
+The **Zed** and **VS Code** extensions automatically download and update `java-analyzer` from [GitHub Releases](https://github.com/java-analyzer/java-analyzer/releases) unless overridden. For **Neovim** and **Helix** (or if you prefer managing the binary yourself), install the server first:
 
 ```sh
+# Prebuilt binary via mise (recommended)
+mise use -g github:java-analyzer/java-analyzer
+
+# Prebuilt binary via cargo-binstall
+cargo binstall java-analyzer
+
+# From GitHub via Cargo
+cargo install --git https://github.com/java-analyzer/java-analyzer java-analyzer
+
+# Or build from a local checkout
 cargo install --path crates/java-analyzer
 ```
 
@@ -15,7 +25,12 @@ Requires the Java language to be available (install the **Java** extension in Ze
 1. Run `zed: install dev extension` from the command palette.
 2. Select `editors/zed`.
 
-The extension uses `java-analyzer` from `PATH`. To override it:
+Binary resolution order:
+1. Explicit `lsp.java-analyzer.binary.path` setting if configured.
+2. `java-analyzer` found on `PATH`.
+3. Automatic download and caching of the latest release from `java-analyzer/java-analyzer` GitHub Releases (pruning older cached versions automatically).
+
+To override the binary path:
 
 ```json
 {
@@ -41,16 +56,27 @@ Unit tests (host target): `cd editors/zed && cargo test`.
 
 ## VSCode (`editors/vscode`)
 
+Install the universal `.vsix` attached to [GitHub Releases](https://github.com/java-analyzer/java-analyzer/releases), or build and install it locally:
+
 ```sh
 cd editors/vscode
 npm install
-npm run compile
+npm test
 npm run package        # produces java-analyzer-0.1.0.vsix
 code --install-extension java-analyzer-0.1.0.vsix
 ```
 
-Settings: `javaAnalyzer.server.path`, `javaAnalyzer.server.args`,
-`javaAnalyzer.trace.server`. Command: `Java Analyzer: Restart Server`.
+When `javaAnalyzer.server.path` is empty (the default), the extension automatically downloads the matching platform archive from `java-analyzer/java-analyzer` GitHub Releases, verifies its SHA-256 checksum against `SHA256SUMS`, caches it in extension global storage, and checks for updates in the background (falling back to `java-analyzer` on `PATH` if offline or updates are disabled).
+
+Settings:
+- `javaAnalyzer.server.path`: Explicit path override (leave empty `""` for auto-managed download / `PATH`).
+- `javaAnalyzer.server.args`: Extra command line arguments passed to the server.
+- `javaAnalyzer.updates.channel`: `"stable"` (default), `"nightly"`, or `"off"`.
+- `javaAnalyzer.trace.server`: `"off"`, `"messages"`, or `"verbose"`.
+
+Commands:
+- `Java Analyzer: Restart Server`
+- `Java Analyzer: Check for Server Updates`
 
 ## Neovim (`editors/nvim`)
 

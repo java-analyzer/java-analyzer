@@ -14,6 +14,8 @@ use crate::{
     },
     conformance::{self, Config, Kind, Source},
     diag_conformance::{self, DiagConformanceArgs},
+    dist::{self, DistArgs},
+    release_prep::{self, ReleasePrepArgs},
     report::{self, ReportArgs},
 };
 
@@ -45,6 +47,10 @@ pub enum XtaskSubcommand {
     BenchPlot(BenchPlotArgs),
     /// Generate the synthetic plain-small Java corpus
     BenchGenPlain(GenPlainArgs),
+    /// Synchronize or verify release version strings across workspace manifests
+    ReleasePrep(ReleasePrepArgs),
+    /// Build a release archive, SHA256SUMS, and BUILD_INFO.json
+    Dist(DistArgs),
     /// Generate shell completions
     Completion(CompletionCmd),
     /// Print the canonical KDL usage spec for xtask to stdout
@@ -115,6 +121,22 @@ impl usage::Run for GenPlainArgs {
 
     fn run(self) -> Self::Output {
         bench::run_gen_plain(&self)
+    }
+}
+
+impl usage::Run for ReleasePrepArgs {
+    type Output = i32;
+
+    fn run(self) -> Self::Output {
+        release_prep::run(&self)
+    }
+}
+
+impl usage::Run for DistArgs {
+    type Output = i32;
+
+    fn run(self) -> Self::Output {
+        dist::run(&self)
     }
 }
 
@@ -309,6 +331,8 @@ pub enum Command {
     Bench(Box<BenchArgs>),
     BenchPlot(BenchPlotArgs),
     BenchGenPlain(GenPlainArgs),
+    ReleasePrep(ReleasePrepArgs),
+    Dist(DistArgs),
     Completion(CompletionCmd),
     UsageSpec,
     Help,
@@ -317,6 +341,8 @@ pub enum Command {
     BenchHelp,
     BenchPlotHelp,
     BenchGenPlainHelp,
+    ReleasePrepHelp,
+    DistHelp,
 }
 
 pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, String> {
@@ -330,6 +356,8 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, Str
             Some(XtaskSubcommand::Bench(b)) => Command::Bench(Box::new((*b).into())),
             Some(XtaskSubcommand::BenchPlot(p)) => Command::BenchPlot(p),
             Some(XtaskSubcommand::BenchGenPlain(g)) => Command::BenchGenPlain(g),
+            Some(XtaskSubcommand::ReleasePrep(r)) => Command::ReleasePrep(r),
+            Some(XtaskSubcommand::Dist(d)) => Command::Dist(d),
             Some(XtaskSubcommand::Completion(c)) => Command::Completion(c),
             Some(XtaskSubcommand::UsageSpec) => Command::UsageSpec,
             None => Command::Help,
@@ -340,6 +368,8 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, Str
             "bench" => Command::BenchHelp,
             "bench-plot" => Command::BenchPlotHelp,
             "bench-gen-plain" => Command::BenchGenPlainHelp,
+            "release-prep" => Command::ReleasePrepHelp,
+            "dist" => Command::DistHelp,
             _ => Command::Help,
         }),
         Err(err) => Err(usage::render_failure_plain(XtaskCli::spec(), &refs, &err)),

@@ -13,11 +13,13 @@ edition = "2024"
 authors = ["Roland Tepp"]
 license = "MIT OR Apache-2.0"
 description = "A Java Language Server Protocol implementation in Rust"
+repository = "https://github.com/java-analyzer/java-analyzer"
 
 [workspace.dependencies]
 # External crates
 anyhow = "1"
 askama = "0.16"
+flate2 = "1"
 ignore = "0.4"
 la-arena = "0.3"
 line-index = "0.1"
@@ -51,3 +53,8 @@ expect_used = "warn"
 redundant_clone = "warn"
 needless_collect = "warn"
 cloned_instead_of_copied = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

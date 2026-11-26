@@ -1,0 +1,43 @@
+name: Nightly Conformance & Rolling Release
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  conformance:
+    name: Nightly Conformance Report
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: jdx/mise-action@v2
+      - name: Run strict conformance report
+        run: mise run conformance-report --strict
+      - name: Upload conformance artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-conformance
+          path: |
+            target/conformance/CONFORMANCE.md
+            target/workspace-corpus/*.json
+          if-no-files-found: warn
+
+  release-nightly:
+    name: Promote Rolling Nightly Prerelease
+    needs: conformance
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: nightly
+    secrets: inherit

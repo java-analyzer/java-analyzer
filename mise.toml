@@ -930,3 +930,61 @@ fi
 
 target/release/xtask bench-plot "${args[@]}"
 '''
+
+[tasks.release-prep]
+description = "Synchronize or verify release version strings across workspace manifests"
+usage = '''
+flag "--check" help="Verify version synchronization and CHANGELOG.md without modifying files"
+flag "--allow-missing-changelog" help="Allow updating or checking manifests when CHANGELOG.md lacks the target version"
+arg "[version]" help="Target SemVer version (e.g. 0.1.0 or 0.2.0-rc.1)"
+'''
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+args=()
+if [ -n "${usage_version:-}" ]; then
+  args+=("$usage_version")
+fi
+if [ "${usage_check:-false}" = "true" ]; then
+  args+=(--check)
+fi
+if [ "${usage_allow_missing_changelog:-false}" = "true" ]; then
+  args+=(--allow-missing-changelog)
+fi
+
+cargo xtask release-prep "${args[@]}"
+'''
+
+[tasks.dist]
+description = "Build a release archive, SHA256SUMS, and BUILD_INFO.json"
+usage = '''
+flag "--bin-path <path>" help="Path to the compiled java-analyzer binary"
+flag "--target <triple>" help="Target triple [host target]"
+flag "--tag <tag>" help="Release tag (e.g. v0.1.0 or nightly) [v<workspace_version>]"
+flag "--completions-bin <path>" help="Host-runnable java-analyzer binary for completions when cross-compiling"
+flag "--out-dir <dir>" help="Output directory" default="target/dist"
+'''
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+args=()
+if [ -n "${usage_bin_path:-}" ]; then
+  args+=(--bin-path "$usage_bin_path")
+fi
+if [ -n "${usage_target:-}" ]; then
+  args+=(--target "$usage_target")
+fi
+if [ -n "${usage_tag:-}" ]; then
+  args+=(--tag "$usage_tag")
+fi
+if [ -n "${usage_completions_bin:-}" ]; then
+  args+=(--completions-bin "$usage_completions_bin")
+fi
+if [ -n "${usage_out_dir:-}" ]; then
+  args+=(--out-dir "$usage_out_dir")
+fi
+
+cargo xtask dist "${args[@]}"
+'''

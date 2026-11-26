@@ -3,11 +3,11 @@
   "displayName": "Java Analyzer",
   "description": "Java language support powered by the java-analyzer language server.",
   "version": "0.1.0",
-  "publisher": "luolong",
+  "publisher": "java-analyzer",
   "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/luolong/java-analyzer"
+    "url": "https://github.com/java-analyzer/java-analyzer"
   },
   "engines": {
     "vscode": "^1.85.0"
@@ -24,6 +24,10 @@
       {
         "command": "javaAnalyzer.restartServer",
         "title": "Java Analyzer: Restart Server"
+      },
+      {
+        "command": "javaAnalyzer.checkForUpdates",
+        "title": "Java Analyzer: Check for Server Updates"
       }
     ],
     "configuration": {
@@ -31,8 +35,8 @@
       "properties": {
         "javaAnalyzer.server.path": {
           "type": "string",
-          "default": "java-analyzer",
-          "markdownDescription": "Path to the `java-analyzer` executable. Resolved via `PATH` when not absolute."
+          "default": "",
+          "markdownDescription": "Explicit path to a `java-analyzer` executable. Leave empty (`\"\"`) to automatically download and manage `java-analyzer` from GitHub Releases (falling back to `java-analyzer` on `PATH` when offline or updates are disabled). Any non-empty value overrides the auto-managed binary."
         },
         "javaAnalyzer.server.args": {
           "type": "array",
@@ -41,6 +45,16 @@
           },
           "default": [],
           "description": "Extra command line arguments passed to the server."
+        },
+        "javaAnalyzer.updates.channel": {
+          "type": "string",
+          "enum": [
+            "stable",
+            "nightly",
+            "off"
+          ],
+          "default": "stable",
+          "description": "Release channel for automatic java-analyzer binary downloads and background updates."
         },
         "javaAnalyzer.trace.server": {
           "type": "string",
@@ -58,6 +72,7 @@
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
+    "test": "npm run compile && node --test out/test/release.test.js",
     "package": "vsce package"
   },
   "dependencies": {

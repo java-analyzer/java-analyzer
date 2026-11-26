@@ -4,7 +4,7 @@ description = "Java language server written in Rust, inspired by rust-analyzer."
 version = "0.1.0"
 schema_version = 1
 authors = ["Roland Tepp"]
-repository = "https://github.com/luolong/java-analyzer"
+repository = "https://github.com/java-analyzer/java-analyzer"
 
 [language_servers.java-analyzer]
 name = "Java Analyzer"

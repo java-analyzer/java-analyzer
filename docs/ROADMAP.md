@@ -8,7 +8,7 @@ Prior to `v1.0.0`, minor `0.x.0` milestones track cohesive user-facing capabilit
 
 | Milestone | Theme | Specs & Deliverables | Status |
 |-----------|-------|----------------------|--------|
-| **`v0.1.0`** | **Core Semantic Engine & Fast Navigation** | **0001–0009** (done), **0017–0018** (done), **0020 Phase A** (done), **0021 Phase 1** (done), **0022** *(release & publishing pipeline)*, Zed/VSCode/Neovim/Helix clients | In progress (`0022` final step) |
+| **`v0.1.0`** | **Core Semantic Engine & Fast Navigation** | **0001–0009** (done), **0017–0018** (done), **0020 Phase A** (done), **0021 Phase 1** (done), **0022** (done), Zed/VSCode/Neovim/Helix clients | Ready to tag |
 | **`v0.2.0`** | **Authoring Essentials & Public Docs Portal** | **0010** (Code Completion + auto-import), **0011** (References, Highlight, Workspace Symbols, Rename), **0019** (Astro/Starlight GitHub Pages site & Diátaxis docs) | Planned |
 | **`v0.3.0`** | **Live Typechecking, Null-Safety & Quick-Fixes** | **0012** (Semantic Diagnostics, Quick-Fix Code Actions, New Java Type Templates), **0020 Phase B** (Semantic Diagnostic Conformance), **0021 Phase 2** (Null-Safety Inspections) | Planned |
 | **`v0.4.0`** | **Rich Editor Ergonomics** | **0013** (`signatureHelp`, `inlayHint` for `var`/chains/params, `semanticTokens/full`, `foldingRange`) | Planned |
@@ -34,6 +34,7 @@ Prior to `v1.0.0`, minor `0.x.0` milestones track cohesive user-facing capabilit
 | **0018** | Reproducible 9-repo × 4-server LSP benchmark suite (`cargo xtask bench` / `bench-plot`), light/dark SVG charts & interactive Vega-Lite HTML report (`BENCHMARKS.md`) | Done |
 | **0020 (Phase A)** | Rich `ide::Diagnostic` codes/related-info/help, Tier 1 `rustc`-style ASCII caret snapshots + UX invariants, Tier 2 `cargo xtask diag-conformance --phase syntax` | Done (Phase B in `v0.3.0`) |
 | **0021 (Phase 1)** | Source-agnostic JSpecify 1.0 & third-party nullability (`NullnessScope`, `NullabilitySource`), JLS §9.7.4 placement, binary `RuntimeVisible*`/`RuntimeInvisible*` decoding, concise `User?`/`User!` hover | Done (Phase 2 in `v0.3.0`) |
+| **0022** | Cross-platform release packaging (`cargo xtask release-prep` & `dist`), `.github/workflows/{ci,release,nightly}.yml`, `mise` & `cargo-binstall` metadata, auto-upgrading Zed & universal VS Code extensions | Done |
 | **CLI & Clients** | Unified `usage-rs` v7 CLI (`#[usage(run)]` dispatch, `.usage.kdl` specs, `completion <bash\|zsh\|fish>`), Zed, VSCode, Neovim, and Helix client configs (`editors/`) | Done |
 
 ---

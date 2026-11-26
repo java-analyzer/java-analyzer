@@ -68,13 +68,33 @@ This project is split into several pure, decoupled crates to ensure fast, increm
 
 ### 1. Install the language server
 
-```sh
-cargo install --path crates/java-analyzer
-```
+Prebuilt binaries are published on [GitHub Releases](https://github.com/java-analyzer/java-analyzer/releases) for macOS (`aarch64`/`x86_64`), Linux (`x86_64`/`aarch64` static `musl`), and Windows (`x86_64`).
 
-This puts the `java-analyzer` binary in `~/.cargo/bin`; make sure that directory is on your `PATH`. The server speaks LSP over stdio.
+- **mise** (recommended):
 
-To install dynamic shell completions (supported for `zsh`, `bash`, `fish`, and others):
+  ```sh
+  mise use -g github:java-analyzer/java-analyzer
+  ```
+
+- **cargo-binstall**:
+
+  ```sh
+  cargo binstall java-analyzer
+  ```
+
+- **Cargo (from GitHub)**:
+
+  ```sh
+  cargo install --git https://github.com/java-analyzer/java-analyzer java-analyzer
+  ```
+
+- **Build from source**:
+
+  ```sh
+  cargo install --path crates/java-analyzer
+  ```
+
+The server speaks LSP over stdio. To install dynamic shell completions (supported for `zsh`, `bash`, `fish`, and others):
 
 ```sh
 java-analyzer completion zsh --install
@@ -84,8 +104,8 @@ java-analyzer completion zsh --install
 
 Clients live in [`editors/`](editors/README.md); see that file for full details and settings.
 
-- **Zed**: run `zed: install dev extension` and select `editors/zed`. Requires Zed's Java extension for the Java language.
-- **VSCode**: build and install the extension.
+- **Zed**: run `zed: install dev extension` and select `editors/zed`. Requires Zed's Java extension for the Java language. Automatically downloads and updates `java-analyzer` from GitHub Releases when not overridden by `lsp.java-analyzer.binary.path` or `PATH`.
+- **VSCode / Cursor / VSCodium**: install the universal `.vsix` attached to [GitHub Releases](https://github.com/java-analyzer/java-analyzer/releases) (`code --install-extension java-analyzer-<version>.vsix`), or package it locally:
 
   ```sh
   cd editors/vscode
@@ -93,6 +113,7 @@ Clients live in [`editors/`](editors/README.md); see that file for full details 
   code --install-extension java-analyzer-0.1.0.vsix
   ```
 
+  When `javaAnalyzer.server.path` is empty (default), the extension automatically downloads, SHA-256 verifies, and updates `java-analyzer` from GitHub Releases (controlled by `javaAnalyzer.updates.channel`), falling back to `PATH` when offline.
 - **Neovim**: add `editors/nvim` to your runtimepath, then call `require("java-analyzer").setup()` (or `vim.lsp.enable("java_analyzer")` on Neovim 0.11+).
 - **Helix**: merge [`editors/helix/languages.toml`](editors/helix/languages.toml) into `~/.config/helix/languages.toml` (or `.helix/languages.toml`) and verify with `hx --health java`.
 

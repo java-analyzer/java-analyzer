@@ -1,0 +1,239 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag override (e.g. v0.1.0 or nightly)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  prepare:
+    name: Prepare Release Metadata
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
+      is_nightly: ${{ steps.meta.outputs.is_nightly }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Determine release tag and verify manifests
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag || github.ref_name }}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [ "$tag" = "nightly" ]; then
+            echo "is_nightly=true" >> "$GITHUB_OUTPUT"
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$tag" == *-* ]]; then
+            echo "is_nightly=false" >> "$GITHUB_OUTPUT"
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_nightly=false" >> "$GITHUB_OUTPUT"
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [[ "$tag" == v* ]]; then
+            cargo xtask release-prep "${tag#v}" --check
+          fi
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cross: false
+            musl: false
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            cross: true
+            musl: false
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: false
+            musl: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            cross: false
+            musl: true
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            cross: false
+            musl: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install musl toolchain
+        if: matrix.musl
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Build host binary for shell completions (cross-compile)
+        if: matrix.cross
+        shell: bash
+        run: cargo build --release -p java-analyzer
+
+      - name: Build release binary
+        shell: bash
+        run: cargo build --release --target ${{ matrix.target }} -p java-analyzer
+
+      - name: Package release archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--target "${{ matrix.target }}" --tag "${{ needs.prepare.outputs.tag }}" --out-dir target/dist)
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            args+=(--completions-bin target/release/java-analyzer)
+          fi
+          cargo xtask dist "${args[@]}"
+
+      - name: Smoke test unpacked archive (Unix)
+        if: matrix.os != 'windows-latest' && !matrix.cross
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ needs.prepare.outputs.tag }}"
+          target="${{ matrix.target }}"
+          stem="java-analyzer-${tag}-${target}"
+          archive="target/dist/${stem}.tar.gz"
+          stage="$(mktemp -d)"
+          trap 'rm -rf "$stage"' EXIT
+          tar -xzf "$archive" -C "$stage"
+          "$stage/$stem/java-analyzer" --version
+          test -s "$stage/$stem/completions/_java-analyzer"
+          test -s "$stage/$stem/completions/java-analyzer.bash"
+          test -s "$stage/$stem/completions/java-analyzer.fish"
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd target/dist && sha256sum -c SHA256SUMS)
+          else
+            (cd target/dist && shasum -a 256 -c SHA256SUMS)
+          fi
+
+      - name: Smoke test unpacked archive (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $tag = "${{ needs.prepare.outputs.tag }}"
+          $target = "${{ matrix.target }}"
+          $stem = "java-analyzer-$tag-$target"
+          $archive = "target/dist/$stem.zip"
+          $stage = Join-Path $env:RUNNER_TEMP "smoke-$stem"
+          Expand-Archive -Path $archive -DestinationPath $stage -Force
+          & "$stage/$stem/java-analyzer.exe" --version
+          if (-not (Test-Path "$stage/$stem/completions/_java-analyzer")) { throw "Missing zsh completion" }
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            target/dist/java-analyzer-*.tar.gz
+            target/dist/java-analyzer-*.zip
+
+      - name: Upload target artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: target/dist/*
+          if-no-files-found: error
+
+  package-vscode:
+    name: Package Universal VSIX
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+      - name: Compile and package VSIX
+        run: |
+          set -euo pipefail
+          cd editors/vscode
+          npm ci
+          npm run compile
+          npx vsce package
+      - name: Attest VSIX provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: editors/vscode/*.vsix
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-vscode
+          path: editors/vscode/*.vsix
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: [prepare, build, package-vscode]
+    runs-on: ubuntu-latest
+    env:
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Assemble release assets and SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          cp artifacts/dist-*/*.tar.gz release-assets/ 2>/dev/null || true
+          cp artifacts/dist-*/*.zip release-assets/ 2>/dev/null || true
+          cp artifacts/dist-vscode/*.vsix release-assets/
+          cat artifacts/dist-*/SHA256SUMS | LC_ALL=C sort -k2 -u > release-assets/SHA256SUMS
+          first_info="$(find artifacts -name 'BUILD_INFO.json' | head -n 1)"
+          cp "$first_info" release-assets/BUILD_INFO.json
+          ls -la release-assets
+          cat release-assets/SHA256SUMS
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: ${{ needs.prepare.outputs.tag }}
+          prerelease: ${{ needs.prepare.outputs.is_prerelease == 'true' }}
+          generate_release_notes: ${{ needs.prepare.outputs.is_nightly != 'true' }}
+          make_latest: ${{ needs.prepare.outputs.is_prerelease != 'true' }}
+          files: release-assets/*
+      - name: Publish to Open VSX
+        if: startsWith(github.ref, 'refs/tags/v') && env.OVSX_PAT != ''
+        run: npx ovsx publish release-assets/*.vsix -p "$OVSX_PAT"
+      - name: Publish to VS Code Marketplace
+        if: startsWith(github.ref, 'refs/tags/v') && env.VSCE_PAT != ''
+        run: npx @vscode/vsce publish --packagePath release-assets/*.vsix -p "$VSCE_PAT"

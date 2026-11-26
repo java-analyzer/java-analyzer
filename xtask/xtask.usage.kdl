@@ -221,6 +221,30 @@ cmd bench-gen-plain help="Generate the synthetic plain-small Java corpus" {
     }
     flag "-h --help" help="Print help" action=help builtin=#true
 }
+cmd release-prep help="Synchronize or verify release version strings across workspace manifests" {
+    flag --check help="Verify version synchronization and CHANGELOG.md without modifying files"
+    flag --allow-missing-changelog help="Allow updating or checking manifests even if CHANGELOG.md lacks `## [<VERSION>]`"
+    flag "-h --help" help="Print help" action=help builtin=#true
+    arg "[VERSION]" help="Target SemVer version (`X.Y.Z` or `X.Y.Z-rc.N`); defaults to workspace version in `--check` mode"
+}
+cmd dist help="Build a release archive, SHA256SUMS, and BUILD_INFO.json" {
+    flag --bin-path help="Path to the compiled java-analyzer binary [target[/<target>]/release/java-analyzer[.exe]]" {
+        arg <PATH>
+    }
+    flag --target help="Target triple [host target]" {
+        arg <TRIPLE>
+    }
+    flag --tag help="Release tag (e.g. `v0.1.0` or `nightly`) [v<workspace_version>]" {
+        arg <TAG>
+    }
+    flag --completions-bin help="Host-runnable java-analyzer binary used to generate shell completions when cross-compiling" {
+        arg <PATH>
+    }
+    flag --out-dir help="Output directory for release archive, SHA256SUMS, and BUILD_INFO.json" default="target/dist" {
+        arg <DIR>
+    }
+    flag "-h --help" help="Print help" action=help builtin=#true
+}
 cmd completion help="Generate shell completions" {
     use completion
     flag "-h --help" help="Print help" action=help builtin=#true

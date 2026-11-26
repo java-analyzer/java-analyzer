@@ -1,4 +1,6 @@
 src/**
+out/test/**
 tsconfig.json
 **/*.map
+*.vsix
 node_modules/.bin/**
